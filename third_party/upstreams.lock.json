@@ -117,6 +117,28 @@
         "docs",
         "static"
       ]
+    },
+    {
+      "name": "go-sqlite3",
+      "url": "https://github.com/mattn/go-sqlite3.git",
+      "commit": "8bf7a8a844faf952aa0245b4c0ad0a47e84f4efd",
+      "referenceBranch": "v1.14.32",
+      "purpose": "SQLite persistence driver documentation and source reference",
+      "licenseHint": "MIT",
+      "status": "Gateway dependency pinned in go.mod; Android runtime verification pending",
+      "sparse": []
+    },
+    {
+      "name": "modernc-sqlite",
+      "url": "https://gitlab.com/cznic/sqlite.git",
+      "commit": "84c00b42e43aa9af62ef42e03684f7ad767b1756",
+      "referenceBranch": "v1.38.2",
+      "purpose": "SQLite API/documentation reference; generated libraries and test databases excluded",
+      "licenseHint": "BSD-3-Clause",
+      "status": "Gateway dependency pinned in go.mod; Android runtime verification pending",
+      "sparse": [
+        "examples"
+      ]
     }
   ]
 }

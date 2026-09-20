@@ -3,7 +3,7 @@
 /third_party/sources/
 /.codegraph/
 /.tools/
-/.local/
+**/.local/
 /dist/
 **/.gradle/
 **/.kotlin/

@@ -12,3 +12,7 @@ Local sources/ clones preserve their upstream licenses and are excluded from the
 - resources/ui-concepto.png: user-provided reference including third-party brands/artwork; not included in the APK.
 
 The author has not selected a license for first-party project code. Decide before publication.
+
+- modernc.org/sqlite v1.38.2: BSD-3-Clause; Linux gateway dependency. See modernc-sqlite-LICENSE.txt and the locked source reference. SQLite itself is public-domain upstream code.
+- github.com/mattn/go-sqlite3 v1.14.32: MIT; Android/Termux gateway driver (CGO), not an APK dependency. See go-sqlite3-LICENSE.txt.
+- Go transitive dependency versions are locked by gateway/go.mod and go.sum. The distribution inventory must include their notices before a public binary release.

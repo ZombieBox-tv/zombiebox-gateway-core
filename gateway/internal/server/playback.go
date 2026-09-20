@@ -1,0 +1,293 @@
+package server
+
+import (
+	"context"
+	"crypto/subtle"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/providers"
+)
+
+type session struct {
+	device        string
+	ticket        string
+	expires       time.Time
+	source        providers.Source
+	ctx           context.Context
+	cancel        context.CancelFunc
+	resources     map[string]string
+	resourceOrder []string
+}
+
+func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	var req struct {
+		ItemID string `json:"itemId"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	var found *providers.Source
+	for _, src := range s.catalog(r.Context()) {
+		if src.Item.ID == req.ItemID {
+			copy := src
+			found = &copy
+			break
+		}
+	}
+	if found == nil {
+		fail(w, 404, "item_not_found")
+		return
+	}
+	resolved, err := providers.Resolve(r.Context(), *found)
+	if err != nil {
+		fail(w, 502, "stream_unavailable")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, x := range s.sessions {
+		if time.Now().After(x.expires) {
+			x.cancel()
+			delete(s.sessions, id)
+		}
+	}
+	if len(s.sessions) >= 64 {
+		fail(w, 429, "session_limit")
+		return
+	}
+	id := randomID(16)
+	ticket := randomID(24)
+	expires := time.Now().Add(6 * time.Hour)
+	ctx, cancel := context.WithDeadline(context.Background(), expires)
+	s.sessions[id] = &session{device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	var p domain.Progress
+	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
+	resume := p.PositionMS
+	if p.State == "ENDED" || resolved.Live {
+		resume = 0
+	}
+	plan := domain.Plan{Version: 1, SessionID: id, Mode: "DIRECT_PLAY", URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
+	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
+	respond(w, 201, plan)
+}
+func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	var p domain.Progress
+	if !decode(w, r, &p) {
+		return
+	}
+	if p.PositionMS < 0 || p.DurationMS < 0 || p.PositionMS > 7*24*60*60*1000 {
+		fail(w, 400, "invalid_progress")
+		return
+	}
+	valid := map[string]bool{"PLAYING": true, "PAUSED": true, "BUFFERING": true, "ENDED": true, "FAILED": true, "STOPPED": true}
+	if !valid[p.State] {
+		fail(w, 400, "invalid_state")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := s.sessions[r.PathValue("session")]
+	if sess == nil || sess.device != d.ID {
+		fail(w, 404, "session_not_found")
+		return
+	}
+	p.Item = sess.source.Item
+	p.UpdatedAt = time.Now().Unix()
+	count, err := s.db.Count(r.Context(), "progress:"+d.ID)
+	if err != nil {
+		fail(w, 500, "storage_error")
+		return
+	}
+	if count >= 200 {
+		var old domain.Progress
+		if s.db.Get(r.Context(), "progress:"+d.ID, p.Item.ID, &old) != nil {
+			fail(w, 409, "history_limit")
+			return
+		}
+	}
+	if s.db.Put(r.Context(), "progress:"+d.ID, p.Item.ID, p) != nil {
+		fail(w, 500, "storage_error")
+		return
+	}
+	respond(w, 200, map[string]string{"state": p.State})
+}
+func (s *Server) stop(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := r.PathValue("session")
+	sess := s.sessions[id]
+	if sess == nil || sess.device != d.ID {
+		fail(w, 404, "session_not_found")
+		return
+	}
+	sess.cancel()
+	delete(s.sessions, id)
+	s.events.publish(d.ID, "playback.stopped", map[string]string{"sessionId": id})
+	respond(w, 200, map[string]string{"state": "STOPPED"})
+}
+func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	sess := s.sessions[r.PathValue("session")]
+	if sess == nil || time.Now().After(sess.expires) || subtle.ConstantTimeCompare([]byte(sess.ticket), []byte(r.URL.Query().Get("ticket"))) != 1 {
+		s.mu.Unlock()
+		fail(w, 401, "invalid_stream_ticket")
+		return
+	}
+	src := sess.source
+	if resource := r.PathValue("resource"); resource != "" {
+		raw, ok := sess.resources[resource]
+		if !ok {
+			s.mu.Unlock()
+			fail(w, 404, "resource_not_found")
+			return
+		}
+		src.URL = raw
+		src.Path = ""
+		src.MIME = "application/octet-stream"
+		if strings.HasSuffix(strings.ToLower(strings.Split(raw, "?")[0]), ".m3u8") {
+			src.MIME = "application/vnd.apple.mpegurl"
+		}
+		a, _ := url.Parse(sess.source.URL)
+		b, _ := url.Parse(raw)
+		if a == nil || b == nil || a.Scheme != b.Scheme || a.Host != b.Host {
+			src.Headers = nil
+		}
+	}
+	s.mu.Unlock()
+	select {
+	case s.streams <- struct{}{}:
+		defer func() { <-s.streams }()
+	default:
+		fail(w, 429, "stream_limit")
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stopCancel := context.AfterFunc(sess.ctx, cancel)
+	defer stopCancel()
+	r = r.WithContext(ctx)
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	w.Header().Set("Content-Type", src.MIME)
+	w.Header().Set("Cache-Control", "private, no-store")
+	if src.Path != "" {
+		f, err := os.Open(src.Path)
+		if err != nil {
+			fail(w, 404, "media_unavailable")
+			return
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			fail(w, 500, "media_error")
+			return
+		}
+		http.ServeContent(contextWriter{ResponseWriter: w, ctx: r.Context()}, r, "media", info.ModTime(), f)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), "GET", src.URL, nil)
+	if err != nil {
+		fail(w, 502, "stream_unavailable")
+		return
+	}
+	req.Header = src.Headers.Clone()
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	if value := r.Header.Get("Range"); value != "" {
+		req.Header.Set("Range", value)
+	}
+	// Stream transport has header/idle timeouts, but no total timeout on long media bodies.
+	res, err := mediaHTTP.Do(req)
+	if err != nil {
+		fail(w, 502, "stream_unavailable")
+		return
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 && res.StatusCode != 206 {
+		fail(w, 502, "stream_unavailable")
+		return
+	}
+	if strings.Contains(src.MIME, "mpegurl") || strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "mpegurl") {
+		body, err := io.ReadAll(io.LimitReader(res.Body, (512<<10)+1))
+		if err != nil || len(body) > 512<<10 {
+			fail(w, 502, "invalid_playlist")
+			return
+		}
+		rewritten, err := s.rewritePlaylist(sess, r.PathValue("session"), res.Request.URL.String(), string(body))
+		if err != nil {
+			fail(w, 502, "invalid_playlist")
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		_, _ = io.WriteString(w, rewritten)
+		return
+	}
+	for _, key := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"} {
+		if value := res.Header.Get(key); value != "" {
+			w.Header().Set(key, value)
+		}
+	}
+	w.WriteHeader(res.StatusCode)
+	buffer := make([]byte, 32<<10)
+	for {
+		n, err := res.Body.Read(buffer)
+		if n > 0 {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// Deadlines apply to each upstream read, including a stalled media body.
+type mediaConn struct{ net.Conn }
+
+func (c mediaConn) Read(b []byte) (int, error) {
+	_ = c.SetReadDeadline(time.Now().Add(30 * time.Second))
+	return c.Conn.Read(b)
+}
+
+var mediaHTTP = &http.Client{Transport: &http.Transport{
+	DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		c, e := (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, address)
+		if e != nil {
+			return nil, e
+		}
+		return mediaConn{c}, nil
+	},
+	TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 8 * time.Second, IdleConnTimeout: 30 * time.Second, MaxIdleConns: 8, MaxConnsPerHost: 4,
+}, CheckRedirect: providers.SafeRedirect}
+
+// Close cancels streams before the process drains its HTTP server.
+func (s *Server) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, x := range s.sessions {
+		x.cancel()
+		delete(s.sessions, id)
+	}
+}
+
+// Bound local media writes and observe explicit session cancellation.
+type contextWriter struct {
+	http.ResponseWriter
+	ctx context.Context
+}
+
+func (w contextWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	return w.ResponseWriter.Write(p)
+}

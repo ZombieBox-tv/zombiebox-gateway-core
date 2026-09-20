@@ -5,15 +5,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"zombiebox.local/gateway/internal/store"
 )
 
 func TestHealthContract(t *testing.T) {
-	h := Handler()
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(db, Options{PairingCode: "123456"})
 	for _, tc := range []struct {
 		method, path string
 		status       int
 	}{
-		{"GET", "/health", 200}, {"POST", "/health", 405}, {"GET", "/v1/home", 404},
+		{"GET", "/health", 200}, {"POST", "/health", 405}, {"GET", "/v1/home", 401},
 	} {
 		r := httptest.NewRecorder()
 		h.ServeHTTP(r, httptest.NewRequest(tc.method, tc.path, nil))
