@@ -1,0 +1,23 @@
+# Local device evidence: 6+ GB, firmware, logs and potentially private data.
+/resources/vizio-costar-native-stuff/
+/third_party/sources/
+/.codegraph/
+/.tools/
+/.local/
+/dist/
+**/.gradle/
+**/.kotlin/
+**/build/
+**/local.properties
+.idea/
+*.iml
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.apk
+*.aab
+*.log
+__pycache__/
+*.pyc

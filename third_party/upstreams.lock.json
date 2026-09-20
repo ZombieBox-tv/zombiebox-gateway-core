@@ -1,0 +1,122 @@
+{
+  "lockVersion": 1,
+  "capturedAt": "2026-09-20",
+  "note": "Reference source snapshots, not approved runtime versions. Preserve upstream notices.",
+  "repositories": [
+    {
+      "name": "ffmpeg",
+      "url": "https://github.com/FFmpeg/FFmpeg.git",
+      "commit": "fddc59cf34b303a269493aaf7ec7c80e390f25f5",
+      "referenceBranch": "master",
+      "purpose": "Media process boundary: ffprobe/remux/transcode; documentation checkout",
+      "licenseHint": "NOASSERTION",
+      "status": "reference-only; not integrated",
+      "sparse": [
+        "doc"
+      ]
+    },
+    {
+      "name": "youtube-js",
+      "url": "https://github.com/LuanRT/YouTube.js.git",
+      "commit": "30efa610075a5911b9226991d80ae5ffc7840c16",
+      "referenceBranch": "main",
+      "purpose": "YouTubeProvider metadata/stream extraction behind Node adapter",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "yt-cast-receiver",
+      "url": "https://github.com/patrickkfkan/yt-cast-receiver.git",
+      "commit": "83d61fa169e33c5e0046c2440b99a17cd9493e73",
+      "referenceBranch": "master",
+      "purpose": "YouTube remote commands -> Zombie PlaybackSession; no direct player",
+      "licenseHint": null,
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "plexgo",
+      "url": "https://github.com/LukasParke/plexgo.git",
+      "commit": "c64644ba11d2d8eadbea55db185b369c10f89631",
+      "referenceBranch": "main",
+      "purpose": "PlexProvider SDK candidate; provider DTOs stay gateway-side",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "stremio-addon-sdk",
+      "url": "https://github.com/Stremio/stremio-addon-sdk.git",
+      "commit": "83bd843ee84135857db52273297d2ef5929c7366",
+      "referenceBranch": "master",
+      "purpose": "Stremio manifest/catalog/meta/stream/subtitles protocol reference",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "go-librespot",
+      "url": "https://github.com/devgianlu/go-librespot.git",
+      "commit": "57d7278d94a9233060c2a6238f5926ffd1e72de4",
+      "referenceBranch": "master",
+      "purpose": "Spotify Connect external process; GPL distribution review required",
+      "licenseHint": "GPL-3.0",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "uxplay",
+      "url": "https://github.com/FDH2/UxPlay.git",
+      "commit": "57ea83411d5f7e0b38c5841987439340543f025c",
+      "referenceBranch": "master",
+      "purpose": "AirPlay external process; GPL distribution review required",
+      "licenseHint": "GPL-3.0",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "mediamtx",
+      "url": "https://github.com/bluenviron/mediamtx.git",
+      "commit": "048255986f7e04b859b4c4efe651448ec785ecd4",
+      "referenceBranch": "main",
+      "purpose": "Android Mirror relay and live media routing",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "threadfin",
+      "url": "https://github.com/Threadfin/Threadfin.git",
+      "commit": "6b9c0ccf16164eb362af0a44660228267734c5aa",
+      "referenceBranch": "main",
+      "purpose": "Full IPTV/EPG external process; Edge feasibility pending",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "browservice",
+      "url": "https://github.com/ttalvitie/browservice.git",
+      "commit": "02601b047f7abdc90545c9dc669d0081d7968c34",
+      "referenceBranch": "master",
+      "purpose": "RebrowserProvider candidate/reference; unmaintained, no deployment yet",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "serenity-android",
+      "url": "https://github.com/NineWorlds/serenity-android.git",
+      "commit": "01adbf2bac2d7431c71e7e0e3ba8a27a8674b7ee",
+      "referenceBranch": "develop",
+      "purpose": "Google TV UI/player reference only, never runtime dependency",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated"
+    },
+    {
+      "name": "jellyfin-org",
+      "url": "https://github.com/jellyfin/jellyfin.org.git",
+      "commit": "9fbc11c1934f097083407814b2ec81c82556c935",
+      "referenceBranch": "master",
+      "purpose": "Official Jellyfin API documentation; OpenAPI client generation later",
+      "licenseHint": null,
+      "status": "reference-only; not integrated",
+      "sparse": [
+        "docs",
+        "static"
+      ]
+    }
+  ]
+}
