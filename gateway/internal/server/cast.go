@@ -56,6 +56,10 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 	}
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
+	if strings.HasPrefix(sender.ID, "companion-") && !s.companions.Active(r.Context(), strings.TrimPrefix(sender.ID, "companion-"), request.ReceiverID) {
+		fail(w, 403, "companion_revoked")
+		return
+	}
 	busy := s.receiverBusy(request.ReceiverID, "cast")
 	if busy && !request.ReplaceExisting {
 		fail(w, 409, "receiver_busy")
@@ -166,6 +170,9 @@ func (s *Server) castReady(w http.ResponseWriter, r *http.Request, d domain.Devi
 	s.mu.Lock()
 	var candidate domain.Device
 	valid := s.casts[c.id] == c && time.Now().Before(c.expires) && s.db.Get(ctx, "devices", c.receiver, &candidate) == nil && candidate.Preferences.AllowCasting
+	if strings.HasPrefix(c.sender, "companion-") && !s.companions.Active(ctx, strings.TrimPrefix(c.sender, "companion-"), c.receiver) {
+		valid = false
+	}
 	permitted := !busy || (c.replaceExisting && candidate.Preferences.AllowReceiverHandoff)
 	if !valid || !permitted || ctx.Err() != nil {
 		s.mu.Unlock()

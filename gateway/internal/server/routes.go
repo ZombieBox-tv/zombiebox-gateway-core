@@ -8,6 +8,23 @@ import (
 )
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("POST /v1/device/companions/invitations", s.auth(s.companionInvite))
+	s.mux.HandleFunc("GET /v1/device/companions", s.auth(s.companionPending))
+	s.mux.HandleFunc("POST /v1/device/companions/{request}/decision", s.auth(s.companionDecision))
+	s.mux.HandleFunc("DELETE /v1/device/companions/{grant}", s.auth(s.companionRevoke))
+	s.mux.HandleFunc("POST /v1/device/remote/poll", s.auth(s.companionPoll))
+	s.mux.HandleFunc("POST /v1/device/remote/ack", s.auth(s.companionAck))
+	s.mux.HandleFunc("POST /v1/companion/join", s.companionJoin)
+	s.mux.HandleFunc("POST /v1/companion/requests/{request}", s.companionRequest)
+	s.mux.HandleFunc("POST /v1/companion/proof", s.companionProof)
+	s.mux.HandleFunc("GET /v1/companion/status", s.companionAuth(s.companionStatus))
+	s.mux.HandleFunc("POST /v1/companion/commands", s.companionAuth(s.companionCommand))
+	s.mux.HandleFunc("DELETE /v1/companion/session", s.companionAuth(s.companionForget))
+	s.mux.HandleFunc("POST /v1/companion/cast", s.companionAuth(s.companionCast))
+	for _, pattern := range []string{"PUT /v1/companion/cast/{cast}", "DELETE /v1/companion/cast/{cast}", "POST /v1/companion/cast/{cast}/ready"} {
+		s.mux.HandleFunc(pattern, s.companionAuth(s.companionCastOperation))
+	}
+
 	s.mux.HandleFunc("GET /v1/search", s.auth(s.globalSearch))
 	s.mux.HandleFunc("GET /v1/network/sample", s.auth(s.networkDownload))
 	s.mux.HandleFunc("POST /v1/device/network", s.auth(s.networkReport))

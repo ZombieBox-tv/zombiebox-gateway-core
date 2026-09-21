@@ -134,6 +134,7 @@ func TestWireContracts(t *testing.T) {
 	samples["YouTubeReceiverState"] = call(s, "POST", "/v1/youtube/receiver", `{}`, "contract-device", token, "").Body.Bytes()
 	hardware, _ := json.Marshal(hardwareFixture())
 	samples["HardwareReport"] = call(s, "PUT", "/v1/device/hardware", string(hardware), "contract-device", token, "").Body.Bytes()
+	companionContractSamples(t, s, samples, "contract-device", token)
 	data, err := json.Marshal(samples)
 	if err != nil {
 		t.Fatal(err)
@@ -141,4 +142,39 @@ func TestWireContracts(t *testing.T) {
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func companionContractSamples(t *testing.T, s *Server, samples map[string]json.RawMessage, id, token string) {
+	t.Helper()
+	invitation := call(s, "POST", "/v1/device/companions/invitations", `{"gateway":"http://192.0.2.10:8090"}`, id, token, "")
+	if invitation.Code != 201 {
+		t.Fatal(invitation.Body)
+	}
+	samples["CompanionInvitation"] = invitation.Body.Bytes()
+	var invitationBody struct{ Code string }
+	_ = json.Unmarshal(invitation.Body.Bytes(), &invitationBody)
+	joined := call(s, "POST", "/v1/companion/join", `{"name":"Phone","code":"`+invitationBody.Code+`"}`, "", "", "")
+	if joined.Code != 201 {
+		t.Fatal(joined.Body)
+	}
+	samples["CompanionJoinResponse"] = joined.Body.Bytes()
+	var body struct {
+		Request struct{ ID string }
+		Token   string
+	}
+	_ = json.Unmarshal(joined.Body.Bytes(), &body)
+	approved := call(s, "POST", "/v1/device/companions/"+body.Request.ID+"/decision", `{"accept":true}`, id, token, "")
+	if approved.Code != 200 {
+		t.Fatal(approved.Body)
+	}
+	samples["CompanionInventory"] = call(s, "GET", "/v1/device/companions", "", id, token, "").Body.Bytes()
+	samples["CompanionRequest"] = call(s, "POST", "/v1/companion/requests/"+body.Request.ID, `{"token":"`+body.Token+`"}`, "", "", "").Body.Bytes()
+	call(s, "POST", "/v1/device/remote/poll", `{"active":true}`, id, token, "")
+	command := call(s, "POST", "/v1/companion/commands", `{"action":"OK"}`, body.Request.ID, body.Token, "")
+	if command.Code != 202 {
+		t.Fatal(command.Body)
+	}
+	samples["CompanionCommand"] = command.Body.Bytes()
+	samples["CompanionPoll"] = call(s, "POST", "/v1/device/remote/poll", `{"active":true}`, id, token, "").Body.Bytes()
+	samples["CompanionStatus"] = call(s, "GET", "/v1/companion/status", "", body.Request.ID, body.Token, "").Body.Bytes()
 }

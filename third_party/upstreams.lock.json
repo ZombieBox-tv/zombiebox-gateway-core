@@ -218,6 +218,27 @@
       "sparse": [
         "app/src/main"
       ]
+    },
+    {
+      "name": "go-qrcode",
+      "url": "https://github.com/skip2/go-qrcode.git",
+      "commit": "da1b6568686e89143e94f980a98bc2dbd5537f13",
+      "referenceBranch": "master",
+      "purpose": "Gateway-only encoder for temporary consented pairing QR invitations",
+      "licenseHint": "MIT",
+      "status": "integrated for consented pairing; physical camera/TV acceptance pending"
+    },
+    {
+      "name": "zxing",
+      "url": "https://github.com/zxing/zxing.git",
+      "commit": "463d1ea7ed44f2fd6f46e234af1dba9616512e66",
+      "referenceBranch": "zxing-3.3.3",
+      "purpose": "Cast QR decoder 3.3.3: pure Java compatibility without Play Services or JNI",
+      "licenseHint": "Apache-2.0",
+      "status": "integrated for consented pairing; physical camera/TV acceptance pending",
+      "sparse": [
+        "core"
+      ]
     }
   ]
 }

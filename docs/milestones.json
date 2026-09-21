@@ -17,7 +17,8 @@
     "Dev.20: Automatic Spotify/AirPlay handoff with confirmed-activity selection and replacement preservation; fixed low-bandwidth conversion profile. Product and physical exit gates remain open.",
     "Dev.21: Measured LAN bitrate planning, bounded federated provider search with Plex preview resolution and Stremio search catalogs, and read-only state inspection/consistent snapshot staging. Product/physical exit gates remain open.",
     "Dev.22: Device-scoped receiver replacement, readiness-gated Cast handoff with target consent, revoked YouTube command/source fencing and receiver-bound playback resolution. Product and physical exit gates remain open.",
-    "Dev.23: Bounded credential-free UDP discovery, discovery-only CLI and pinned capture research references. Product and physical gates remain open."
+    "Dev.23: Bounded credential-free UDP discovery, discovery-only CLI and pinned capture research references. Product and physical gates remain open.",
+    "Dev.24: Target-scoped QR/code consent, durable grants, proof-before-token reconnection, bounded remote commands/receipts and scoped Cast authorization/revocation. QR rendering uses pinned MIT Go code; optional services remain independent. Product and physical gates remain open."
   ],
   "milestones": [
     {
@@ -91,5 +92,5 @@
       "remoteId": null
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.23"
+  "developmentCheckpoint": "v0.1.0-dev.24"
 }

@@ -75,3 +75,9 @@ No product or physical acceptance gate closes.
 
 Bounded credential-free UDP discovery and optional discovery-only process; locked scrcpy/sndcpy research references.
 No product or physical acceptance gate closes.
+
+
+## dev.24 increment
+
+Target-scoped QR/code consent, durable grants, proof-before-token reconnection, bounded remote commands/receipts and scoped Cast authorization/revocation. QR rendering uses pinned MIT Go code; optional services remain independent.
+Full visual/capture policy, extended Remote, HEVC/4K and other product gates remain open; physical acceptance stays deferred.

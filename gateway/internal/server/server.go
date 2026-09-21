@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/catalog"
+	"zombiebox.local/gateway/internal/companion"
 	"zombiebox.local/gateway/internal/home"
 	"zombiebox.local/gateway/internal/receivers/inbox"
 
@@ -32,6 +33,7 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
+	companions         *companion.Service
 	networkSamples     map[string]networkSample
 	networkJobs        chan struct{}
 	searchJobs         chan struct{}
@@ -105,6 +107,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	s.streams = make(chan struct{}, 4)
 	s.mediaReceiverInbox = inbox.New(receiverAdapter{s}, receiverAdapter{s})
 	go s.reapMediaReceiver()
+	s.companions = companion.New(db, time.Now, randomID, func(target string) { s.events.publish(target, "companion.changed", nil) })
 	s.routes()
 	return s
 }

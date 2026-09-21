@@ -65,3 +65,9 @@ Verification: Go vet/race and 49 contract fixtures pass. Regression coverage inc
 
 Bounded credential-free UDP discovery, discovery-only CLI and pinned capture research references.
 Product exit gates and deferred physical acceptance remain open.
+
+
+## dev.24 increment
+
+Target-scoped QR/code consent, durable grants, proof-before-token reconnection, bounded remote commands/receipts and scoped Cast authorization/revocation. QR rendering uses pinned MIT Go code; optional services remain independent.
+Full visual/capture policy, extended Remote, HEVC/4K and other product gates remain open; physical acceptance stays deferred.
