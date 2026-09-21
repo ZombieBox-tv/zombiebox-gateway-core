@@ -36,8 +36,18 @@ func ValidHardware(report domain.HardwareReport) bool {
 		}
 	}
 	for _, codec := range report.Decoders {
-		if len(codec.Name) > 200 || len(codec.Types) > 16 {
+		if len(codec.Name) > 200 || len(codec.Types) > 16 || len(codec.ProbeCandidates) > 3 {
 			return false
+		}
+		seen := map[string]bool{}
+		for _, candidate := range codec.ProbeCandidates {
+			if seen[candidate] {
+				return false
+			}
+			seen[candidate] = true
+			if candidate != "h264-2160-high" && candidate != "hevc-1080-main" && candidate != "hevc-2160-main" {
+				return false
+			}
 		}
 		for _, mime := range codec.Types {
 			if len(mime) > 100 {

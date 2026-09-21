@@ -43,6 +43,7 @@ func DefaultPreferences() Preferences {
 }
 
 type Probe struct {
+	TestedAt     int64  `json:"testedAt,omitempty"`
 	FirstFrameMS int    `json:"firstFrameMs,omitempty"`
 	PositionMS   int    `json:"positionMs,omitempty"`
 	Completed    bool   `json:"completed,omitempty"`

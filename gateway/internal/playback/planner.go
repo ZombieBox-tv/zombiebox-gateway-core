@@ -20,7 +20,11 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 	}
 	native := true
 	for _, stream := range metadata.Streams {
-		if stream.Type == "video" && (stream.Codec != "h264" || !videoCandidate(stream, status)) {
+		compatible := stream.Codec == "h264" && videoCandidate(stream, status)
+		if stream.Codec == "hevc" || stream.Width > 1920 || stream.Height > 1080 {
+			compatible = extendedVideoCandidate(stream, metadata, capabilities)
+		}
+		if stream.Type == "video" && !compatible {
 			native = false
 		}
 		if stream.Type == "audio" && (stream.Codec != "aac" && stream.Codec != "mp3" || stream.Codec == "aac" && status("aac") == "FAIL") {

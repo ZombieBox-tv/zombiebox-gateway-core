@@ -66,12 +66,18 @@ type Stream struct {
 		Default int `json:"default"`
 		Forced  int `json:"forced"`
 	} `json:"disposition"`
-	Type    string `json:"codec_type"`
-	Codec   string `json:"codec_name"`
-	Profile string `json:"profile"`
-	Level   int    `json:"level"`
-	Width   int    `json:"width"`
-	Height  int    `json:"height"`
+	Type             string `json:"codec_type"`
+	Codec            string `json:"codec_name"`
+	Profile          string `json:"profile"`
+	Level            int    `json:"level"`
+	Width            int    `json:"width"`
+	Height           int    `json:"height"`
+	PixelFormat      string `json:"pix_fmt"`
+	FrameRate        string `json:"r_frame_rate"`
+	AverageFrameRate string `json:"avg_frame_rate"`
+	CodecTag         string `json:"codec_tag_string"`
+	ColorTransfer    string `json:"color_transfer"`
+	ColorPrimaries   string `json:"color_primaries"`
 }
 
 type Metadata struct {

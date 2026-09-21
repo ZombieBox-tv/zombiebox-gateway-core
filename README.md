@@ -81,3 +81,7 @@ No product or physical acceptance gate closes.
 
 Target-scoped QR/code consent, durable grants, proof-before-token reconnection, bounded remote commands/receipts and scoped Cast authorization/revocation. QR rendering uses pinned MIT Go code; optional services remain independent.
 Full visual/capture policy, extended Remote, HEVC/4K and other product gates remain open; physical acceptance stays deferred.
+
+## dev.25 increment
+
+Bounded HEVC Main and H.264 UHD30 playback planning, advertised extended probes, fresh advancing evidence and synthetic SDR fixtures. Shared by Full/Edge; physical acceptance remains open.

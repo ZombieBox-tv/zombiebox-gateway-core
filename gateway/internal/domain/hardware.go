@@ -1,8 +1,9 @@
 package domain
 
 type CodecHint struct {
-	Name  string   `json:"name"`
-	Types []string `json:"types"`
+	ProbeCandidates []string `json:"probeCandidates,omitempty"`
+	Name            string   `json:"name"`
+	Types           []string `json:"types"`
 }
 type HardwareReport struct {
 	IntegrationHints []string    `json:"integrationHints,omitempty"`

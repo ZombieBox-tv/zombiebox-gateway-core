@@ -16,11 +16,12 @@ import (
 )
 
 type probeAsset struct {
-	ID    string `json:"id"`
-	File  string `json:"-"`
-	URL   string `json:"url"`
-	Video bool   `json:"video"`
-	Kind  string `json:"kind,omitempty"`
+	ID       string `json:"id"`
+	File     string `json:"-"`
+	URL      string `json:"url"`
+	Video    bool   `json:"video"`
+	Kind     string `json:"kind,omitempty"`
+	Requires string `json:"requires,omitempty"`
 }
 
 var probeAssets = []probeAsset{
@@ -36,6 +37,9 @@ var probeAssets = []probeAsset{
 	{ID: "pause-resume", File: "baseline-360.mp4", Video: true, Kind: "pause-resume"},
 	{ID: "surface-reattach", File: "baseline-360.mp4", Video: true, Kind: "surface-reattach"},
 	{ID: "hls-h264-aac", File: "baseline.ts", Video: true, Kind: "hls"},
+	{ID: "h264-2160-high", File: "high-2160.mp4", Video: true, Requires: "h264-1080-high"},
+	{ID: "hevc-1080-main", File: "hevc-1080.mp4", Video: true, Requires: "h264-baseline-360"},
+	{ID: "hevc-2160-main", File: "hevc-2160.mp4", Video: true, Requires: "hevc-1080-main"},
 }
 
 func (s *Server) probeSignature(id, expires string) string {
@@ -65,6 +69,9 @@ func (s *Server) probeManifest(w http.ResponseWriter, r *http.Request, d domain.
 	}
 	expires := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
 	for _, asset := range probeAssets {
+		if asset.Requires != "" && (suite == 1 || r.URL.Query().Get("extended") != "1" || !probeCandidate(d, asset.ID)) {
+			continue
+		}
 		if suite == 1 && asset.Kind != "" {
 			continue
 		}
@@ -81,6 +88,20 @@ func (s *Server) probeManifest(w http.ResponseWriter, r *http.Request, d domain.
 		manifest["cacheKey"] = devices.ProbeCacheKey(d)
 	}
 	respond(w, 200, manifest)
+}
+
+func probeCandidate(d domain.Device, id string) bool {
+	if d.Registration.Hardware == nil {
+		return false
+	}
+	for _, decoder := range d.Registration.Hardware.Decoders {
+		for _, candidate := range decoder.ProbeCandidates {
+			if candidate == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Tickets let API9 MediaPlayer fetch only fixed synthetic assets without adding
