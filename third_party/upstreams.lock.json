@@ -139,6 +139,28 @@
       "sparse": [
         "examples"
       ]
+    },
+    {
+      "name": "serenity-legacy",
+      "url": "https://github.com/NineWorlds/serenity-android.git",
+      "commit": "88a9771e2533b11ca3642b609087d29187060112",
+      "referenceBranch": "v1.9.4",
+      "purpose": "Legacy Google TV remote, focus and media-key strategy reference; no runtime dependency",
+      "licenseHint": "MIT",
+      "status": "reference-only; strategies adapted without importing AndroidX or player code"
+    },
+    {
+      "name": "quickjs-emscripten",
+      "url": "https://github.com/justjake/quickjs-emscripten.git",
+      "commit": "235f6da2fd4f7354fa4765fde4aea880d2a4aef5",
+      "referenceBranch": "v0.31.0",
+      "purpose": "Bounded JavaScript interpreter for the optional YouTube wrapper",
+      "licenseHint": "MIT",
+      "status": "wrapper dependency; documentation reference",
+      "sparse": [
+        "doc",
+        "examples"
+      ]
     }
   ]
 }
