@@ -21,29 +21,11 @@ import (
 	"zombiebox.local/gateway/internal/domain"
 )
 
-type Config struct {
-	Enabled      bool   `json:"enabled"`
-	URL          string `json:"url,omitempty"`
-	Token        string `json:"token,omitempty"`
-	UserID       string `json:"userId,omitempty"`
-	PlaylistPath string `json:"playlistPath,omitempty"`
-	EPGURL       string `json:"epgUrl,omitempty"`
-	CatalogID    string `json:"catalogId,omitempty"`
-	MediaType    string `json:"mediaType,omitempty"`
-}
-type Source struct {
-	EPGID   string
-	Item    domain.Item
-	URL     string
-	Path    string
-	Headers http.Header
-	MIME    string
-	Live    bool
-}
+type Config = domain.Config
+type Source = domain.Source
 
 var Titles = map[string]string{"local": "My library", "plex": "Plex", "jellyfin": "Jellyfin", "stremio": "Stremio", "youtube": "YouTube", "spotify": "Spotify", "airplay": "AirPlay", "android_mirror": "Android Mirror", "iptv": "IPTV", "rebrowser": "Browser"}
 var Order = []string{"local", "youtube", "plex", "jellyfin", "stremio", "spotify", "iptv", "airplay", "android_mirror", "rebrowser"}
-var Client = &http.Client{Timeout: 5 * 1000000000, CheckRedirect: SafeRedirect}
 
 func Validate(c Config) error {
 	for _, raw := range []string{c.URL, c.EPGURL} {
@@ -60,13 +42,13 @@ func Validate(c Config) error {
 	}
 	return nil
 }
-func request(ctx context.Context, raw string, headers http.Header) ([]byte, error) {
+func (a *Adapters) request(ctx context.Context, raw string, headers http.Header) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", raw, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header = headers.Clone()
-	res, err := Client.Do(req)
+	res, err := a.http.Do(req)
 	if err != nil {
 		return nil, errors.New("provider unavailable")
 	}
@@ -80,14 +62,14 @@ func request(ctx context.Context, raw string, headers http.Header) ([]byte, erro
 	}
 	return body, err
 }
-func Fetch(ctx context.Context, id string, c Config, mediaDir string) ([]Source, error) {
+func (a *Adapters) Fetch(ctx context.Context, id string, c Config, mediaDir string) ([]Source, error) {
 	if id == "local" {
 		return Local(mediaDir)
 	}
 	if !c.Enabled {
 		return []Source{}, nil
 	}
-	if adapter, ok := catalogAdapters[id]; ok {
+	if adapter, ok := a.catalog[id]; ok {
 		return adapter.Fetch(ctx, c)
 	}
 	return nil, errors.New("adapter not implemented")
@@ -140,7 +122,7 @@ func Local(dir string) ([]Source, error) {
 	}
 	return out, nil
 }
-func IPTV(ctx context.Context, c Config) ([]Source, error) {
+func (a *Adapters) IPTV(ctx context.Context, c Config) ([]Source, error) {
 	var body []byte
 	var err error
 	if c.PlaylistPath != "" {
@@ -155,7 +137,7 @@ func IPTV(ctx context.Context, c Config) ([]Source, error) {
 		if c.Token != "" {
 			headers.Set("Authorization", "Bearer "+c.Token)
 		}
-		body, err = request(ctx, c.URL, headers)
+		body, err = a.request(ctx, c.URL, headers)
 	}
 	if err != nil {
 		return nil, err
@@ -175,7 +157,7 @@ func IPTV(ctx context.Context, c Config) ([]Source, error) {
 		}
 	}
 	if c.EPGURL != "" {
-		if guideBody, e := request(ctx, c.EPGURL, nil); e == nil {
+		if guideBody, e := a.request(ctx, c.EPGURL, nil); e == nil {
 			now := time.Now()
 			if guide, e := ParseXMLTV(guideBody, now); e == nil {
 				for i := range sources {
@@ -255,23 +237,24 @@ func ParseM3U(body []byte, base string) ([]Source, error) {
 	}
 	return out, scan.Err()
 }
-func Jellyfin(ctx context.Context, c Config) ([]Source, error) {
+func (a *Adapters) Jellyfin(ctx context.Context, c Config) ([]Source, error) {
 	if c.URL == "" || c.Token == "" || c.UserID == "" {
 		return nil, errors.New("configuration required")
 	}
 	base := strings.TrimRight(c.URL, "/")
 	headers := http.Header{"X-Emby-Token": []string{c.Token}}
 	q := url.Values{"Recursive": {"true"}, "IncludeItemTypes": {"Movie,Episode,Audio"}, "Limit": {"40"}, "Fields": {"Overview"}, "SortBy": {"DateCreated"}, "SortOrder": {"Descending"}}
-	body, err := request(ctx, base+"/Users/"+url.PathEscape(c.UserID)+"/Items?"+q.Encode(), headers)
+	body, err := a.request(ctx, base+"/Users/"+url.PathEscape(c.UserID)+"/Items?"+q.Encode(), headers)
 	if err != nil {
 		return nil, err
 	}
 	var result struct {
 		Items []struct {
-			ID       string `json:"Id"`
-			Name     string
-			Overview string
-			Type     string
+			ID        string `json:"Id"`
+			Name      string
+			Overview  string
+			ImageTags map[string]string
+			Type      string
 		}
 	}
 	if err = json.Unmarshal(body, &result); err != nil {
@@ -287,17 +270,21 @@ func Jellyfin(ctx context.Context, c Config) ([]Source, error) {
 			mime = "audio/mpeg"
 			kind = "track"
 		}
-		out = append(out, Source{Item: domain.Item{ID: "jellyfin-" + x.ID, Provider: "jellyfin", Kind: kind, Title: x.Name, Description: x.Overview, Playable: true}, URL: base + path + url.PathEscape(x.ID) + "/stream?static=true", Headers: headers, MIME: mime})
+		artURL := ""
+		if x.ImageTags["Primary"] != "" {
+			artURL = base + "/Items/" + url.PathEscape(x.ID) + "/Images/Primary?maxWidth=960&maxHeight=540"
+		}
+		out = append(out, Source{ArtworkURL: artURL, ArtworkHeaders: headers, Item: domain.Item{ID: "jellyfin-" + x.ID, Provider: "jellyfin", Kind: kind, Title: x.Name, Description: x.Overview, Playable: true}, URL: base + path + url.PathEscape(x.ID) + "/stream?static=true", Headers: headers, MIME: mime})
 	}
 	return out, nil
 }
-func Plex(ctx context.Context, c Config) ([]Source, error) {
+func (a *Adapters) Plex(ctx context.Context, c Config) ([]Source, error) {
 	if c.URL == "" || c.Token == "" {
 		return nil, errors.New("configuration required")
 	}
 	base := strings.TrimRight(c.URL, "/")
 	headers := http.Header{"X-Plex-Token": []string{c.Token}, "X-Plex-Client-Identifier": []string{"zombie-box-tv"}}
-	body, err := request(ctx, base+"/library/recentlyAdded?X-Plex-Container-Size=40", headers)
+	body, err := a.request(ctx, base+"/library/recentlyAdded?X-Plex-Container-Size=40", headers)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +293,7 @@ func Plex(ctx context.Context, c Config) ([]Source, error) {
 			Key     string `xml:"ratingKey,attr"`
 			Title   string `xml:"title,attr"`
 			Summary string `xml:"summary,attr"`
+			Thumb   string `xml:"thumb,attr"`
 			Media   []struct {
 				Parts []struct {
 					Key string `xml:"key,attr"`
@@ -325,11 +313,15 @@ func Plex(ctx context.Context, c Config) ([]Source, error) {
 		if !strings.HasPrefix(key, "/") || strings.HasPrefix(key, "//") {
 			continue
 		}
-		out = append(out, Source{Item: domain.Item{ID: "plex-" + v.Key, Provider: "plex", Kind: "video", Title: v.Title, Description: v.Summary, Playable: true}, URL: base + key, Headers: headers, MIME: "video/mp4"})
+		artURL := ""
+		if strings.HasPrefix(v.Thumb, "/") && !strings.HasPrefix(v.Thumb, "//") {
+			artURL = base + v.Thumb
+		}
+		out = append(out, Source{ArtworkURL: artURL, ArtworkHeaders: headers, Item: domain.Item{ID: "plex-" + v.Key, Provider: "plex", Kind: "video", Title: v.Title, Description: v.Summary, Playable: true}, URL: base + key, Headers: headers, MIME: "video/mp4"})
 	}
 	return out, nil
 }
-func Stremio(ctx context.Context, c Config) ([]Source, error) {
+func (a *Adapters) Stremio(ctx context.Context, c Config) ([]Source, error) {
 	if c.URL == "" || c.CatalogID == "" {
 		return nil, errors.New("configuration required")
 	}
@@ -338,7 +330,7 @@ func Stremio(ctx context.Context, c Config) ([]Source, error) {
 	if kind == "" {
 		kind = "movie"
 	}
-	body, err := request(ctx, base+"/catalog/"+url.PathEscape(kind)+"/"+url.PathEscape(c.CatalogID)+".json", nil)
+	body, err := a.request(ctx, base+"/catalog/"+url.PathEscape(kind)+"/"+url.PathEscape(c.CatalogID)+".json", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -347,6 +339,7 @@ func Stremio(ctx context.Context, c Config) ([]Source, error) {
 			ID          string
 			Name        string
 			Description string
+			Poster      string
 		}
 	}
 	if err = json.Unmarshal(body, &data); err != nil {
@@ -357,18 +350,18 @@ func Stremio(ctx context.Context, c Config) ([]Source, error) {
 		if len(out) >= 40 {
 			break
 		}
-		out = append(out, Source{Item: domain.Item{ID: "stremio-" + m.ID, Provider: "stremio", Kind: kind, Title: m.Name, Description: m.Description, Playable: true}, URL: base + "/stream/" + url.PathEscape(kind) + "/" + url.PathEscape(m.ID) + ".json", MIME: "application/x-zombie-stremio"})
+		out = append(out, Source{ArtworkURL: m.Poster, Item: domain.Item{ID: "stremio-" + m.ID, Provider: "stremio", Kind: kind, Title: m.Name, Description: m.Description, Playable: true}, URL: base + "/stream/" + url.PathEscape(kind) + "/" + url.PathEscape(m.ID) + ".json", MIME: "application/x-zombie-stremio"})
 	}
 	return out, nil
 }
-func Resolve(ctx context.Context, source Source) (Source, error) {
+func (a *Adapters) Resolve(ctx context.Context, source Source) (Source, error) {
 	if source.MIME == "application/x-zombie-youtube" {
-		return resolveYouTube(ctx, source)
+		return a.resolveYouTube(ctx, source)
 	}
 	if source.MIME != "application/x-zombie-stremio" {
 		return source, nil
 	}
-	body, err := request(ctx, source.URL, nil)
+	body, err := a.request(ctx, source.URL, nil)
 	if err != nil {
 		return source, err
 	}

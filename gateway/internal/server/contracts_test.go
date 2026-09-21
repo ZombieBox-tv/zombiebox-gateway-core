@@ -86,6 +86,7 @@ func TestWireContracts(t *testing.T) {
 	samples["NowPlaying"] = call(s, "GET", "/v1/player/spotify", "", "contract-device", token, "").Body.Bytes()
 	samples["AuthorizationPrompt"] = call(s, "GET", "/v1/player/spotify/authorization", "", "contract-device", token, "123456").Body.Bytes()
 	samples["BrowserSession"] = call(s, "POST", "/v1/browser", `{"url":"https://example.org"}`, "contract-device", token, "").Body.Bytes()
+	samples["ProbeManifest"] = call(s, "GET", "/v1/probes", "", "contract-device", token, "").Body.Bytes()
 	data, err := json.Marshal(samples)
 	if err != nil {
 		t.Fatal(err)

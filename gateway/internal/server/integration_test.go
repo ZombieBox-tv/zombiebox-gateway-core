@@ -26,7 +26,7 @@ func testServer(t *testing.T, db *store.Store, media string) *Server {
 		}
 		t.Cleanup(func() { db.Close() })
 	}
-	s := New(db, Options{PairingCode: "123456", MediaDir: media, PollWait: 10 * time.Millisecond})
+	s := newTestServer(db, Options{PairingCode: "123456", MediaDir: media, PollWait: 10 * time.Millisecond})
 	t.Cleanup(s.Close)
 	return s
 }

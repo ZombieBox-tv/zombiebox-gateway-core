@@ -11,7 +11,6 @@ import (
 	"time"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/providers"
-	"zombiebox.local/gateway/internal/store"
 )
 
 type catalogEntry struct {
@@ -39,7 +38,7 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request, d domain.Devi
 			out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": s.opt.RelayURL != "", "configured": s.opt.RelayURL != "", "hasToken": false, "implemented": true, "managedByServer": true})
 			continue
 		}
-		out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": c.Enabled, "configured": c.URL != "" || c.PlaylistPath != "", "hasToken": c.Token != "", "implemented": providers.HasCatalog(id) || id == "rebrowser", "managedByServer": s.managed[id]})
+		out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": c.Enabled, "configured": c.URL != "" || c.PlaylistPath != "", "hasToken": c.Token != "", "implemented": s.deps.Catalog.HasCatalog(id) || id == "rebrowser", "managedByServer": s.managed[id]})
 	}
 	respond(w, 200, map[string]any{"providers": out})
 }
@@ -93,7 +92,7 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request, d dom
 func (s *Server) SeedProviders(ctx context.Context, configs map[string]providers.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	records := []store.Record{}
+	records := []domain.Record{}
 	for id, c := range configs {
 		if _, ok := providers.Titles[id]; !ok || id == "local" {
 			return errors.New("unknown provider")
@@ -101,7 +100,7 @@ func (s *Server) SeedProviders(ctx context.Context, configs map[string]providers
 		if err := providers.Validate(c); err != nil {
 			return err
 		}
-		records = append(records, store.Record{Bucket: "providers", ID: id, Value: c})
+		records = append(records, domain.Record{Bucket: "providers", ID: id, Value: c})
 	}
 	if err := s.db.PutMany(ctx, records...); err != nil {
 		return err
@@ -119,7 +118,7 @@ func (s *Server) catalog(ctx context.Context) []providers.Source {
 	defer cancel()
 	var wg sync.WaitGroup
 	for _, id := range providers.Order {
-		if !providers.HasCatalog(id) {
+		if !s.deps.Catalog.HasCatalog(id) {
 			continue
 		}
 		s.mu.Lock()
@@ -140,7 +139,8 @@ func (s *Server) catalog(ctx context.Context) []providers.Source {
 		wg.Add(1)
 		go func(id string, c providers.Config, revision uint64) {
 			defer wg.Done()
-			sources, err := providers.Fetch(ctx, id, c, s.opt.MediaDir)
+			sources, err := s.deps.Catalog.Fetch(ctx, id, c, s.opt.MediaDir)
+			decorateArtwork(sources)
 			message := ""
 			if err != nil {
 				message = "Service unavailable. Check its configuration."
@@ -201,9 +201,9 @@ func (s *Server) moduleList(ctx context.Context) []domain.Module {
 			continue
 		}
 		if id == "local" || c.Enabled {
-			if providers.HasCatalog(id) {
+			if s.deps.Catalog.HasCatalog(id) {
 				m.State = "HEALTHY"
-				m.Features = providers.Features(id)
+				m.Features = s.deps.Catalog.Features(id)
 				m.Message = ""
 				s.mu.Lock()
 				entry := s.catalogCache[id]
@@ -288,7 +288,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		}
 		screen.Sections = append(screen.Sections, domain.Section{ID: id, Type: kind, Title: providers.Titles[id], Items: items})
 		if screen.Hero == nil {
-			screen.Hero = &domain.Hero{Item: items[0], Description: items[0].Description}
+			screen.Hero = &domain.Hero{Item: items[0], Description: items[0].Description, BackdropURL: items[0].ImageURL}
 		}
 	}
 	respond(w, 200, screen)

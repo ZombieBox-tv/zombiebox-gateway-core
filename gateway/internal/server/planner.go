@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/media"
 	"zombiebox.local/gateway/internal/providers"
@@ -13,10 +14,10 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 	if requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER" {
 		return requested, nil
 	}
-	if source.Path == "" || s.opt.MediaTools == nil {
+	if source.Path == "" || s.deps.Media == nil {
 		return "DIRECT_PLAY", nil
 	}
-	metadata, err := s.opt.MediaTools.Probe(ctx, source.Path)
+	metadata, err := s.deps.Media.Probe(ctx, source.Path)
 	if err != nil {
 		return "", err
 	}
@@ -36,7 +37,7 @@ func localMode(metadata media.Metadata, mime string, capabilities domain.Capabil
 	}
 	native := true
 	for _, stream := range metadata.Streams {
-		if stream.Type == "video" && (stream.Codec != "h264" || stream.Width > 1280 || stream.Height > 720 || status("h264-720-main") == "FAIL") {
+		if stream.Type == "video" && (stream.Codec != "h264" || !videoCandidate(stream, status)) {
 			native = false
 		}
 		if stream.Type == "audio" && (stream.Codec != "aac" && stream.Codec != "mp3" || stream.Codec == "aac" && status("aac") == "FAIL") {
@@ -57,4 +58,26 @@ func localMode(metadata media.Metadata, mime string, capabilities domain.Capabil
 		return "EXTERNAL_PLAYER"
 	}
 	return "TRANSCODE"
+}
+
+// Profiles remain hints until the matching synthetic path has actual evidence.
+// A failed Main profile must not reject already-compatible Baseline media.
+func videoCandidate(stream media.Stream, status func(string) string) bool {
+	profile := strings.ToLower(stream.Profile)
+	probe := ""
+	switch {
+	case stream.Width > 1920 || stream.Height > 1080:
+		return false
+	case stream.Width > 1280 || stream.Height > 720:
+		return strings.Contains(profile, "high") && status("h264-1080-high") == "PASS"
+	case strings.Contains(profile, "high"):
+		probe = "h264-720-high"
+	case strings.Contains(profile, "main"):
+		probe = "h264-720-main"
+	case stream.Width <= 640 && stream.Height <= 360:
+		probe = "h264-baseline-360"
+	case stream.Width <= 854 && stream.Height <= 480:
+		probe = "h264-baseline-480"
+	}
+	return probe == "" || status(probe) != "FAIL"
 }

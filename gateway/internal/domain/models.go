@@ -41,9 +41,13 @@ func DefaultPreferences() Preferences {
 }
 
 type Probe struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	PrepareMS int    `json:"prepareMs"`
+	FirstFrameMS int    `json:"firstFrameMs,omitempty"`
+	PositionMS   int    `json:"positionMs,omitempty"`
+	Completed    bool   `json:"completed,omitempty"`
+	Stalled      bool   `json:"droppedOrStalled,omitempty"`
+	ID           string `json:"id"`
+	Status       string `json:"status"`
+	PrepareMS    int    `json:"prepareMs"`
 }
 type Capabilities struct {
 	Version  int     `json:"capabilitiesVersion"`
@@ -124,4 +128,10 @@ type Progress struct {
 	DurationMS int64  `json:"durationMs"`
 	State      string `json:"state"`
 	UpdatedAt  int64  `json:"updatedAt"`
+}
+
+// Record is a transactional persistence operation independent of the SQLite adapter.
+type Record struct {
+	Bucket, ID string
+	Value      any
 }

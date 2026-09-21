@@ -5,20 +5,18 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 	"zombiebox.local/gateway/internal/domain"
-	"zombiebox.local/gateway/internal/media"
-	"zombiebox.local/gateway/internal/store"
 )
 
 type Health struct {
@@ -26,8 +24,8 @@ type Health struct {
 	APIVersion int    `json:"apiVersion"`
 }
 type Options struct {
+	ProbeDir                                   string
 	ThreadfinURL                               string
-	MediaTools                                 *media.Tools
 	RelayURL, RelayControlURL, RelayAdminToken string
 	RTSPPort                                   int
 	PairingCode                                string
@@ -40,6 +38,7 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
+	probeKey          string
 	browser           *browserSession
 	integrationChecks chan struct{}
 	relayJobs         chan struct{}
@@ -47,7 +46,8 @@ type Server struct {
 	seen              map[string]time.Time
 	done              chan struct{}
 	closeOnce         sync.Once
-	db                *store.Store
+	db                Persistence
+	deps              Dependencies
 	opt               Options
 	events            *eventLog
 	mux               *http.ServeMux
@@ -62,14 +62,19 @@ type Server struct {
 	streams           chan struct{}
 }
 
-func New(db *store.Store, opt Options) *Server {
+func New(db Persistence, opt Options, deps Dependencies) *Server {
+	deps.validate(db)
 	if opt.PollWait <= 0 {
 		opt.PollWait = 20 * time.Second
 	}
 	if opt.CatalogWait <= 0 {
 		opt.CatalogWait = 5 * time.Second
 	}
-	s := &Server{db: db, opt: opt, events: newEvents(), mux: http.NewServeMux(), attempts: map[string]attempt{}, sessions: map[string]*session{}, polls: make(chan struct{}, 32), catalogCache: map[string]catalogEntry{}}
+	s := &Server{db: db, opt: opt, deps: deps, events: newEvents(), mux: http.NewServeMux(), attempts: map[string]attempt{}, sessions: map[string]*session{}, polls: make(chan struct{}, 32), catalogCache: map[string]catalogEntry{}}
+	s.probeKey = randomID(32)
+	s.mux.HandleFunc("GET /v1/artwork/{item}", s.auth(s.artwork))
+	s.mux.HandleFunc("GET /v1/probes", s.auth(s.probeManifest))
+	s.mux.HandleFunc("GET /v1/probes/{probe}", s.probeStream)
 	s.relayJobs = make(chan struct{}, 4)
 	s.integrationChecks = make(chan struct{}, 2)
 	s.casts = map[string]*castSession{}
@@ -194,11 +199,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	delete(s.attempts, ip)
 	var existing domain.Device
 	err := s.db.Get(r.Context(), "devices", req.InstallationID, &existing)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		fail(w, 500, "storage_error")
 		return
 	}
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, domain.ErrNotFound) {
 		count, e := s.db.Count(r.Context(), "devices")
 		if e != nil {
 			fail(w, 500, "storage_error")
@@ -214,9 +219,12 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		req.Platform.ABIs = []string{}
 	}
 	req.PairingCode = ""
+	if !reflect.DeepEqual(existing.Registration.Platform, req.Platform) || existing.Registration.Memory != req.Memory {
+		existing.Capabilities = domain.Capabilities{Version: 1, DeviceID: existing.ID, Probes: []domain.Probe{}}
+	}
 	existing.Registration = req
 	token := randomID(32)
-	if s.db.PutMany(r.Context(), store.Record{Bucket: "devices", ID: existing.ID, Value: existing}, store.Record{Bucket: "tokens", ID: existing.ID, Value: tokenHash(token)}) != nil {
+	if s.db.PutMany(r.Context(), domain.Record{Bucket: "devices", ID: existing.ID, Value: existing}, domain.Record{Bucket: "tokens", ID: existing.ID, Value: tokenHash(token)}) != nil {
 		fail(w, 500, "storage_error")
 		return
 	}
@@ -297,11 +305,13 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request, d domain.D
 		fail(w, 400, "invalid_capabilities")
 		return
 	}
+	seenProbes := map[string]bool{}
 	for _, p := range c.Probes {
-		if p.ID == "" || len(p.ID) > 80 || p.PrepareMS < 0 || !(p.Status == "PASS" || p.Status == "FAIL" || p.Status == "UNKNOWN") {
+		if (p.Status == "PASS" && p.Stalled) || seenProbes[p.ID] || p.FirstFrameMS < 0 || p.PositionMS < 0 || p.PrepareMS > 60000 || p.FirstFrameMS > 60000 || p.PositionMS > 60000 || p.ID == "" || len(p.ID) > 80 || p.PrepareMS < 0 || !(p.Status == "PASS" || p.Status == "FAIL" || p.Status == "UNKNOWN") {
 			fail(w, 400, "invalid_probe")
 			return
 		}
+		seenProbes[p.ID] = true
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

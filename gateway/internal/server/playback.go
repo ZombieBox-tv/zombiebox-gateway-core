@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -57,12 +56,12 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 404, "item_not_found")
 		return
 	}
-	resolved, err := providers.Resolve(r.Context(), *found)
+	resolved, err := s.deps.Resolver.Resolve(r.Context(), *found)
 	if err != nil {
 		fail(w, 502, "stream_unavailable")
 		return
 	}
-	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE") && (resolved.Path == "" || s.opt.MediaTools == nil) {
+	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE") && (resolved.Path == "" || s.deps.Media == nil) {
 		fail(w, 409, "conversion_unavailable")
 		return
 	}
@@ -223,7 +222,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writer := &conversionWriter{contextWriter: contextWriter{ResponseWriter: w, ctx: ctx}}
-		if err := s.opt.MediaTools.Convert(ctx, src.Path, sess.mode, writer); err != nil {
+		if err := s.deps.Media.Convert(ctx, src.Path, sess.mode, writer); err != nil {
 			if !writer.started {
 				if errors.Is(err, media.ErrBusy) {
 					fail(w, 429, "media_busy")
@@ -267,7 +266,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("Range", value)
 	}
 	// Stream transport has header/idle timeouts, but no total timeout on long media bodies.
-	res, err := mediaHTTP.Do(req)
+	res, err := s.deps.StreamHTTP.Do(req)
 	if err != nil {
 		fail(w, 502, "stream_unavailable")
 		return
@@ -314,24 +313,6 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 }
 
 // Deadlines apply to each upstream read, including a stalled media body.
-type mediaConn struct{ net.Conn }
-
-func (c mediaConn) Read(b []byte) (int, error) {
-	_ = c.SetReadDeadline(time.Now().Add(30 * time.Second))
-	return c.Conn.Read(b)
-}
-
-var mediaHTTP = &http.Client{Transport: &http.Transport{
-	DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-		c, e := (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, address)
-		if e != nil {
-			return nil, e
-		}
-		return mediaConn{c}, nil
-	},
-	TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 8 * time.Second, IdleConnTimeout: 30 * time.Second, MaxIdleConns: 8, MaxConnsPerHost: 4,
-}, CheckRedirect: providers.SafeRedirect}
-
 // Close cancels streams before the process drains its HTTP server.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.done) })
@@ -339,7 +320,7 @@ func (s *Server) Close() {
 	defer s.mu.Unlock()
 	if s.browser != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = providers.BrowserRequest(ctx, s.browser.config, "DELETE", "/session/"+s.browser.id, nil)
+		_, _ = s.deps.Browser.BrowserRequest(ctx, s.browser.config, "DELETE", "/session/"+s.browser.id, nil)
 		cancel()
 		s.browser = nil
 	}

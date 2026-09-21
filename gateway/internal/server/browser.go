@@ -47,7 +47,7 @@ func (s *Server) startBrowser(w http.ResponseWriter, r *http.Request, d domain.D
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	_, err = providers.BrowserRequest(ctx, c, "POST", "/session", map[string]string{"id": session.id, "url": request.URL})
+	_, err = s.deps.Browser.BrowserRequest(ctx, c, "POST", "/session", map[string]string{"id": session.id, "url": request.URL})
 	s.mu.Lock()
 	session.busy = false
 	session.touched = time.Now()
@@ -102,7 +102,7 @@ func (s *Server) browserOperation(w http.ResponseWriter, r *http.Request, d doma
 		body = command
 		path += "/input"
 	}
-	data, err := providers.BrowserRequest(ctx, session.config, r.Method, path, body)
+	data, err := s.deps.Browser.BrowserRequest(ctx, session.config, r.Method, path, body)
 	if err != nil {
 		fail(w, 502, "browser_unavailable")
 		return

@@ -13,12 +13,12 @@ import (
 
 var youtubeID = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 
-func YouTube(ctx context.Context, c Config) ([]Source, error) {
+func (a *Adapters) YouTube(ctx context.Context, c Config) ([]Source, error) {
 	if c.URL == "" || len(c.Token) < 32 {
 		return nil, errors.New("wrapper configuration required")
 	}
 	headers := http.Header{"Authorization": {"Bearer " + c.Token}}
-	body, err := request(ctx, strings.TrimRight(c.URL, "/")+"/catalog?q="+url.QueryEscape(c.CatalogID), headers)
+	body, err := a.request(ctx, strings.TrimRight(c.URL, "/")+"/catalog?q="+url.QueryEscape(c.CatalogID), headers)
 	if err != nil {
 		return nil, err
 	}
@@ -38,7 +38,7 @@ func YouTube(ctx context.Context, c Config) ([]Source, error) {
 			continue
 		}
 		seen[item.ID] = true
-		out = append(out, Source{Item: domain.Item{ID: "youtube-" + item.ID, Provider: "youtube", Kind: "video", Title: item.Title, Subtitle: item.Subtitle, DurationMS: item.DurationMS, Playable: true},
+		out = append(out, Source{ArtworkURL: "https://i.ytimg.com/vi/" + item.ID + "/hqdefault.jpg", Item: domain.Item{ID: "youtube-" + item.ID, Provider: "youtube", Kind: "video", Title: item.Title, Subtitle: item.Subtitle, DurationMS: item.DurationMS, Playable: true},
 			URL: strings.TrimRight(c.URL, "/") + "/resolve/" + item.ID, Headers: headers, MIME: "application/x-zombie-youtube"})
 		if len(out) == 40 {
 			break
@@ -47,8 +47,8 @@ func YouTube(ctx context.Context, c Config) ([]Source, error) {
 	return out, nil
 }
 
-func resolveYouTube(ctx context.Context, source Source) (Source, error) {
-	body, err := request(ctx, source.URL, source.Headers)
+func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, error) {
+	body, err := a.request(ctx, source.URL, source.Headers)
 	if err != nil {
 		return source, err
 	}

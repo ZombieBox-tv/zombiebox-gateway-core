@@ -25,7 +25,7 @@ func TestSpotifySemanticBoundary(t *testing.T) {
 	}))
 	defer upstream.Close()
 	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("t", 32)}
-	status, err := SpotifyStatus(context.Background(), c)
+	status, err := testAdapters.SpotifyStatus(context.Background(), c)
 	if err != nil || status.State != "PAUSED" || status.PositionMS != 1200 || status.Volume != 50 || status.Item.Title != "Song" {
 		t.Fatalf("status: %+v %v", status, err)
 	}
@@ -33,18 +33,18 @@ func TestSpotifySemanticBoundary(t *testing.T) {
 	if strings.Contains(string(raw), "private-") {
 		t.Fatal("upstream identity leaked")
 	}
-	sources, err := Fetch(context.Background(), "spotify", c, "")
+	sources, err := testAdapters.Fetch(context.Background(), "spotify", c, "")
 	if err != nil || len(sources) != 1 || !sources[0].Live || sources[0].MIME != "audio/mpeg" {
 		t.Fatalf("sources: %+v %v", sources, err)
 	}
-	if err = SpotifyCommand(context.Background(), c, PlayerCommand{Action: "seek", PositionMS: 1200}); err != nil {
+	if err = testAdapters.SpotifyCommand(context.Background(), c, PlayerCommand{Action: "seek", PositionMS: 1200}); err != nil {
 		t.Fatal(err)
 	}
 	if command != `/player/seek {"position":1200}` {
 		t.Fatal(command)
 	}
 	for _, bad := range []PlayerCommand{{Action: "../../token"}, {Action: "seek", PositionMS: -1}, {Action: "volume", Volume: 101}} {
-		if SpotifyCommand(context.Background(), c, bad) == nil {
+		if testAdapters.SpotifyCommand(context.Background(), c, bad) == nil {
 			t.Fatal("invalid command accepted")
 		}
 	}
@@ -59,7 +59,7 @@ func TestAirPlayIdleAndActive(t *testing.T) {
 	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("x", 32)}
 	for _, value := range []bool{false, true} {
 		active = value
-		sources, err := AirPlay(context.Background(), c)
+		sources, err := testAdapters.AirPlay(context.Background(), c)
 		if err != nil || len(sources) != 2 || sources[0].Item.Playable != value || !sources[0].Live {
 			t.Fatalf("sources: %+v %v", sources, err)
 		}

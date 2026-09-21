@@ -102,7 +102,7 @@ func (s *Server) castReady(w http.ResponseWriter, r *http.Request, d domain.Devi
 	defer cancel()
 	request, _ := http.NewRequestWithContext(ctx, "GET", source.URL, nil)
 	request.Header = source.Headers.Clone()
-	response, err := providers.Client.Do(request)
+	response, err := s.deps.ControlHTTP.Do(request)
 	if err != nil {
 		fail(w, 503, "cast_buffering")
 		return
@@ -243,7 +243,7 @@ func (s *Server) endCastLocked(c *castSession) {
 				return
 			}
 			req.SetBasicAuth("gateway", s.opt.RelayAdminToken)
-			res, err := providers.Client.Do(req)
+			res, err := s.deps.ControlHTTP.Do(req)
 			if err == nil {
 				res.Body.Close()
 			}

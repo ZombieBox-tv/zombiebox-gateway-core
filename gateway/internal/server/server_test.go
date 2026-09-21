@@ -14,7 +14,7 @@ func TestHealthContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	h := New(db, Options{PairingCode: "123456"})
+	h := newTestServer(db, Options{PairingCode: "123456"})
 	for _, tc := range []struct {
 		method, path string
 		status       int

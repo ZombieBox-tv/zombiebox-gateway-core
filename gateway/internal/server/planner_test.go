@@ -47,7 +47,7 @@ func TestHTTPConversionProducesPlayableMP4(t *testing.T) {
 		t.Fatalf("fixture: %v %s", err, output)
 	}
 	s := testServer(t, nil, dir)
-	s.opt.MediaTools = media.New("ffmpeg", "ffprobe")
+	s.deps.Media = media.New("ffmpeg", "ffprobe")
 	token := pair(t, s, "media-device")
 	sources, err := providers.Local(dir)
 	if err != nil || len(sources) != 1 {
@@ -73,7 +73,7 @@ func TestHTTPConversionProducesPlayableMP4(t *testing.T) {
 		}
 		output := filepath.Join(t.TempDir(), "output.mp4")
 		os.WriteFile(output, stream.Body.Bytes(), 0600)
-		metadata, err := s.opt.MediaTools.Probe(t.Context(), output)
+		metadata, err := s.deps.Media.Probe(t.Context(), output)
 		if err != nil || len(metadata.Streams) == 0 || metadata.Streams[0].Codec != "h264" {
 			t.Fatalf("bad conversion: %v %+v", err, metadata)
 		}
@@ -81,5 +81,26 @@ func TestHTTPConversionProducesPlayableMP4(t *testing.T) {
 			t.Fatal(metadata.Streams[0])
 		}
 		call(s, "DELETE", "/v1/playback/"+plan.SessionID, "", "media-device", token, "")
+	}
+}
+
+func TestProfileEvidenceDoesNotRejectOtherProfiles(t *testing.T) {
+	state := func(id string) string {
+		if id == "h264-720-main" {
+			return "FAIL"
+		}
+		if id == "h264-1080-high" {
+			return "PASS"
+		}
+		return "UNKNOWN"
+	}
+	if !videoCandidate(media.Stream{Profile: "Constrained Baseline", Width: 640, Height: 360}, state) {
+		t.Fatal("Main failure rejected Baseline")
+	}
+	if videoCandidate(media.Stream{Profile: "Main", Width: 1280, Height: 720}, state) {
+		t.Fatal("failed Main probe ignored")
+	}
+	if !videoCandidate(media.Stream{Profile: "High", Width: 1920, Height: 1080}, state) {
+		t.Fatal("measured 1080 High ignored")
 	}
 }

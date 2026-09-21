@@ -13,8 +13,11 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"zombiebox.local/gateway/internal/artwork"
 	providerconfig "zombiebox.local/gateway/internal/config"
+	"zombiebox.local/gateway/internal/httpclient"
 	mediatools "zombiebox.local/gateway/internal/media"
+	"zombiebox.local/gateway/internal/providers"
 	"zombiebox.local/gateway/internal/store"
 
 	"zombiebox.local/gateway/internal/server"
@@ -24,6 +27,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8090", "HTTP listen address (trusted LAN only when exposed)")
 	check := flag.String("healthcheck", "", "check gateway URL and exit")
 	state := flag.String("state", ".local/gateway.db", "private SQLite database path")
+	probes := flag.String("probe-dir", "", "directory of synthetic capability fixtures")
 	media := flag.String("media-dir", ".local/media", "directory containing local media")
 	config := flag.String("config", "", "optional private provider configuration JSON")
 	threadfin := flag.String("threadfin-url", "", "optional private Threadfin control base URL")
@@ -63,11 +67,13 @@ func main() {
 		}
 		pairing = fmt.Sprintf("%06d", n.Int64()+100000)
 	}
-	var tools *mediatools.Tools
+	var tools server.Media
 	if *enableMedia {
 		tools = mediatools.New("ffmpeg", "ffprobe")
 	}
-	app := server.New(db, server.Options{ThreadfinURL: *threadfin, MediaTools: tools, PairingCode: pairing, MediaDir: *media, RelayURL: *relay, RelayControlURL: *relayControl, RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"), RTSPPort: *rtspPort})
+	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
+	deps := server.Dependencies{Artwork: artwork.New(httpclient.Metadata()), Catalog: adapters, Search: adapters, Resolver: adapters, Player: adapters, Browser: adapters, Media: tools, ControlHTTP: httpclient.Private(), StreamHTTP: httpclient.Streaming()}
+	app := server.New(db, server.Options{ProbeDir: *probes, ThreadfinURL: *threadfin, PairingCode: pairing, MediaDir: *media, RelayURL: *relay, RelayControlURL: *relayControl, RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"), RTSPPort: *rtspPort}, deps)
 	if *config != "" {
 		configs, e := providerconfig.Load(*config, os.LookupEnv)
 		if e != nil {

@@ -46,7 +46,7 @@ func (s *Server) integrationList(w http.ResponseWriter, r *http.Request, d domai
 			out[i].State = "READY"
 			continue
 		case "ffmpeg":
-			if s.opt.MediaTools != nil {
+			if s.deps.Media != nil {
 				out[i].State = "READY"
 			}
 			continue
@@ -101,8 +101,7 @@ func (s *Server) integrationList(w http.ResponseWriter, r *http.Request, d domai
 			if out[i].ID == "mediamtx" {
 				req.SetBasicAuth("gateway", s.opt.RelayAdminToken)
 			}
-			client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-			res, err := client.Do(req)
+			res, err := s.deps.ControlHTTP.Do(req)
 			if err != nil {
 				return
 			}
@@ -124,7 +123,7 @@ func (s *Server) nowPlaying(w http.ResponseWriter, r *http.Request, d domain.Dev
 		fail(w, 409, "provider_disabled")
 		return
 	}
-	status, err := providers.SpotifyStatus(r.Context(), c)
+	status, err := s.deps.Player.SpotifyStatus(r.Context(), c)
 	if err != nil {
 		fail(w, 502, "player_unavailable")
 		return
@@ -141,7 +140,7 @@ func (s *Server) spotifyAuthorization(w http.ResponseWriter, r *http.Request, d 
 		fail(w, 409, "provider_disabled")
 		return
 	}
-	prompt, err := providers.SpotifyAuthorization(r.Context(), c)
+	prompt, err := s.deps.Player.SpotifyAuthorization(r.Context(), c)
 	if err != nil {
 		fail(w, 502, "authorization_unavailable")
 		return
@@ -169,7 +168,7 @@ func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request, d domain.
 		fail(w, 409, "provider_disabled")
 		return
 	}
-	if providers.SpotifyCommand(r.Context(), c, command) != nil {
+	if s.deps.Player.SpotifyCommand(r.Context(), c, command) != nil {
 		fail(w, 502, "player_unavailable")
 		return
 	}

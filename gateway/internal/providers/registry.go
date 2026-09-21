@@ -1,6 +1,9 @@
 package providers
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 // Definition describes an adapter, not the health of its optional process/account.
 // Keep dispatch and advertised features together so a UI entry cannot claim a
@@ -11,24 +14,44 @@ type Definition struct {
 	Fetch    func(context.Context, Config) ([]Source, error)
 }
 
-var catalogAdapters = map[string]Definition{
-	"youtube":  {"youtube", []string{"catalog", "search", "playback"}, YouTube},
-	"plex":     {"plex", []string{"catalog", "playback"}, Plex},
-	"jellyfin": {"jellyfin", []string{"catalog", "playback"}, Jellyfin},
-	"stremio":  {"stremio", []string{"catalog", "playback"}, Stremio},
-	"iptv":     {"iptv", []string{"catalog", "playback", "epg"}, IPTV},
-	"spotify":  {"spotify", []string{"catalog", "playback", "now-playing", "remote-control"}, Spotify},
-	"airplay":  {"airplay", []string{"catalog", "playback", "screen-receiver"}, AirPlay},
+// HTTPClient is implemented by net/http.Client and deterministic test transports.
+type HTTPClient interface {
+	Do(*http.Request) (*http.Response, error)
 }
 
-func HasCatalog(id string) bool {
-	_, ok := catalogAdapters[id]
+type Adapters struct {
+	http, privateHTTP HTTPClient
+	catalog           map[string]Definition
+}
+
+// New builds an independent registry. Network policy is supplied by the process
+// composition root; no mutable package client or registry is shared by servers.
+func New(client, privateClient HTTPClient) *Adapters {
+	if client == nil || privateClient == nil {
+		panic("providers: HTTP clients are required")
+	}
+	a := &Adapters{http: client, privateHTTP: privateClient}
+	a.catalog = map[string]Definition{
+		"youtube":  {"youtube", []string{"catalog", "search", "playback"}, a.YouTube},
+		"plex":     {"plex", []string{"catalog", "playback"}, a.Plex},
+		"jellyfin": {"jellyfin", []string{"catalog", "playback"}, a.Jellyfin},
+		"stremio":  {"stremio", []string{"catalog", "playback"}, a.Stremio},
+		"iptv":     {"iptv", []string{"catalog", "playback", "epg"}, a.IPTV},
+		"spotify":  {"spotify", []string{"catalog", "playback", "now-playing", "remote-control"}, a.Spotify},
+		"airplay":  {"airplay", []string{"catalog", "playback", "screen-receiver"}, a.AirPlay},
+	}
+
+	return a
+}
+
+func (a *Adapters) HasCatalog(id string) bool {
+	_, ok := a.catalog[id]
 	return id == "local" || ok
 }
 
-func Features(id string) []string {
+func (a *Adapters) Features(id string) []string {
 	if id == "local" {
 		return []string{"catalog", "playback"}
 	}
-	return append([]string{}, catalogAdapters[id].Features...)
+	return append([]string{}, a.catalog[id].Features...)
 }

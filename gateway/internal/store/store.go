@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"zombiebox.local/gateway/internal/domain"
 )
 
 type Store struct{ db *sql.DB }
@@ -39,10 +41,7 @@ func Open(path string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 
-type Record struct {
-	Bucket, ID string
-	Value      any
-}
+type Record = domain.Record
 
 // PutMany commits related records together, including device/token rotation.
 func (s *Store) PutMany(ctx context.Context, records ...Record) error {
@@ -73,6 +72,9 @@ func (s *Store) Put(ctx context.Context, bucket, id string, value any) error {
 func (s *Store) Get(ctx context.Context, bucket, id string, out any) error {
 	var data []byte
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM records WHERE bucket=? AND id=?`, bucket, id).Scan(&data); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ErrNotFound
+		}
 		return err
 	}
 	return json.Unmarshal(data, out)

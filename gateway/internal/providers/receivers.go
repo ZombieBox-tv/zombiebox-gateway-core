@@ -13,22 +13,11 @@ import (
 	"zombiebox.local/gateway/internal/domain"
 )
 
-type NowPlaying struct {
-	Provider   string       `json:"provider"`
-	State      string       `json:"state"`
-	Item       *domain.Item `json:"item,omitempty"`
-	Volume     int          `json:"volume"`
-	PositionMS int64        `json:"positionMs"`
-}
+type NowPlaying = domain.NowPlaying
 
-type AuthorizationPrompt struct {
-	State     string `json:"state"`
-	URL       string `json:"url,omitempty"`
-	Code      string `json:"code,omitempty"`
-	ExpiresAt string `json:"expiresAt,omitempty"`
-}
+type AuthorizationPrompt = domain.AuthorizationPrompt
 
-func SpotifyAuthorization(ctx context.Context, c Config) (AuthorizationPrompt, error) {
+func (a *Adapters) SpotifyAuthorization(ctx context.Context, c Config) (AuthorizationPrompt, error) {
 	out := AuthorizationPrompt{State: "NONE"}
 	headers, err := wrapperHeaders(c)
 	if err != nil {
@@ -39,7 +28,7 @@ func SpotifyAuthorization(ctx context.Context, c Config) (AuthorizationPrompt, e
 		return out, err
 	}
 	req.Header = headers
-	res, err := Client.Do(req)
+	res, err := a.http.Do(req)
 	if err != nil {
 		return out, errors.New("authorization unavailable")
 	}
@@ -71,13 +60,13 @@ func wrapperHeaders(c Config) (http.Header, error) {
 	return http.Header{"Authorization": {"Bearer " + c.Token}}, nil
 }
 
-func SpotifyStatus(ctx context.Context, c Config) (NowPlaying, error) {
+func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, error) {
 	out := NowPlaying{Provider: "spotify", State: "STOPPED"}
 	headers, err := wrapperHeaders(c)
 	if err != nil {
 		return out, err
 	}
-	body, err := request(ctx, strings.TrimRight(c.URL, "/")+"/status", headers)
+	body, err := a.request(ctx, strings.TrimRight(c.URL, "/")+"/status", headers)
 	if err != nil {
 		return out, err
 	}
@@ -122,8 +111,8 @@ func truncate(s string, limit int) string {
 	return string(r)
 }
 
-func Spotify(ctx context.Context, c Config) ([]Source, error) {
-	state, err := SpotifyStatus(ctx, c)
+func (a *Adapters) Spotify(ctx context.Context, c Config) ([]Source, error) {
+	state, err := a.SpotifyStatus(ctx, c)
 	if err != nil {
 		return nil, err
 	}
@@ -136,15 +125,11 @@ func Spotify(ctx context.Context, c Config) ([]Source, error) {
 	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}}, nil
 }
 
-type PlayerCommand struct {
-	Action     string `json:"action"`
-	PositionMS int64  `json:"positionMs,omitempty"`
-	Volume     int    `json:"volume,omitempty"`
-}
+type PlayerCommand = domain.PlayerCommand
 
 // Translate a finite semantic command set; never expose arbitrary upstream paths,
 // Spotify tokens, local audio devices or provider request bodies to the client.
-func SpotifyCommand(ctx context.Context, c Config, command PlayerCommand) error {
+func (a *Adapters) SpotifyCommand(ctx context.Context, c Config, command PlayerCommand) error {
 	paths := map[string]string{"pause": "pause", "resume": "resume", "next": "next", "previous": "prev", "stop": "stop", "seek": "seek", "volume": "volume"}
 	path, ok := paths[command.Action]
 	if !ok || command.PositionMS < 0 || command.PositionMS > 604800000 || command.Volume < 0 || command.Volume > 100 {
@@ -168,7 +153,7 @@ func SpotifyCommand(ctx context.Context, c Config, command PlayerCommand) error 
 	}
 	req.Header = headers
 	req.Header.Set("Content-Type", "application/json")
-	res, err := Client.Do(req)
+	res, err := a.http.Do(req)
 	if err != nil {
 		return errors.New("player unavailable")
 	}
@@ -180,12 +165,12 @@ func SpotifyCommand(ctx context.Context, c Config, command PlayerCommand) error 
 	return nil
 }
 
-func AirPlay(ctx context.Context, c Config) ([]Source, error) {
+func (a *Adapters) AirPlay(ctx context.Context, c Config) ([]Source, error) {
 	headers, err := wrapperHeaders(c)
 	if err != nil {
 		return nil, err
 	}
-	body, err := request(ctx, strings.TrimRight(c.URL, "/")+"/status", headers)
+	body, err := a.request(ctx, strings.TrimRight(c.URL, "/")+"/status", headers)
 	if err != nil {
 		return nil, err
 	}

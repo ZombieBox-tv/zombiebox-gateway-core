@@ -26,17 +26,17 @@ func TestYouTubeWrapperBoundary(t *testing.T) {
 		}
 	}))
 	defer wrapper.Close()
-	sources, err := YouTube(context.Background(), Config{URL: wrapper.URL, Token: secret, CatalogID: "nature & science"})
+	sources, err := testAdapters.YouTube(context.Background(), Config{URL: wrapper.URL, Token: secret, CatalogID: "nature & science"})
 	if err != nil || len(sources) != 1 {
 		t.Fatalf("sources: %v %v", sources, err)
 	}
-	resolved, err := Resolve(context.Background(), sources[0])
+	resolved, err := testAdapters.Resolve(context.Background(), sources[0])
 	if err != nil || resolved.URL != origin || len(resolved.Headers) != 0 {
 		t.Fatalf("resolve or credential isolation: %v", err)
 	}
 	for _, bad := range []string{"http://r1.googlevideo.com/x", "https://r1.googlevideo.com.evil.test/x", "https://user:secret@r1.googlevideo.com/x", "file:///etc/passwd"} {
 		origin = bad
-		if _, err = Resolve(context.Background(), sources[0]); err == nil {
+		if _, err = testAdapters.Resolve(context.Background(), sources[0]); err == nil {
 			t.Errorf("accepted %s", bad)
 		}
 	}

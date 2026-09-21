@@ -33,7 +33,8 @@ func (s *Server) screenSources(ctx context.Context, device, provider, query stri
 		return entry.sources, nil
 	}
 	c.CatalogID = query
-	sources, err := providers.YouTube(ctx, c)
+	sources, err := s.deps.Search.YouTube(ctx, c)
+	decorateArtwork(sources)
 	if err != nil {
 		return nil, err
 	}

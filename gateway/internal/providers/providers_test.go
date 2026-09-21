@@ -36,7 +36,7 @@ func TestRedirectDropsCrossOriginTokens(t *testing.T) {
 	defer target.Close()
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, 302) }))
 	defer origin.Close()
-	body, err := request(context.Background(), origin.URL, http.Header{"Authorization": []string{"Bearer secret"}, "X-Plex-Token": []string{"secret"}})
+	body, err := testAdapters.request(context.Background(), origin.URL, http.Header{"Authorization": []string{"Bearer secret"}, "X-Plex-Token": []string{"secret"}})
 	if err != nil || string(body) != "ok" || <-leaked {
 		t.Fatal("redirect leaked credentials or failed", err)
 	}
