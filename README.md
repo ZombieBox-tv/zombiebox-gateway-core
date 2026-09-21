@@ -57,3 +57,5 @@ Dev.16: Revisioned operation/HLS probes, bounded persistent browse locators, You
 ## License
 
 First-party code: [GPL-3.0-only](LICENSE). See [NOTICE](NOTICE) for third-party scope.
+
+Dev.18 adds [persistent artwork caching](docs/artwork-cache.md), shared by Full and Edge.

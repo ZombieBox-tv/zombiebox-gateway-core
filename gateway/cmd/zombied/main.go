@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -36,6 +37,8 @@ func main() {
 	relayControl := flag.String("relay-control-url", "", "private MediaMTX control API base URL")
 	rtspPort := flag.Int("rtsp-port", 8554, "sender-visible RTSP port")
 	enableMedia := flag.Bool("media-tools", false, "enable local FFmpeg probing and conversion")
+	artworkDirectory := flag.String("artwork-cache", "", "processed image cache directory (default: artwork beside state database)")
+	artworkMiB := flag.Int("artwork-cache-mb", 64, "processed image disk budget in MiB, 0 disables persistence, maximum 512")
 	flag.Parse()
 	if *check != "" {
 		client := &http.Client{Timeout: 3 * time.Second}
@@ -75,12 +78,29 @@ func main() {
 		tools = localTools
 		remoteTools = mediatools.NewRemote(localTools, httpclient.Streaming())
 	}
+	if *artworkMiB < 0 || *artworkMiB > 512 {
+		slog.Error("invalid artwork disk cache budget")
+		os.Exit(1)
+	}
+	var artworkCache artwork.Cache
+	if *artworkMiB > 0 {
+		directory := *artworkDirectory
+		if directory == "" {
+			directory = filepath.Join(filepath.Dir(*state), "artwork")
+		}
+		disk, cacheErr := artwork.NewDiskCache(directory, int64(*artworkMiB)<<20)
+		if cacheErr != nil {
+			slog.Warn("artwork disk cache unavailable; using bounded memory cache")
+		} else {
+			artworkCache = disk
+		}
+	}
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
 	deps := server.Dependencies{
 		Reception:       adapters,
 		Browse:          adapters,
 		YouTubeReceiver: adapters,
-		Artwork:         artwork.New(httpclient.Metadata()),
+		Artwork:         artwork.New(httpclient.Metadata(), artworkCache),
 		Catalog:         adapters,
 		Search:          adapters,
 		Resolver:        adapters,

@@ -44,3 +44,7 @@ Product exit gates and physical/account acceptance remain open.
 Stable Home Hero, scoped deep-item history, bounded guide cache, receiver exclusion and native-inventory fields; all container recipes include GPL notices.
 
 No product milestone or physical gate is closed.
+
+## dev.18 increment
+
+Dev.18: bounded persistent artwork derivatives, restart reuse, private cache keys, device/layout profiles and conditional HTTP caching. No physical milestone closes.

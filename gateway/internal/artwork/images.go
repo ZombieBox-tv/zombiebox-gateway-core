@@ -2,13 +2,10 @@
 package artwork
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
-	"image"
-	"image/jpeg"
-	_ "image/png"
 	"io"
 	"net/http"
 	"sync"
@@ -23,39 +20,79 @@ type HTTPClient interface {
 type entry struct {
 	data    []byte
 	expires time.Time
+	used    time.Time
 }
-type Images struct {
-	http  HTTPClient
-	jobs  chan struct{}
-	mu    sync.Mutex
-	cache map[[32]byte]entry
+type flight struct {
+	done chan struct{}
+	data []byte
+	err  error
 }
 
-func New(client HTTPClient) *Images {
-	return &Images{http: client, jobs: make(chan struct{}, 2), cache: map[[32]byte]entry{}}
+type Images struct {
+	disk    Cache
+	flights map[[32]byte]*flight
+	http    HTTPClient
+	jobs    chan struct{}
+	mu      sync.Mutex
+	cache   map[[32]byte]entry
 }
-func (i *Images) Image(ctx context.Context, source domain.Source, hero bool) ([]byte, error) {
+
+func New(client HTTPClient, disk Cache) *Images {
+	return &Images{http: client, disk: disk, jobs: make(chan struct{}, 2), cache: map[[32]byte]entry{}, flights: map[[32]byte]*flight{}}
+}
+func (i *Images) Image(ctx context.Context, source domain.Source, profile domain.ArtworkProfile) (result []byte, err error) {
 	if source.ArtworkURL == "" {
 		return nil, errors.New("no artwork")
 	}
-	width, height := 320, 180
-	if hero {
-		width, height = 960, 540
+	width, height, valid := profileBounds(profile)
+	if !valid {
+		return nil, errors.New("invalid artwork profile")
 	}
 	raw, _ := http.NewRequest("GET", source.ArtworkURL, nil)
 	if raw == nil || (raw.URL.Scheme != "http" && raw.URL.Scheme != "https") || raw.URL.User != nil {
 		return nil, errors.New("invalid artwork")
 	}
-	keyInput := source.ArtworkURL + "\n" + source.ArtworkHeaders.Get("Authorization") + "\n" + source.ArtworkHeaders.Get("X-Plex-Token") + "\n" + source.ArtworkHeaders.Get("X-Emby-Token")
-	if hero {
-		keyInput += "\nhero"
-	}
-	key := sha256.Sum256([]byte(keyInput))
+	// Include every provider header (cookies and future credentials included), URL,
+	// revision and bounded profile. Only the digest becomes a filename.
+	identity, _ := json.Marshal(struct {
+		Version  int
+		URL      string
+		Revision string
+		Headers  http.Header
+		Profile  domain.ArtworkProfile
+	}{2, source.ArtworkURL, source.Item.ImageURL, source.ArtworkHeaders, profile})
+	key := sha256.Sum256(identity)
 	i.mu.Lock()
-	cached, ok := i.cache[key]
-	i.mu.Unlock()
-	if ok && time.Now().Before(cached.expires) {
+	if cached, ok := i.cache[key]; ok && time.Now().Before(cached.expires) {
+		cached.used = time.Now()
+		i.cache[key] = cached
+		i.mu.Unlock()
 		return cached.data, nil
+	}
+	if pending, ok := i.flights[key]; ok {
+		i.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-pending.done:
+			return pending.data, pending.err
+		}
+	}
+	pending := &flight{done: make(chan struct{})}
+	i.flights[key] = pending
+	i.mu.Unlock()
+	defer func() {
+		i.mu.Lock()
+		pending.data, pending.err = result, err
+		delete(i.flights, key)
+		close(pending.done)
+		i.mu.Unlock()
+	}()
+	if i.disk != nil {
+		if data, expires, ok := i.disk.Get(key); ok {
+			i.remember(key, data, expires)
+			return data, nil
+		}
 	}
 	select {
 	case i.jobs <- struct{}{}:
@@ -82,43 +119,30 @@ func (i *Images) Image(ctx context.Context, source domain.Source, hero bool) ([]
 	if err != nil || len(data) > 4<<20 {
 		return nil, errors.New("artwork too large")
 	}
-	config, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || (format != "jpeg" && format != "png") || config.Width <= 0 || config.Height <= 0 || config.Width > 4096 || config.Height > 4096 || config.Width*config.Height > 4_000_000 {
-		return nil, errors.New("unsupported artwork")
-	}
-	decoded, _, err := image.Decode(bytes.NewReader(data))
+	result, err = compress(ctx, data, width, height)
 	if err != nil {
-		return nil, errors.New("invalid artwork")
+		return nil, err
 	}
-	// Fit without distortion, never upscale. The view chooses a crop for its layout.
-	if width > config.Width {
-		width = config.Width
+	expires := time.Now().Add(24 * time.Hour)
+	if i.disk != nil {
+		i.disk.Put(key, result, expires)
 	}
-	height = min(height, max(1, config.Height*width/config.Width))
-	width = min(width, max(1, config.Width*height/config.Height))
-	resized := image.NewRGBA(image.Rect(0, 0, width, height))
-	bounds := decoded.Bounds()
-	for y := 0; y < height; y++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		for x := 0; x < width; x++ {
-			resized.Set(x, y, decoded.At(bounds.Min.X+x*config.Width/width, bounds.Min.Y+y*config.Height/height))
-		}
-	}
-	var output bytes.Buffer
-	if jpeg.Encode(&output, resized, &jpeg.Options{Quality: 75}) != nil || output.Len() > 256<<10 {
-		return nil, errors.New("derivative too large")
-	}
-	result := output.Bytes()
-	i.mu.Lock()
-	if len(i.cache) >= 32 {
-		for k := range i.cache {
-			delete(i.cache, k)
-			break
-		}
-	}
-	i.cache[key] = entry{result, time.Now().Add(15 * time.Minute)}
-	i.mu.Unlock()
+	i.remember(key, result, expires)
 	return result, nil
+}
+
+func (i *Images) remember(key [32]byte, data []byte, expires time.Time) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.cache) >= 32 {
+		var oldest [32]byte
+		var used time.Time
+		for candidate, value := range i.cache {
+			if used.IsZero() || value.used.Before(used) {
+				oldest, used = candidate, value.used
+			}
+		}
+		delete(i.cache, oldest)
+	}
+	i.cache[key] = entry{data: data, expires: expires, used: time.Now()}
 }

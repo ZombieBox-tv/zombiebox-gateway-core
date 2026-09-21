@@ -47,7 +47,7 @@ type Browser interface {
 type YouTubeReceiver = youtubereceiver.Backend
 
 type Artwork interface {
-	Image(context.Context, domain.Source, bool) ([]byte, error)
+	Image(context.Context, domain.Source, domain.ArtworkProfile) ([]byte, error)
 }
 
 type Media interface {

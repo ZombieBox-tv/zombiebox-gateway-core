@@ -3,8 +3,10 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"zombiebox.local/gateway/internal/domain"
 )
@@ -12,7 +14,12 @@ import (
 func decorateArtwork(sources []domain.Source) {
 	for i := range sources {
 		if sources[i].ArtworkURL != "" {
-			sum := sha256.Sum256([]byte(sources[i].ArtworkURL + sources[i].Item.Title))
+			identity, _ := json.Marshal(struct {
+				URL     string
+				Title   string
+				Headers http.Header
+			}{sources[i].ArtworkURL, sources[i].Item.Title, sources[i].ArtworkHeaders})
+			sum := sha256.Sum256(identity)
 			sources[i].Item.ImageURL = "/v1/artwork/" + url.PathEscape(sources[i].Item.ID) + "?rev=" + hex.EncodeToString(sum[:8])
 		}
 	}
@@ -51,12 +58,46 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request, d domain.Device
 		fail(w, 404, "artwork_unavailable")
 		return
 	}
-	data, err := s.deps.Artwork.Image(r.Context(), *source, r.URL.Query().Get("size") == "hero")
+	data, err := s.deps.Artwork.Image(r.Context(), *source, artworkProfile(d, r.URL.Query().Get("size")))
 	if err != nil {
 		fail(w, 404, "artwork_unavailable")
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Header().Set("Vary", "Authorization")
+	sum := sha256.Sum256(data)
+	etag := "\"" + hex.EncodeToString(sum[:]) + "\""
+	w.Header().Set("ETag", etag)
+	for _, candidate := range strings.Split(r.Header.Get("If-None-Match"), ",") {
+		value := strings.TrimSpace(candidate)
+		if strings.TrimPrefix(value, "W/") == etag || value == "*" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
 	w.Write(data)
+}
+
+// Conservative unknown-device defaults; the layout role and memory/display tier
+// select a finite variant. Clients cannot request arbitrary pixel dimensions.
+func artworkProfile(device domain.Device, size string) domain.ArtworkProfile {
+	registration := device.Registration
+	low := registration.Memory.PhysicalMB <= 768 || registration.Memory.ClassMB <= 96 || registration.Display.Width <= 960
+	if size == "hero" {
+		if low {
+			return domain.ArtworkHeroSmall
+		}
+		return domain.ArtworkHeroMedium
+	}
+	if size == "poster" {
+		if low {
+			return domain.ArtworkPosterSmall
+		}
+		return domain.ArtworkPosterMedium
+	}
+	if low {
+		return domain.ArtworkLandscapeSmall
+	}
+	return domain.ArtworkLandscapeMedium
 }
