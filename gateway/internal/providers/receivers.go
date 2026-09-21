@@ -3,6 +3,8 @@ package providers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -77,6 +79,7 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 		VolumeSteps                int `json:"volume_steps"`
 		Track                      *struct {
 			Name     string
+			Cover    string   `json:"album_cover_url"`
 			Artists  []string `json:"artist_names"`
 			Duration int64
 			Position int64
@@ -98,6 +101,10 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 		}
 	}
 	if status.Track != nil {
+		cover, err := url.Parse(status.Track.Cover)
+		if err == nil && cover.Scheme == "https" && cover.Host == "i.scdn.co" && cover.User == nil && len(status.Track.Cover) <= 2048 {
+			out.ArtworkURL = status.Track.Cover
+		}
 		out.PositionMS = max(0, status.Track.Position)
 		out.Item = &domain.Item{ID: "spotify-connect", Provider: "spotify", Kind: "audio", Title: truncate(status.Track.Name, 500), Subtitle: truncate(strings.Join(status.Track.Artists, ", "), 1000), DurationMS: max(0, status.Track.Duration), Playable: !status.Stopped}
 	}
@@ -127,7 +134,7 @@ func spotifySource(c Config, state NowPlaying) Source {
 		item.Playable = true
 	}
 	headers, _ := wrapperHeaders(c)
-	return Source{Item: item, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}
+	return Source{Item: item, ArtworkURL: state.ArtworkURL, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}
 }
 
 type PlayerCommand = domain.PlayerCommand
@@ -180,13 +187,22 @@ func (a *Adapters) AirPlay(ctx context.Context, c Config) ([]Source, error) {
 		return nil, err
 	}
 	var status struct {
-		Active      bool `json:"active"`
-		AudioActive bool `json:"audioActive"`
+		Active      bool                                  `json:"active"`
+		AudioActive bool                                  `json:"audioActive"`
+		Metadata    struct{ Title, Artist, Album string } `json:"metadata"`
 	}
 	if json.Unmarshal(body, &status) != nil {
 		return nil, errors.New("invalid receiver status")
 	}
 	item := domain.Item{ID: "airplay-live", Provider: "airplay", Kind: "video", Title: "AirPlay", Subtitle: "Start Screen Mirroring on your Apple device", Playable: status.Active}
 	audio := domain.Item{ID: "airplay-audio", Provider: "airplay", Kind: "audio", Title: "AirPlay audio", Subtitle: "Select Zombie Box as the audio output on your Apple device", Playable: status.AudioActive}
-	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/stream/index.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}, {Item: audio, URL: strings.TrimRight(c.URL, "/") + "/stream/audio.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}}, nil
+	artwork := ""
+	if status.AudioActive && status.Metadata.Title != "" {
+		audio.Title = truncate(status.Metadata.Title, 500)
+		audio.Subtitle = truncate(status.Metadata.Artist, 500)
+		audio.Description = truncate(status.Metadata.Album, 500)
+		sum := sha256.Sum256([]byte(audio.Title + "\x00" + audio.Subtitle))
+		artwork = strings.TrimRight(c.URL, "/") + "/artwork?rev=" + hex.EncodeToString(sum[:8])
+	}
+	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/stream/index.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}, {Item: audio, ArtworkURL: artwork, ArtworkHeaders: headers, URL: strings.TrimRight(c.URL, "/") + "/stream/audio.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}}, nil
 }

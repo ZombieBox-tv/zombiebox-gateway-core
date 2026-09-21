@@ -33,3 +33,8 @@ No product milestone or physical/account gate closes with this checkpoint.
 
 Bounded clear HLS/DASH manifest adaptation, authenticated segment graph, remux/transcode and planner integration shared by Full/Edge.
 The four requested block-1 changes are implemented; physical acceptance and broader product gates remain open.
+
+## dev.16 increment
+
+Revisioned operation/HLS probes, bounded persistent browse locators, YouTube hierarchy, stable IPTV IDs, receiver metadata/artwork and browser egress/pointer/recovery.
+Product exit gates and physical/account acceptance remain open.

@@ -132,8 +132,13 @@ func Handler(ctx context.Context, c Config) http.Handler {
 			audio, audioErr := os.Stat(filepath.Join(c.StateDir, "hls", "audio.m3u8"))
 			audioActive := audioErr == nil && time.Since(audio.ModTime()) < 15*time.Second
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]bool{"active": active, "audioActive": audioActive})
+			status := map[string]any{"active": active, "audioActive": audioActive}
+			if audioActive {
+				status["metadata"] = airplayMetadata(c.StateDir)
+			}
+			_ = json.NewEncoder(w).Encode(status)
 		})
+		mux.HandleFunc("GET /artwork", func(w http.ResponseWriter, r *http.Request) { airplayArtwork(c.StateDir, w, r) })
 		mux.HandleFunc("GET /stream/{file}", func(w http.ResponseWriter, r *http.Request) {
 			name := r.PathValue("file")
 			if name != "index.m3u8" && name != "audio.m3u8" && !regexp.MustCompile(`^(segment|audio)[0-9]+\.ts$`).MatchString(name) {

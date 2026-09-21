@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -91,19 +92,45 @@ func (s *Server) browserOperation(w http.ResponseWriter, r *http.Request, d doma
 		var command struct {
 			Action string `json:"action"`
 			Text   string `json:"text"`
+			X      *int   `json:"x,omitempty"`
+			Y      *int   `json:"y,omitempty"`
 		}
 		if !decode(w, r, &command) {
 			return
 		}
-		allowed := map[string]bool{"navigate": true, "text": true, "key": true, "back": true, "forward": true, "reload": true}
+		allowed := map[string]bool{"navigate": true, "text": true, "key": true, "back": true, "forward": true, "reload": true, "click": true, "move": true, "scroll": true}
 		if !allowed[command.Action] || len(command.Text) > 2048 {
 			fail(w, 400, "invalid_browser_command")
 			return
+		}
+		if command.Action == "click" || command.Action == "move" || command.Action == "scroll" {
+			if command.X == nil || command.Y == nil {
+				fail(w, 400, "invalid_pointer")
+				return
+			}
+			x, y := *command.X, *command.Y
+			valid := x >= 0 && x < 960 && y >= 0 && y < 540
+			if command.Action == "scroll" {
+				valid = x >= -960 && x <= 960 && y >= -540 && y <= 540
+			}
+			if !valid {
+				fail(w, 400, "invalid_pointer")
+				return
+			}
 		}
 		body = command
 		path += "/input"
 	}
 	data, err := s.deps.Browser.BrowserRequest(ctx, session.config, r.Method, path, body)
+	if errors.Is(err, domain.ErrNotFound) {
+		s.mu.Lock()
+		if s.browser == session {
+			s.browser = nil
+		}
+		s.mu.Unlock()
+		fail(w, 410, "browser_expired")
+		return
+	}
 	if err != nil {
 		fail(w, 502, "browser_unavailable")
 		return

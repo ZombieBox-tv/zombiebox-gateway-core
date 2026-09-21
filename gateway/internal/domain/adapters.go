@@ -34,6 +34,7 @@ type Source struct {
 }
 
 type NowPlaying struct {
+	ArtworkURL string `json:"-"`
 	Provider   string `json:"provider"`
 	State      string `json:"state"`
 	Item       *Item  `json:"item,omitempty"`

@@ -21,7 +21,7 @@ func TestSpotifySemanticBoundary(t *testing.T) {
 			command = r.URL.Path + " " + string(b)
 			return
 		}
-		io.WriteString(w, `{"username":"private-account","device_id":"private-id","stopped":false,"paused":true,"volume":40,"volume_steps":80,"track":{"name":"Song","artist_names":["Artist"],"duration":9000,"position":1200}}`)
+		io.WriteString(w, `{"username":"private-account","device_id":"private-id","stopped":false,"paused":true,"volume":40,"volume_steps":80,"track":{"name":"Song","album_cover_url":"https://i.scdn.co/image/fixture","artist_names":["Artist"],"duration":9000,"position":1200}}`)
 	}))
 	defer upstream.Close()
 	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("t", 32)}
@@ -30,12 +30,15 @@ func TestSpotifySemanticBoundary(t *testing.T) {
 		t.Fatalf("status: %+v %v", status, err)
 	}
 	raw, _ := json.Marshal(status)
-	if strings.Contains(string(raw), "private-") {
+	if strings.Contains(string(raw), "private-") || strings.Contains(string(raw), "i.scdn.co") {
 		t.Fatal("upstream identity leaked")
 	}
 	sources, err := testAdapters.Fetch(context.Background(), "spotify", c, "")
 	if err != nil || len(sources) != 1 || !sources[0].Live || sources[0].MIME != "audio/mpeg" {
 		t.Fatalf("sources: %+v %v", sources, err)
+	}
+	if sources[0].ArtworkURL != "https://i.scdn.co/image/fixture" || len(sources[0].ArtworkHeaders) != 0 {
+		t.Fatal("artwork lost or token forwarded to CDN")
 	}
 	if err = testAdapters.SpotifyCommand(context.Background(), c, PlayerCommand{Action: "seek", PositionMS: 1200}); err != nil {
 		t.Fatal(err)

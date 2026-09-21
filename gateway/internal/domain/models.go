@@ -51,9 +51,11 @@ type Probe struct {
 	PrepareMS    int    `json:"prepareMs"`
 }
 type Capabilities struct {
-	Version  int     `json:"capabilitiesVersion"`
-	DeviceID string  `json:"deviceId"`
-	Probes   []Probe `json:"probes"`
+	SuiteVersion int     `json:"suiteVersion,omitempty"`
+	CacheKey     string  `json:"cacheKey,omitempty"`
+	Version      int     `json:"capabilitiesVersion"`
+	DeviceID     string  `json:"deviceId"`
+	Probes       []Probe `json:"probes"`
 }
 type Device struct {
 	ID           string       `json:"deviceId"`

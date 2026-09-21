@@ -27,7 +27,7 @@ func (s *Server) browsePage(w http.ResponseWriter, r *http.Request, d domain.Dev
 		fail(w, 400, "invalid_browse_request")
 		return
 	}
-	if s.deps.Browse == nil || (provider != "plex" && provider != "jellyfin" && provider != "stremio") {
+	if s.deps.Browse == nil || (provider != "plex" && provider != "jellyfin" && provider != "stremio" && provider != "youtube") {
 		fail(w, 404, "browse_unavailable")
 		return
 	}
@@ -58,14 +58,24 @@ func (s *Server) browsePage(w http.ResponseWriter, r *http.Request, d domain.Dev
 }
 
 func (s *Server) browseSource(ctx context.Context, device, id string) *domain.Source {
-	entry, ok := s.browse.Source(device, id)
+	provider := s.browse.Provider(ctx, device, id)
+	if provider == "" {
+		return nil
+	}
+	s.mu.Lock()
+	config, revision := s.config(ctx, provider), s.configRevision[provider]
+	s.mu.Unlock()
+	if !config.Enabled {
+		return nil
+	}
+	entry, ok := s.browse.Resolve(ctx, device, id, config, revision)
 	if !ok {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	provider := entry.Source.Item.Provider
-	if !s.config(ctx, provider).Enabled || s.configRevision[provider] != entry.Revision {
+	unchanged := revision == s.configRevision[provider]
+	s.mu.Unlock()
+	if !unchanged {
 		return nil
 	}
 	return &entry.Source

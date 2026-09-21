@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"zombiebox.local/gateway/internal/domain"
 )
 
 // BrowserRequest is a private adapter call; paths are constructed by the gateway,
@@ -38,6 +40,9 @@ func (a *Adapters) BrowserRequest(ctx context.Context, c Config, method, path st
 	data, err := io.ReadAll(io.LimitReader(res.Body, 1<<20+1))
 	if err != nil || len(data) > 1<<20 {
 		return nil, errors.New("invalid browser response")
+	}
+	if res.StatusCode == 404 || res.StatusCode == 410 {
+		return nil, domain.ErrNotFound
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return nil, errors.New("browser unavailable")

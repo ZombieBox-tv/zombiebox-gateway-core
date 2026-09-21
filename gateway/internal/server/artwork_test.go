@@ -37,7 +37,7 @@ func TestPrivateArtworkIsReplacedByAuthenticatedDerivative(t *testing.T) {
 	}
 	var screen domain.Screen
 	json.Unmarshal(home.Body.Bytes(), &screen)
-	if screen.Hero == nil || screen.Hero.Item.ImageURL != "/v1/artwork/plex-1" {
+	if screen.Hero == nil || !strings.HasPrefix(screen.Hero.Item.ImageURL, "/v1/artwork/plex-1?rev=") {
 		t.Fatal(home.Body)
 	}
 	if w := call(s, "GET", screen.Hero.Item.ImageURL, "", "", "", ""); w.Code != 401 {

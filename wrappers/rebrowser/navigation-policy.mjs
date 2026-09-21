@@ -1,8 +1,9 @@
 import { lookup } from "node:dns/promises";
 import net from "node:net";
 
-function publicAddress(address) {
-  if (net.isIP(address) === 6) return !/^(::|fe[89ab]|f[cd])/i.test(address);
+export function publicAddress(address) {
+  if (net.isIP(address) === 6)
+    return /^[23][0-9a-f]{3}:/i.test(address) && !/^(2001:(0*:|db8:)|2002:)/i.test(address);
   const [a, b] = address.split(".").map(Number);
   return (
     net.isIP(address) === 4 &&

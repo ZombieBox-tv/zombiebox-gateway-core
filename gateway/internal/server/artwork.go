@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 
@@ -10,7 +12,8 @@ import (
 func decorateArtwork(sources []domain.Source) {
 	for i := range sources {
 		if sources[i].ArtworkURL != "" {
-			sources[i].Item.ImageURL = "/v1/artwork/" + url.PathEscape(sources[i].Item.ID)
+			sum := sha256.Sum256([]byte(sources[i].ArtworkURL + sources[i].Item.Title))
+			sources[i].Item.ImageURL = "/v1/artwork/" + url.PathEscape(sources[i].Item.ID) + "?rev=" + hex.EncodeToString(sum[:8])
 		}
 	}
 }
@@ -21,6 +24,21 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request, d domain.Device
 	}
 	id := r.PathValue("item")
 	source := s.searchSource(r.Context(), d.ID, id)
+	if (id == "spotify-connect" || id == "airplay-audio") && s.deps.Reception != nil {
+		provider := "spotify"
+		if id == "airplay-audio" {
+			provider = "airplay"
+		}
+		s.mu.Lock()
+		config := s.config(r.Context(), provider)
+		s.mu.Unlock()
+		if config.Enabled {
+			current, _, err := s.deps.Reception.Reception(r.Context(), provider, config)
+			if err == nil && current != nil && current.Item.ID == id {
+				source = current
+			}
+		}
+	}
 	if source == nil {
 		for _, candidate := range s.catalog(r.Context()) {
 			if candidate.Item.ID == id {

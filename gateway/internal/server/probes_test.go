@@ -73,3 +73,40 @@ func TestChangedPlatformInvalidatesPreviouslyMeasuredCapabilities(t *testing.T) 
 		t.Fatal("stale evidence survived firmware change", w.Body)
 	}
 }
+
+func TestHLSProbeScopesItsSegmentAndRejectsStaleResults(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	os.WriteFile(filepath.Join(s.opt.ProbeDir, "baseline.ts"), []byte("transport fixture"), 0600)
+	token := pair(t, s, "probe-device")
+	w := call(s, "GET", "/v1/probes?suite=2", "", "probe-device", token, "")
+	var manifest struct {
+		SuiteVersion int
+		CacheKey     string
+		Probes       []probeAsset
+	}
+	if json.Unmarshal(w.Body.Bytes(), &manifest) != nil || manifest.SuiteVersion != 2 || len(manifest.CacheKey) != 64 {
+		t.Fatal(w.Body)
+	}
+	for _, probe := range manifest.Probes {
+		if probe.Kind != "hls" {
+			continue
+		}
+		response := call(s, "GET", probe.URL, "", "", "", "")
+		if response.Code != 200 || !strings.Contains(response.Body.String(), "#EXT-X-ENDLIST") {
+			t.Fatal(response.Body)
+		}
+		for _, line := range strings.Split(response.Body.String(), "\n") {
+			if strings.HasPrefix(line, "/v1/probes/") {
+				segment := call(s, "GET", line, "", "", "", "")
+				if segment.Code != 200 || segment.Body.String() != "transport fixture" {
+					t.Fatal(segment.Body)
+				}
+			}
+		}
+	}
+	body := `{"capabilitiesVersion":1,"deviceId":"probe-device","suiteVersion":2,"cacheKey":"wrong","probes":[]}`
+	if response := call(s, "PUT", "/v1/device/capabilities", body, "probe-device", token, ""); response.Code != 409 {
+		t.Fatal(response.Code)
+	}
+}

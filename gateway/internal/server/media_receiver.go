@@ -34,6 +34,12 @@ func (a receiverAdapter) Read(ctx context.Context, provider string) (*domain.Sou
 	if !unchanged {
 		return nil, status, inbox.ErrChanged
 	}
+	if selected != nil {
+		sources := []domain.Source{*selected}
+		decorateArtwork(sources)
+		selected = &sources[0]
+		status.Item = &selected.Item
+	}
 	return selected, status, nil
 }
 

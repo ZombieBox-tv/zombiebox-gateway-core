@@ -24,3 +24,10 @@ supports packaging only; Playwright is not a product runtime dependency.
 Puppeteer Core is Apache-2.0 and is pinned in `package-lock.json`. Its source/docs
 clone and the packaging reference are restored by `make references`. Chromium
 and its bundled dependencies retain their package-provided notices.
+
+Dev.16 routes Chromium through a bounded local HTTP/CONNECT proxy which resolves
+and validates once, then connects to the checked numeric address. HTTPS remains
+end-to-end. Implicit loopback bypass, QUIC and non-proxied WebRTC UDP are disabled.
+This is application-level egress control, not an OS firewall against a compromised
+browser process. Pointer commands are bounded to the 960×540 viewport; expired
+worker sessions return a semantic expiration so the user can reopen the page.

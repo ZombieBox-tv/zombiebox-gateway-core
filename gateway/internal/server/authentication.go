@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -32,6 +33,7 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, domain.Devic
 		s.mu.Lock()
 		s.seen[d.ID] = time.Now()
 		s.mu.Unlock()
+		d.Capabilities = devices.CurrentCapabilities(d)
 		next(w, r, d)
 	}
 }

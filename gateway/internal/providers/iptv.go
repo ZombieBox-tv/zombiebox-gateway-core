@@ -80,6 +80,7 @@ func ParseM3U(body []byte, base string) ([]Source, error) {
 	title := ""
 	epgID := ""
 	out := []Source{}
+	seen := map[string]bool{}
 	for scan.Scan() {
 		line := strings.TrimSpace(scan.Text())
 		if strings.HasPrefix(line, "#EXTINF:") {
@@ -120,14 +121,25 @@ func ParseM3U(body []byte, base string) ([]Source, error) {
 		if title == "" {
 			title = fmt.Sprintf("Channel %d", len(out)+1)
 		}
-		sum := sha256.Sum256([]byte(u.String()))
+		identity := u.String()
+		if epgID != "" {
+			identity = "xmltv:" + epgID + "\x00" + title
+		}
+		sum := sha256.Sum256([]byte(identity))
 		id := "iptv-" + hex.EncodeToString(sum[:8])
+		if seen[id] {
+			title = ""
+			epgID = ""
+			continue
+		}
+		seen[id] = true
 		mime := "video/mp2t"
 		if strings.Contains(strings.ToLower(u.Path), "m3u8") {
 			mime = "application/vnd.apple.mpegurl"
 		}
 		out = append(out, Source{EPGID: epgID, Item: domain.Item{ID: id, Provider: "iptv", Kind: "channel", Title: title, Playable: true}, URL: u.String(), MIME: mime, Live: true})
 		title = ""
+		epgID = ""
 		if len(out) >= 5000 {
 			break
 		}

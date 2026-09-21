@@ -74,7 +74,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		req.Platform.ABIs = []string{}
 	}
 	req.PairingCode = ""
-	if !reflect.DeepEqual(existing.Registration.Platform, req.Platform) || existing.Registration.Memory != req.Memory {
+	if existing.Registration.ClientVersion != req.ClientVersion || !reflect.DeepEqual(existing.Registration.Platform, req.Platform) || existing.Registration.Memory != req.Memory {
 		existing.Capabilities = domain.Capabilities{Version: 1, DeviceID: existing.ID, Probes: []domain.Probe{}}
 	} else if req.Hardware == nil {
 		req.Hardware = existing.Registration.Hardware

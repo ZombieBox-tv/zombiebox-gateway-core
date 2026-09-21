@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -65,6 +66,10 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request, d domain.D
 	defer s.mu.Unlock()
 	if s.db.Get(r.Context(), "devices", d.ID, &d) != nil {
 		fail(w, 500, "storage_error")
+		return
+	}
+	if (c.SuiteVersion != 0 || c.CacheKey != "") && (c.SuiteVersion != devices.ProbeSuiteVersion || c.CacheKey != devices.ProbeCacheKey(d)) {
+		fail(w, 409, "stale_probe_suite")
 		return
 	}
 	if c.Probes == nil {

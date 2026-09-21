@@ -78,7 +78,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 		catalogCache: map[string]catalogEntry{},
 	}
 	s.youtubeReceiver = youtubereceiver.New(deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
-	s.browse = catalog.NewBrowser(deps.Browse)
+	s.browse = catalog.NewPersistentBrowser(deps.Browse, db)
 	s.probeKey = randomID(32)
 	s.relayJobs = make(chan struct{}, 4)
 	s.integrationChecks = make(chan struct{}, 2)

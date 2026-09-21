@@ -1,5 +1,6 @@
 import { webURL, allowed } from "./navigation-policy.mjs";
 import http from "node:http";
+import { createEgressProxy } from "./egress-proxy.mjs";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import puppeteer from "puppeteer-core";
@@ -16,6 +17,7 @@ async function close() {
   const old = session;
   session = null;
   if (old) {
+    old.proxy.close();
     await old.browser.close().catch(() => {});
     await rm(old.directory, { recursive: true, force: true });
   }
@@ -24,13 +26,19 @@ async function start(id, url) {
   if (!idPattern.test(id) || !(await allowed(url))) throw Error("Invalid session");
   const directory = await mkdtemp("/tmp/zombie-browser-");
   let browser;
+  let proxy;
   try {
+    proxy = await createEgressProxy();
     browser = await puppeteer.launch({
       executablePath: "/usr/bin/chromium-browser",
       headless: true,
       timeout: 8000,
       userDataDir: directory,
       args: [
+        `--proxy-server=http://127.0.0.1:${proxy.port}`,
+        "--proxy-bypass-list=<-loopback>",
+        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+        "--disable-quic",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-background-networking",
@@ -63,8 +71,12 @@ async function start(id, url) {
     await cdp.send("Browser.setDownloadBehavior", { behavior: "deny" });
     await cdp.detach();
     await page.goto(url, { waitUntil: "domcontentloaded" });
-    session = { id, browser, page, directory, touched: Date.now() };
+    session = { id, browser, page, directory, proxy, touched: Date.now() };
+    browser.on("disconnected", () => {
+      if (session?.browser === browser) void close();
+    });
   } catch (error) {
+    proxy?.close();
     await browser?.close().catch(() => {});
     await rm(directory, { recursive: true, force: true });
     throw error;
@@ -145,6 +157,17 @@ const server = http.createServer(async (req, res) => {
       if (command.action === "navigate") {
         if (!(await allowed(command.text))) throw Error("Invalid URL");
         await page.goto(command.text, { waitUntil: "domcontentloaded" });
+      } else if (["click", "move", "scroll"].includes(command.action)) {
+        const { x, y } = command;
+        if (!Number.isInteger(x) || !Number.isInteger(y)) throw Error("Invalid pointer");
+        if (command.action === "scroll") {
+          if (Math.abs(x) > 960 || Math.abs(y) > 540) throw Error("Invalid scroll");
+          await page.mouse.wheel({ deltaX: x, deltaY: y });
+        } else {
+          if (x < 0 || x >= 960 || y < 0 || y >= 540) throw Error("Invalid pointer");
+          if (command.action === "click") await page.mouse.click(x, y);
+          else await page.mouse.move(x, y);
+        }
       } else if (
         command.action === "text" &&
         typeof command.text === "string" &&

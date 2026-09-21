@@ -51,3 +51,5 @@ Dev.13: Explicit retry positions and opt-in continuous live MPEG-TS adaptation; 
 
 Bounded clear HLS/DASH manifest adaptation, authenticated segment graph, remux/transcode and planner integration shared by Full/Edge.
 The four requested block-1 changes are implemented; physical acceptance and broader product gates remain open.
+
+Dev.16: Revisioned operation/HLS probes, bounded persistent browse locators, YouTube hierarchy, stable IPTV IDs, receiver metadata/artwork and browser egress/pointer/recovery.

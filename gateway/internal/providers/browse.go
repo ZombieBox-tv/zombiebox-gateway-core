@@ -13,6 +13,8 @@ func (a *Adapters) Browse(ctx context.Context, provider string, config Config, p
 		return domain.BrowseResult{}, errors.New("invalid offset")
 	}
 	switch provider {
+	case "youtube":
+		return a.browseYouTube(ctx, config, parent, query, offset)
 	case "plex":
 		return a.browsePlex(ctx, config, parent, query, offset)
 	case "jellyfin":

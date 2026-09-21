@@ -1,3 +1,4 @@
+import { validParent } from "./browse.mjs";
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -38,15 +39,21 @@ export function createWrapper({
     if (!equal(req.headers.authorization ?? "", `Bearer ${token}`))
       return reply(401, { error: "unauthorized" });
     const id = url.pathname.startsWith("/resolve/") ? url.pathname.slice(9) : "";
-    if (url.pathname !== "/catalog" && !/^[\w-]{11}$/.test(id))
+    if (url.pathname !== "/catalog" && url.pathname !== "/browse" && !/^[\w-]{11}$/.test(id))
       return reply(404, { error: "not_found" });
     const query = url.searchParams.get("q") ?? "";
     if (query.length > 200) return reply(400, { error: "invalid_query" });
+    const parent = url.searchParams.get("parent") ?? "";
+    const offset = Number(url.searchParams.get("offset") ?? 0);
+    if (!validParent(parent) || !Number.isInteger(offset) || offset < 0 || offset > 360)
+      return reply(400, { error: "invalid_browse" });
     if (active) return reply(503, { error: "busy" });
     let worker;
     try {
       worker = workerFactory({
-        operation: id ? "resolve" : "catalog",
+        operation: id ? "resolve" : url.pathname === "/browse" ? "browse" : "catalog",
+        parent,
+        offset,
         id,
         query,
         cookie,

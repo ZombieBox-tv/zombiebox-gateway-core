@@ -1,6 +1,7 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { Innertube, Platform, Log } from "youtubei.js";
 import { resolveFormats } from "./formats.mjs";
+import { browse } from "./browse.mjs";
 import { evaluate } from "./interpreter.mjs";
 
 Platform.shim.eval = evaluate;
@@ -17,6 +18,7 @@ async function run() {
     po_token: poToken,
     visitor_data: visitorData,
   });
+  if (operation === "browse") return browse(yt, workerData.parent, query, workerData.offset);
   if (operation === "catalog") {
     const feed = query ? await yt.search(query, { type: "video" }) : await yt.getHomeFeed();
     const items = [];
