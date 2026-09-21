@@ -117,6 +117,7 @@ type Event struct {
 	DeviceID   string `json:"-"`
 }
 type Plan struct {
+	SubtitleID       *int   `json:"subtitleId,omitempty"`
 	TimelineOffsetMS int64  `json:"timelineOffsetMs,omitempty"`
 	Version          int    `json:"playbackVersion"`
 	SessionID        string `json:"sessionId"`

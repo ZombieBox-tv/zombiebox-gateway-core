@@ -60,6 +60,9 @@ type RemoteMedia interface {
 	ProbeRemote(context.Context, domain.Source) (domain.Metadata, error)
 	ConvertRemote(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error
 }
+type RemoteSubtitles interface {
+	SubtitlesRemote(context.Context, domain.Source, int) ([]domain.SubtitleCue, error)
+}
 type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
@@ -67,6 +70,7 @@ type HTTPClient interface {
 // Dependencies are immutable after construction. Media and Artwork are optional.
 // Keep control requests and unbounded-duration streaming on separate transports.
 type Dependencies struct {
+	RemoteSubtitles RemoteSubtitles
 	Reception       Reception
 	RemoteMedia     RemoteMedia
 	Browse          catalog.Backend

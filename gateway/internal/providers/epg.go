@@ -44,14 +44,14 @@ func ParseXMLTV(body []byte, now time.Time) (map[string][]domain.Programme, erro
 		}
 		begin, e1 := time.Parse("20060102150405 -0700", p.Start)
 		end, e2 := time.Parse("20060102150405 -0700", p.Stop)
-		if e1 != nil || e2 != nil || !end.After(now) || !end.After(begin) || p.Channel == "" || p.Title == "" || begin.After(now.Add(24*time.Hour)) {
+		if e1 != nil || e2 != nil || !end.After(now) || !end.After(begin) || p.Channel == "" || p.Title == "" || begin.After(now.Add(48*time.Hour)) {
 			continue
 		}
 		// Descriptions are deliberately excluded from the channel row payload.
 		result[p.Channel] = append(result[p.Channel], domain.Programme{Title: p.Title, Start: begin.Unix(), End: end.Unix()})
 		sort.Slice(result[p.Channel], func(i, j int) bool { return result[p.Channel][i].Start < result[p.Channel][j].Start })
-		if len(result[p.Channel]) > 48 {
-			result[p.Channel] = result[p.Channel][:48]
+		if len(result[p.Channel]) > 96 {
+			result[p.Channel] = result[p.Channel][:96]
 		}
 	}
 }

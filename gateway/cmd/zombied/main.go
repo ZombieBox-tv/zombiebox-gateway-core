@@ -73,10 +73,12 @@ func main() {
 	}
 	var tools server.Media
 	var remoteTools server.RemoteMedia
+	var remoteSubtitles server.RemoteSubtitles
 	if *enableMedia {
 		localTools := mediatools.New("ffmpeg", "ffprobe")
 		tools = localTools
-		remoteTools = mediatools.NewRemote(localTools, httpclient.Streaming())
+		remote := mediatools.NewRemote(localTools, httpclient.Streaming())
+		remoteTools, remoteSubtitles = remote, remote
 	}
 	if *artworkMiB < 0 || *artworkMiB > 512 {
 		slog.Error("invalid artwork disk cache budget")
@@ -108,6 +110,7 @@ func main() {
 		Browser:         adapters,
 		Media:           tools,
 		RemoteMedia:     remoteTools,
+		RemoteSubtitles: remoteSubtitles,
 		ControlHTTP:     httpclient.Private(),
 		StreamHTTP:      httpclient.Streaming(),
 	}

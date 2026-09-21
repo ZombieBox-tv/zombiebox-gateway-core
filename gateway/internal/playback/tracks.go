@@ -23,7 +23,7 @@ func Inventory(metadata domain.Metadata, selected *int) domain.TrackInventory {
 
 func TextSubtitle(codec string) bool {
 	switch codec {
-	case "subrip", "srt", "webvtt", "ass", "ssa", "mov_text", "text":
+	case "subrip", "srt", "webvtt", "vtt", "ass", "ssa", "mov_text", "text":
 		return true
 	default:
 		return false

@@ -15,6 +15,14 @@ var Titles = map[string]string{"youtube_receiver": "YouTube Receiver", "local": 
 var Order = []string{"local", "youtube", "plex", "jellyfin", "stremio", "spotify", "iptv", "airplay", "android_mirror", "rebrowser"}
 
 func Validate(c Config) error {
+	if len(c.EPGMappings) > 256 {
+		return errors.New("too many guide mappings")
+	}
+	for key, value := range c.EPGMappings {
+		if len(key) == 0 || len(key) > 200 || len(value) == 0 || len(value) > 200 {
+			return errors.New("invalid guide mapping")
+		}
+	}
 	for _, raw := range []string{c.URL, c.EPGURL} {
 		if raw == "" {
 			continue

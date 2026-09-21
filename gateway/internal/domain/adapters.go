@@ -8,14 +8,15 @@ import (
 var ErrNotFound = errors.New("record not found")
 
 type Config struct {
-	Enabled      bool   `json:"enabled"`
-	URL          string `json:"url,omitempty"`
-	Token        string `json:"token,omitempty"`
-	UserID       string `json:"userId,omitempty"`
-	PlaylistPath string `json:"playlistPath,omitempty"`
-	EPGURL       string `json:"epgUrl,omitempty"`
-	CatalogID    string `json:"catalogId,omitempty"`
-	MediaType    string `json:"mediaType,omitempty"`
+	EPGMappings  map[string]string `json:"epgMappings,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	URL          string            `json:"url,omitempty"`
+	Token        string            `json:"token,omitempty"`
+	UserID       string            `json:"userId,omitempty"`
+	PlaylistPath string            `json:"playlistPath,omitempty"`
+	EPGURL       string            `json:"epgUrl,omitempty"`
+	CatalogID    string            `json:"catalogId,omitempty"`
+	MediaType    string            `json:"mediaType,omitempty"`
 }
 
 type Source struct {

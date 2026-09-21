@@ -12,7 +12,8 @@
     "Dev.15: Normalize DASH element case before URI rewriting and reject encoded manifests disguised as media segments; no physical gate changes.",
     "Dev.16: Revisioned operation/HLS probes, bounded persistent browse locators, YouTube hierarchy, stable IPTV IDs, receiver metadata/artwork and browser egress/pointer/recovery. No product milestone closes.",
     "Dev.17: GPL-3.0-only licensing, navigation/Hero/guide/receiver and scoped distribution increment. No physical milestone is closed.",
-    "Dev.18: bounded persistent artwork derivatives, restart reuse, private cache keys, device/layout profiles and conditional HTTP caching. No physical milestone closes."
+    "Dev.18: bounded persistent artwork derivatives, restart reuse, private cache keys, device/layout profiles and conditional HTTP caching. No physical milestone closes.",
+    "Dev.19: Automatic language/track policy, remote text tracks, local sidecars, 48-hour mapped EPG, allowlisted diagnostics and atomic SQLite schema versioning. Product exit gates remain open."
   ],
   "milestones": [
     {
@@ -86,5 +87,5 @@
       "remoteId": null
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.18"
+  "developmentCheckpoint": "v0.1.0-dev.19"
 }

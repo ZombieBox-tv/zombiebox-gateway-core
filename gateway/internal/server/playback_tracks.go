@@ -27,18 +27,45 @@ func (s *Server) ownedMediaSession(r *http.Request, device string) *session {
 }
 
 func (s *Server) sessionTracks(ctx context.Context, sess *session) (domain.TrackInventory, error) {
-	if s.deps.Media == nil || sess.source.Path == "" || sess.source.Live {
+	if err := sess.ctx.Err(); err != nil {
+		return domain.TrackInventory{}, err
+	}
+	if sess.source.Live || sess.source.AudioURL != "" {
 		return domain.TrackInventory{Tracks: []domain.Track{}}, nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(sess.ctx, cancel)
 	defer stop()
-	metadata, err := s.deps.Media.Probe(ctx, sess.source.Path)
-	if err != nil {
+	metadata := sess.metadata
+	if metadata == nil {
+		var value domain.Metadata
+		var err error
+		if sess.source.Path != "" && s.deps.Media != nil {
+			value, err = s.deps.Media.Probe(ctx, sess.source.Path)
+		} else if s.deps.RemoteMedia != nil && media.RemoteCandidate(sess.source) {
+			value, err = s.deps.RemoteMedia.ProbeRemote(ctx, sess.source)
+		} else {
+			return domain.TrackInventory{Tracks: []domain.Track{}}, nil
+		}
+		if err != nil {
+			return domain.TrackInventory{}, err
+		}
+		metadata = &value
+	}
+	if err := ctx.Err(); err != nil {
 		return domain.TrackInventory{}, err
 	}
-	return playback.Inventory(metadata, sess.selection.AudioID), nil
+	inventory := playback.Inventory(*metadata, sess.selection.AudioID)
+	inventory.SubtitleID = sess.subtitleID
+	if sess.source.Path == "" && s.deps.RemoteSubtitles == nil {
+		for index := range inventory.Tracks {
+			if inventory.Tracks[index].Kind == "subtitle" {
+				inventory.Tracks[index].Selectable = false
+			}
+		}
+	}
+	return inventory, nil
 }
 
 func mediaFailure(w http.ResponseWriter, err error) {
@@ -87,7 +114,12 @@ func (s *Server) playbackSubtitles(w http.ResponseWriter, r *http.Request, d dom
 	defer cancel()
 	stop := context.AfterFunc(sess.ctx, cancel)
 	defer stop()
-	cues, err := s.deps.Media.Subtitles(ctx, sess.source.Path, index)
+	var cues []domain.SubtitleCue
+	if sess.source.Path != "" {
+		cues, err = s.deps.Media.Subtitles(ctx, sess.source.Path, index)
+	} else {
+		cues, err = s.deps.RemoteSubtitles.SubtitlesRemote(ctx, sess.source, index)
+	}
 	if err != nil {
 		mediaFailure(w, err)
 		return
@@ -145,18 +177,21 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 	ctx, cancel := context.WithDeadline(context.Background(), sess.expires)
 	selection := domain.MediaSelection{AudioID: request.AudioID, PositionMS: request.PositionMS}
 	s.sessions[id] = &session{
-		mode:      "TRANSCODE",
-		device:    d.ID,
-		ticket:    ticket,
-		expires:   sess.expires,
-		source:    sess.source,
-		ctx:       ctx,
-		cancel:    cancel,
-		selection: selection,
-		resources: map[string]string{},
+		mode:       "TRANSCODE",
+		device:     d.ID,
+		ticket:     ticket,
+		expires:    sess.expires,
+		source:     sess.source,
+		metadata:   sess.metadata,
+		subtitleID: sess.subtitleID,
+		ctx:        ctx,
+		cancel:     cancel,
+		selection:  selection,
+		resources:  map[string]string{},
 	}
 	plan := domain.Plan{
 		Version:          1,
+		SubtitleID:       sess.subtitleID,
 		SessionID:        id,
 		Mode:             "TRANSCODE",
 		URL:              "/v1/streams/" + id + "?ticket=" + ticket,

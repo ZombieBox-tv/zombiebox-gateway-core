@@ -33,8 +33,12 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS records (bucket TEXT NOT NULL, id TEXT NOT NULL, value BLOB NOT NULL, PRIMARY KEY(bucket,id));`)
+	_, err = db.Exec(`PRAGMA busy_timeout=5000;`)
 	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = migrate(db); err != nil {
 		db.Close()
 		return nil, err
 	}

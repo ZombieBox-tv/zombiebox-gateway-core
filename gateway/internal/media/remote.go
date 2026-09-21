@@ -76,7 +76,7 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 			return err
 		}
 		for _, stream := range metadata.Streams {
-			if stream.Type == "audio" {
+			if stream.Type == "audio" && (selection.AudioID == nil || stream.Index == *selection.AudioID) {
 				adtsAAC = stream.Codec == "aac"
 				break
 			}

@@ -59,3 +59,5 @@ Dev.16: Revisioned operation/HLS probes, bounded persistent browse locators, You
 First-party code: [GPL-3.0-only](LICENSE). See [NOTICE](NOTICE) for third-party scope.
 
 Dev.18 adds [persistent artwork caching](docs/artwork-cache.md), shared by Full and Edge.
+
+Dev.19: Automatic language/track policy, remote text tracks, local sidecars, 48-hour mapped EPG, allowlisted diagnostics and atomic SQLite schema versioning.

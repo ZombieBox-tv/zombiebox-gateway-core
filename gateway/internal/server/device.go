@@ -3,6 +3,7 @@ package server
 
 import (
 	"net/http"
+	"regexp"
 	"time"
 
 	"zombiebox.local/gateway/internal/devices"
@@ -17,6 +18,15 @@ func (s *Server) preferences(w http.ResponseWriter, r *http.Request, d domain.De
 	if !(p.Mode == "AUTO" || p.Mode == "TV" || p.Mode == "DOCKED" || p.Mode == "HANDHELD") || !(p.UILanguage == "en" || p.UILanguage == "es") || !(p.SubtitleMode == "auto" || p.SubtitleMode == "off" || p.SubtitleMode == "forced" || p.SubtitleMode == "always") || len(p.AudioLanguages) > 8 || len(p.SubtitleLanguages) > 8 {
 		fail(w, 400, "invalid_preferences")
 		return
+	}
+	language := regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$`)
+	for _, preferences := range [][]string{p.AudioLanguages, p.SubtitleLanguages} {
+		for _, value := range preferences {
+			if !language.MatchString(value) {
+				fail(w, 400, "invalid_preferences")
+				return
+			}
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

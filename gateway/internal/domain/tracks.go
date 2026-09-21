@@ -12,9 +12,10 @@ type Track struct {
 }
 
 type TrackInventory struct {
-	Available bool    `json:"available"`
-	Tracks    []Track `json:"tracks"`
-	AudioID   *int    `json:"audioId,omitempty"`
+	SubtitleID *int    `json:"subtitleId,omitempty"`
+	Available  bool    `json:"available"`
+	Tracks     []Track `json:"tracks"`
+	AudioID    *int    `json:"audioId,omitempty"`
 }
 
 type SubtitleCue struct {

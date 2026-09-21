@@ -58,7 +58,7 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request, d dom
 		return
 	}
 	// A client cannot make the server open arbitrary local files. Set playlistPath in the local config file.
-	allowed := map[string]bool{"enabled": true, "url": true, "token": true, "userId": true, "epgUrl": true, "catalogId": true, "mediaType": true}
+	allowed := map[string]bool{"enabled": true, "url": true, "token": true, "userId": true, "epgUrl": true, "epgMappings": true, "catalogId": true, "mediaType": true}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.managed[id] || id == "android_mirror" {

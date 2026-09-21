@@ -17,6 +17,8 @@ import (
 )
 
 type session struct {
+	metadata      *domain.Metadata
+	subtitleID    *int
 	selection     domain.MediaSelection
 	mode          string
 	castID        string
@@ -75,7 +77,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 409, "conversion_unavailable")
 		return
 	}
-	mode, err := s.playbackMode(r.Context(), resolved, d, req.Mode)
+	decision, err := s.playbackMode(r.Context(), resolved, d, req.Mode)
 	if err != nil {
 		if errors.Is(err, media.ErrBusy) {
 			fail(w, 429, "media_busy")
@@ -84,6 +86,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 		return
 	}
+	mode := decision.mode
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, x := range s.sessions {
@@ -100,7 +103,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	ticket := randomID(24)
 	expires := time.Now().Add(6 * time.Hour)
 	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{mode: mode, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	s.sessions[id] = &session{mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS
@@ -113,7 +116,10 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	if resolved.Live {
 		resume = 0
 	}
-	plan := domain.Plan{Version: 1, SessionID: id, Mode: mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
+	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
+	if mode == "REMUX" && resume > 0 {
+		mode, plan.Mode, s.sessions[id].mode = "TRANSCODE", "TRANSCODE", "TRANSCODE"
+	}
 	if mode == "REMUX" || mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
 		plan.Seekable = false

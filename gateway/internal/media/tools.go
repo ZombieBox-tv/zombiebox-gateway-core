@@ -52,7 +52,14 @@ func (t *Tools) Probe(ctx context.Context, path string) (Metadata, error) {
 	if err != nil {
 		return Metadata{}, err
 	}
-	return t.probe(ctx, input, false)
+	metadata, err := t.probe(ctx, input, false)
+	if err != nil {
+		return metadata, err
+	}
+	for _, candidate := range sidecars(input) {
+		metadata.Streams = append(metadata.Streams, candidate.stream)
+	}
+	return metadata, nil
 }
 
 func (t *Tools) probe(ctx context.Context, input string, remote bool, manifestKind ...string) (Metadata, error) {

@@ -45,7 +45,7 @@ func TestWireContracts(t *testing.T) {
 	samples["MediaReceiver"] = call(s, "GET", "/v1/media-receiver", "", "contract-device", token, "").Body.Bytes()
 	samples["MediaReceiverSelection"] = json.RawMessage(`{"provider":"spotify"}`)
 
-	for name, path := range map[string]string{"IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
+	for name, path := range map[string]string{"DiagnosticReport": "/v1/diagnostics", "IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
 		w := call(s, "GET", path, "", "contract-device", token, "")
 		if w.Code != 200 {
 			t.Fatal(w.Body)

@@ -2,6 +2,8 @@ package media
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +46,21 @@ func TestRealTrackSelectionAndSubtitleExtraction(t *testing.T) {
 	cues, err := tools.Subtitles(ctx, input, 3)
 	if err != nil || len(cues) != 1 || cues[0].Text != "Hello Zombie" || cues[0].StartMS < 500 {
 		t.Fatalf("ASS simplification: %+v %v", cues, err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fixture-private" {
+			t.Error("remote credentials missing")
+			w.WriteHeader(401)
+			return
+		}
+		http.ServeFile(w, r, input)
+	}))
+	defer upstream.Close()
+	remote := NewRemote(tools, upstream.Client())
+	source := domain.Source{URL: upstream.URL + "/movie.mkv", MIME: "video/x-matroska", Headers: http.Header{"Authorization": {"Bearer fixture-private"}}}
+	remoteCues, err := remote.SubtitlesRemote(ctx, source, 3)
+	if err != nil || len(remoteCues) != 1 || remoteCues[0].Text != "Hello Zombie" {
+		t.Fatal("remote text extraction", remoteCues, err)
 	}
 	output := filepath.Join(folder, "selected.mp4")
 	file, err := os.Create(output)

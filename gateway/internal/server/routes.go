@@ -33,6 +33,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /v1/device/hardware", s.auth(s.hardwareReport))
 	s.mux.HandleFunc("PUT /v1/device/capabilities", s.auth(s.capabilities))
 	s.mux.HandleFunc("GET /v1/modules", s.auth(s.modules))
+	s.mux.HandleFunc("GET /v1/diagnostics", s.auth(s.diagnostics))
 	s.mux.HandleFunc("GET /v1/catalog", s.auth(s.catalogPage))
 	s.mux.HandleFunc("GET /v1/browse", s.auth(s.browsePage))
 	s.mux.HandleFunc("GET /v1/home", s.auth(s.home))

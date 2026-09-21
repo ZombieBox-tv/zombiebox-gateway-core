@@ -130,3 +130,57 @@ func TestAudioSelectionRejectsMalformedJSON(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+type remoteTrackMedia struct{ trackMedia }
+
+func (m *remoteTrackMedia) ProbeRemote(ctx context.Context, source domain.Source) (domain.Metadata, error) {
+	return m.Probe(ctx, source.URL)
+}
+func (m *remoteTrackMedia) SubtitlesRemote(ctx context.Context, source domain.Source, index int) ([]domain.SubtitleCue, error) {
+	return m.Subtitles(ctx, source.URL, index)
+}
+func (*remoteTrackMedia) ConvertRemote(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error {
+	return nil
+}
+
+func TestRemoteTrackSelectionUsesOwnedSessionAndPreservesPosition(t *testing.T) {
+	s := testServer(t, nil, "")
+	adapter := &remoteTrackMedia{}
+	s.deps.RemoteMedia, s.deps.RemoteSubtitles = adapter, adapter
+	token := pair(t, s, "remote-owner")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s.sessions["remote"] = &session{device: "remote-owner", source: domain.Source{URL: "https://private.test/movie.mkv?secret=hidden", MIME: "video/x-matroska"}, ctx: ctx, cancel: cancel, expires: time.Now().Add(time.Hour)}
+	for _, suffix := range []string{"tracks", "subtitles/2"} {
+		w := call(s, "GET", "/v1/playback/remote/"+suffix, "", "remote-owner", token, "")
+		if w.Code != 200 || strings.Contains(w.Body.String(), "hidden") {
+			t.Fatal(w.Code, w.Body)
+		}
+	}
+	w := call(s, "POST", "/v1/playback/remote/audio", `{"audioId":1,"positionMs":4500}`, "remote-owner", token, "")
+	var plan domain.Plan
+	_ = json.Unmarshal(w.Body.Bytes(), &plan)
+	if w.Code != 201 || plan.TimelineOffsetMS != 4500 || plan.Mode != "TRANSCODE" {
+		t.Fatal(w.Code, w.Body)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("old session cancelled before replacement adoption")
+	}
+}
+
+func TestLanguageDecisionSelectsRequestedAudioAndHonorsFragmentFailure(t *testing.T) {
+	first := domain.Stream{Index: 1, Type: "audio", Codec: "aac"}
+	first.Tags.Language = "eng"
+	second := first
+	second.Index, second.Tags.Language = 2, "spa"
+	metadata := domain.Metadata{Streams: []domain.Stream{first, second}}
+	device := domain.Device{Preferences: domain.Preferences{AudioLanguages: []string{"es-MX"}, SubtitleMode: "off"}}
+	decision := trackDecision(metadata, "DIRECT_PLAY", domain.Source{}, device)
+	if decision.mode != "REMUX" || decision.audioID == nil || *decision.audioID != 2 {
+		t.Fatal(decision)
+	}
+	device.Capabilities.Probes = []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}
+	if decision := trackDecision(metadata, "DIRECT_PLAY", domain.Source{}, device); decision.mode != "EXTERNAL_PLAYER" || decision.audioID != nil {
+		t.Fatal(decision)
+	}
+}

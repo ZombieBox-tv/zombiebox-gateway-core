@@ -58,7 +58,14 @@ func (a *Adapters) IPTV(ctx context.Context, c Config) ([]Source, error) {
 		now := time.Now().Unix()
 		for i := range sources {
 			sources[i].Item.GuideState = state
-			for _, programme := range guide[sources[i].EPGID] {
+			guideID := sources[i].EPGID
+			for _, key := range []string{sources[i].Item.ID, sources[i].EPGID, sources[i].Item.Title} {
+				if mapped := c.EPGMappings[key]; mapped != "" {
+					guideID = mapped
+					break
+				}
+			}
+			for _, programme := range guide[guideID] {
 				if programme.End <= now {
 					continue
 				}
