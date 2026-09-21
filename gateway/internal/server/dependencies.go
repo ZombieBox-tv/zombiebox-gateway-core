@@ -49,6 +49,8 @@ type Artwork interface {
 type Media interface {
 	Probe(context.Context, string) (domain.Metadata, error)
 	Convert(context.Context, string, string, io.Writer) error
+	ConvertSelected(context.Context, string, string, domain.MediaSelection, io.Writer) error
+	Subtitles(context.Context, string, int) ([]domain.SubtitleCue, error)
 }
 type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)

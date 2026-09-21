@@ -52,6 +52,15 @@ type PlayerCommand struct {
 }
 
 type Stream struct {
+	Index int `json:"index"`
+	Tags  struct {
+		Language string `json:"language"`
+		Title    string `json:"title"`
+	} `json:"tags"`
+	Disposition struct {
+		Default int `json:"default"`
+		Forced  int `json:"forced"`
+	} `json:"disposition"`
 	Type    string `json:"codec_type"`
 	Codec   string `json:"codec_name"`
 	Profile string `json:"profile"`

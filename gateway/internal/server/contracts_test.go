@@ -50,6 +50,20 @@ func TestWireContracts(t *testing.T) {
 		t.Fatal(w.Body)
 	}
 	samples["PlaybackPlan"] = w.Body.Bytes()
+	var localPlan domain.Plan
+	if err := json.Unmarshal(w.Body.Bytes(), &localPlan); err != nil {
+		t.Fatal(err)
+	}
+	s.deps.Media = &trackMedia{}
+	samples["TrackInventory"] = call(s, "GET", "/v1/playback/"+localPlan.SessionID+"/tracks", "", "contract-device", token, "").Body.Bytes()
+	samples["SubtitleCues"] = call(s, "GET", "/v1/playback/"+localPlan.SessionID+"/subtitles/2", "", "contract-device", token, "").Body.Bytes()
+	samples["AudioSelection"] = json.RawMessage(`{"audioId":1,"positionMs":1250}`)
+	selected := call(s, "POST", "/v1/playback/"+localPlan.SessionID+"/audio", string(samples["AudioSelection"]), "contract-device", token, "")
+	if selected.Code != 201 {
+		t.Fatal(selected.Body)
+	}
+	samples["PlaybackPlan"] = selected.Body.Bytes()
+
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("#EXTM3U\n#EXTINF:1,\nsegment.ts\n")) }))
 	defer relay.Close()
 	s.opt.RelayURL = relay.URL

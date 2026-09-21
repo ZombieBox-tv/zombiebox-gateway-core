@@ -17,6 +17,7 @@ import (
 )
 
 type session struct {
+	selection     domain.MediaSelection
 	mode          string
 	castID        string
 	device        string
@@ -106,6 +107,10 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		plan.MIME = "video/mp4"
 		plan.Seekable = false
 		plan.ResumeMS = 0
+		if mode == "TRANSCODE" {
+			plan.TimelineOffsetMS = resume
+			s.sessions[id].selection.PositionMS = resume
+		}
 	}
 	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
 	respond(w, 201, plan)
@@ -226,7 +231,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writer := &conversionWriter{contextWriter: contextWriter{ResponseWriter: w, ctx: ctx}}
-		if err := s.deps.Media.Convert(ctx, src.Path, sess.mode, writer); err != nil {
+		if err := s.deps.Media.ConvertSelected(ctx, src.Path, sess.mode, sess.selection, writer); err != nil {
 			if !writer.started {
 				if errors.Is(err, media.ErrBusy) {
 					fail(w, 429, "media_busy")

@@ -259,6 +259,9 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 				if item, ok := available[p.Item.ID]; ok {
 					p.Item = item
 					p.Item.PositionMS = p.PositionMS
+					if p.DurationMS > 0 {
+						p.Item.DurationMS = p.DurationMS
+					}
 					progress = append(progress, p)
 				}
 			}

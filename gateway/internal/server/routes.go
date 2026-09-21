@@ -1,4 +1,4 @@
-// Package server exposes the versioned client protocol. Provider DTOs stay here.
+// Package server exposes the versioned client protocol. Provider DTOs stay inside provider adapters.
 package server
 
 import (
@@ -46,6 +46,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/playback", s.auth(s.playback))
 	s.mux.HandleFunc("PUT /v1/playback/{session}/progress", s.auth(s.progress))
 	s.mux.HandleFunc("DELETE /v1/playback/{session}", s.auth(s.stop))
+	s.mux.HandleFunc("GET /v1/playback/{session}/tracks", s.auth(s.playbackTracks))
+	s.mux.HandleFunc("POST /v1/playback/{session}/audio", s.auth(s.selectAudio))
+	s.mux.HandleFunc("GET /v1/playback/{session}/subtitles/{track}", s.auth(s.playbackSubtitles))
 	s.mux.HandleFunc("GET /v1/streams/{session}", s.stream)
 	s.mux.HandleFunc("GET /v1/streams/{session}/{resource}", s.stream)
 }

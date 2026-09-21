@@ -113,15 +113,16 @@ type Event struct {
 	DeviceID   string `json:"-"`
 }
 type Plan struct {
-	Version   int    `json:"playbackVersion"`
-	SessionID string `json:"sessionId"`
-	Mode      string `json:"mode"`
-	URL       string `json:"url"`
-	MIME      string `json:"mimeType"`
-	Live      bool   `json:"live"`
-	Seekable  bool   `json:"seekable"`
-	ResumeMS  int64  `json:"resumePositionMs"`
-	Item      Item   `json:"item"`
+	TimelineOffsetMS int64  `json:"timelineOffsetMs,omitempty"`
+	Version          int    `json:"playbackVersion"`
+	SessionID        string `json:"sessionId"`
+	Mode             string `json:"mode"`
+	URL              string `json:"url"`
+	MIME             string `json:"mimeType"`
+	Live             bool   `json:"live"`
+	Seekable         bool   `json:"seekable"`
+	ResumeMS         int64  `json:"resumePositionMs"`
+	Item             Item   `json:"item"`
 }
 type Progress struct {
 	Item       Item   `json:"item"`

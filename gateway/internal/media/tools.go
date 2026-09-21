@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
@@ -60,7 +61,7 @@ func (t *Tools) Probe(ctx context.Context, path string) (Metadata, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=codec_type,codec_name,profile,level,width,height:format=format_name,duration", "-of", "json", input}
+	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height:stream_tags=language,title:stream_disposition=default,forced:format=format_name,duration", "-of", "json", input}
 	output := &boundedBuffer{limit: 1 << 20}
 	if err = t.runner.Run(ctx, t.ffprobe, args, output); err != nil {
 		return result, toolError(ctx, "probe_failed")
@@ -74,12 +75,33 @@ func (t *Tools) Probe(ctx context.Context, path string) (Metadata, error) {
 // Convert writes fragmented MP4 progressively. Remote URLs/credentials and arbitrary options are forbidden.
 // Caller owns the output lifetime; cancellation stops and reaps the process before capacity is released.
 func (t *Tools) Convert(ctx context.Context, path, mode string, output io.Writer) error {
-	select {
-	case t.jobs <- struct{}{}:
-		defer func() { <-t.jobs }()
-	default:
-		return ErrBusy
+	return t.ConvertSelected(ctx, path, mode, domain.MediaSelection{}, output)
+}
+
+func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selection domain.MediaSelection, output io.Writer) error {
+	if selection.PositionMS < 0 || selection.PositionMS > 7*24*60*60*1000 || (selection.AudioID != nil && *selection.AudioID < 0) {
+		return errors.New("invalid media selection")
 	}
+	// A replacement stream may arrive while cancellation reaps the previous
+	// FFmpeg process. Give it a bounded grace period without adding capacity.
+	if selection.AudioID != nil {
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case t.jobs <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return ErrBusy
+		}
+	} else {
+		select {
+		case t.jobs <- struct{}{}:
+		default:
+			return ErrBusy
+		}
+	}
+	defer func() { <-t.jobs }()
 	if mode != "REMUX" && mode != "TRANSCODE" {
 		return errors.New("unsupported media mode")
 	}
@@ -89,7 +111,19 @@ func (t *Tools) Convert(ctx context.Context, path, mode string, output io.Writer
 	}
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Hour)
 	defer cancel()
-	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-max_alloc", "67108864", "-threads", "2", "-protocol_whitelist", "file,pipe", "-i", input, "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1"}
+	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-max_alloc", "67108864", "-threads", "2", "-protocol_whitelist", "file,pipe"}
+	if mode == "REMUX" && selection.PositionMS > 0 {
+		return errors.New("accurate resume requires transcoding")
+	}
+	if selection.PositionMS > 0 {
+		args = append(args, "-ss", strconv.FormatFloat(float64(selection.PositionMS)/1000, 'f', 3, 64))
+	}
+	args = append(args, "-i", input)
+	audio := "0:a:0?"
+	if selection.AudioID != nil {
+		audio = "0:" + strconv.Itoa(*selection.AudioID)
+	}
+	args = append(args, "-map", "0:v:0?", "-map", audio, "-sn", "-dn", "-map_metadata", "-1")
 	if mode == "REMUX" {
 		args = append(args, "-c", "copy")
 	} else {

@@ -2,7 +2,10 @@
   "schemaVersion": 1,
   "repository": "zombiebox-gateway-core",
   "productRegistry": "workspace:docs/milestones.json",
-  "notes": ["Local component scope; product exit gates remain open. No hosted milestones exist."],
+  "notes": [
+    "Local component scope; product exit gates remain open. No hosted milestones exist.",
+    "Dev.10: shared local media tracks/text subtitles and client Home refinement. Cast consumes the protocol transport update. Product exit gates remain open."
+  ],
   "milestones": [
     {
       "id": "M0",
@@ -74,5 +77,6 @@
       "completedAt": null,
       "remoteId": null
     }
-  ]
+  ],
+  "developmentCheckpoint": "v0.1.0-dev.10"
 }
