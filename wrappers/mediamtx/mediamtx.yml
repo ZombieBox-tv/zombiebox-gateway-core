@@ -1,0 +1,31 @@
+# MediaMTX 1.21.1. Auth URL (including private callback key) is supplied by the launcher.
+logLevel: warn
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 128
+authMethod: http
+authHTTPExclude: []
+api: true
+apiAddress: :9997
+rtsp: true
+rtspAddress: :8554
+rtspTransports: [tcp]
+rtspAuthMethods: [basic]
+rtmp: false
+webrtc: false
+srt: false
+moq: false
+hls: true
+hlsAddress: :8888
+hlsVariant: mpegts
+hlsSegmentCount: 4
+hlsSegmentDuration: 1s
+hlsSegmentMaxSize: 8M
+hlsMuxerCloseAfter: 15s
+hlsAllowOrigins: []
+pathDefaults:
+  source: publisher
+  overridePublisher: false
+  maxReaders: 2
+paths:
+  '~^zombie/[a-f0-9]{32}$':

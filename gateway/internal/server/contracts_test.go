@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,6 +44,27 @@ func TestWireContracts(t *testing.T) {
 		t.Fatal(w.Body)
 	}
 	samples["PlaybackPlan"] = w.Body.Bytes()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("#EXTM3U\n#EXTINF:1,\nsegment.ts\n")) }))
+	defer relay.Close()
+	s.opt.RelayURL = relay.URL
+	s.opt.RelayAdminToken = "contract-only-relay-token"
+	receiver := pair(t, s, "contract-receiver")
+	preferences := `{"mode":"TV","uiLanguage":"en","subtitleMode":"auto","allowCasting":true}`
+	call(s, "PUT", "/v1/device/preferences", preferences, "contract-receiver", receiver, "")
+	samples["Preferences"] = call(s, "GET", "/v1/device/preferences", "", "contract-receiver", receiver, "").Body.Bytes()
+	samples["CastReceivers"] = call(s, "GET", "/v1/cast/receivers", "", "contract-device", token, "").Body.Bytes()
+	samples["CastRequest"] = json.RawMessage(`{"receiverId":"contract-receiver"}`)
+	grant := call(s, "POST", "/v1/cast", string(samples["CastRequest"]), "contract-device", token, "")
+	if grant.Code != 201 {
+		t.Fatal(grant.Body)
+	}
+	samples["CastGrant"] = grant.Body.Bytes()
+	var cast struct{ CastID string }
+	json.Unmarshal(grant.Body.Bytes(), &cast)
+	if ready := call(s, "POST", "/v1/cast/"+cast.CastID+"/ready", "", "contract-device", token, ""); ready.Code != 200 {
+		t.Fatal(ready.Body)
+	}
+	samples["ActiveCast"] = call(s, "GET", "/v1/cast/active", "", "contract-receiver", receiver, "").Body.Bytes()
 	data, err := json.Marshal(samples)
 	if err != nil {
 		t.Fatal(err)

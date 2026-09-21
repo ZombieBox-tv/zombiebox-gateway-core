@@ -128,6 +128,10 @@ func Local(dir string) ([]Source, error) {
 		mime := "video/mp4"
 		kind := "video"
 		switch ext {
+		case ".mkv":
+			mime = "video/x-matroska"
+		case ".webm":
+			mime = "video/webm"
 		case ".mp4", ".m4v":
 		case ".mp3":
 			mime = "audio/mpeg"

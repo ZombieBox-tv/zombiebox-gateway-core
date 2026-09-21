@@ -76,7 +76,7 @@
       "referenceBranch": "main",
       "purpose": "Android Mirror relay and live media routing",
       "licenseHint": "MIT",
-      "status": "reference-only; not integrated"
+      "status": "Full 1.21.1 runtime integrated; Edge Android build adapter, physical validation pending"
     },
     {
       "name": "threadfin",
@@ -161,6 +161,15 @@
         "doc",
         "examples"
       ]
+    },
+    {
+      "name": "anet",
+      "url": "https://github.com/wlynxg/anet.git",
+      "commit": "839bc3a920f1b87dd3ce1386e425aa5ef2e69d24",
+      "referenceBranch": "v0.0.5",
+      "purpose": "MediaMTX Android network-interface dependency and Go linker compatibility reference",
+      "licenseHint": "MIT",
+      "status": "transitive MediaMTX dependency; native runtime validation pending"
     }
   ]
 }

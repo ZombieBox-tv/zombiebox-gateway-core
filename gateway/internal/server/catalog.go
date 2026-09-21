@@ -37,6 +37,10 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request, d domain.Devi
 			continue
 		}
 		c := s.config(r.Context(), id)
+		if id == "android_mirror" {
+			out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": s.opt.RelayURL != "", "configured": s.opt.RelayURL != "", "hasToken": false, "implemented": true, "managedByServer": true})
+			continue
+		}
 		out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": c.Enabled, "configured": c.URL != "" || c.PlaylistPath != "", "hasToken": c.Token != "", "implemented": implemented[id], "managedByServer": s.managed[id]})
 	}
 	respond(w, 200, map[string]any{"providers": out})
@@ -59,7 +63,7 @@ func (s *Server) configureProvider(w http.ResponseWriter, r *http.Request, d dom
 	allowed := map[string]bool{"enabled": true, "url": true, "token": true, "userId": true, "epgUrl": true, "catalogId": true, "mediaType": true}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.managed[id] {
+	if s.managed[id] || id == "android_mirror" {
 		fail(w, 409, "provider_managed_by_server")
 		return
 	}
@@ -166,6 +170,23 @@ func (s *Server) moduleList(ctx context.Context) []domain.Module {
 	for _, id := range providers.Order {
 		c := s.config(ctx, id)
 		m := domain.Module{ID: id, Title: providers.Titles[id], State: "DISABLED", Features: []string{}, Message: "Configure this service in Settings"}
+		if id == "android_mirror" {
+			if s.opt.RelayURL != "" {
+				m.State = "STARTING"
+				m.Features = []string{"screen-receiver"}
+				m.Message = "Enable receiving on a client; relay is checked when sharing starts"
+				s.mu.Lock()
+				for _, cast := range s.casts {
+					if cast.plan != nil {
+						m.State = "HEALTHY"
+						m.Message = ""
+					}
+				}
+				s.mu.Unlock()
+			}
+			out = append(out, m)
+			continue
+		}
 		if id == "local" || c.Enabled {
 			if implemented[id] {
 				m.State = "HEALTHY"

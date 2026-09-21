@@ -94,7 +94,7 @@ func (t *Tools) Convert(ctx context.Context, path, mode string, output io.Writer
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 6*time.Hour)
 	defer cancel()
 	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-max_alloc", "67108864", "-threads", "2", "-protocol_whitelist", "file,pipe", "-i", input, "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1"}
 	if mode == "REMUX" {

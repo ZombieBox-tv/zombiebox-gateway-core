@@ -1,0 +1,64 @@
+--- a/internal/staticsources/rpicamera/camera_arm_.go
++++ b/internal/staticsources/rpicamera/camera_arm_.go
+@@ -1,4 +1,4 @@
+-//go:build (linux && arm) || (linux && arm64)
++//go:build linux && (arm || arm64) && !android
+ 
+ package rpicamera
+ 
+--- a/internal/staticsources/rpicamera/camera_linux_arm.go
++++ b/internal/staticsources/rpicamera/camera_linux_arm.go
+@@ -1,3 +1,5 @@
++//go:build !android
++
+ package rpicamera
+ 
+ import (
+--- a/internal/staticsources/rpicamera/camera_linux_arm64.go
++++ b/internal/staticsources/rpicamera/camera_linux_arm64.go
+@@ -1,3 +1,5 @@
++//go:build !android
++
+ package rpicamera
+ 
+ import (
+--- a/internal/staticsources/rpicamera/camera_params_arm_.go
++++ b/internal/staticsources/rpicamera/camera_params_arm_.go
+@@ -1,4 +1,4 @@
+-//go:build (linux && arm) || (linux && arm64)
++//go:build linux && (arm || arm64) && !android
+ 
+ package rpicamera
+ 
+--- a/internal/staticsources/rpicamera/pipe_arm_.go
++++ b/internal/staticsources/rpicamera/pipe_arm_.go
+@@ -1,4 +1,4 @@
+-//go:build (linux && arm) || (linux && arm64)
++//go:build linux && (arm || arm64) && !android
+ 
+ package rpicamera
+ 
+--- a/internal/staticsources/rpicamera/source_arm_.go
++++ b/internal/staticsources/rpicamera/source_arm_.go
+@@ -1,4 +1,4 @@
+-//go:build (linux && arm) || (linux && arm64)
++//go:build linux && (arm || arm64) && !android
+ 
+ package rpicamera
+ 
+--- a/internal/staticsources/rpicamera/source_other.go
++++ b/internal/staticsources/rpicamera/source_other.go
+@@ -1,4 +1,4 @@
+-//go:build !linux || (!arm && !arm64)
++//go:build !linux || (!arm && !arm64) || android
+ 
+ package rpicamera
+ 
+--- a/internal/staticsources/rpicamera/supports_hardware_h264_arm_.go
++++ b/internal/staticsources/rpicamera/supports_hardware_h264_arm_.go
+@@ -1,4 +1,4 @@
+-//go:build (linux && arm) || (linux && arm64)
++//go:build linux && (arm || arm64) && !android
+ 
+ package rpicamera
+ 

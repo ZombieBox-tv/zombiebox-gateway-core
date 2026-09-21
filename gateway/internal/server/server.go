@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/media"
 	"zombiebox.local/gateway/internal/store"
 )
 
@@ -25,16 +26,24 @@ type Health struct {
 	APIVersion int    `json:"apiVersion"`
 }
 type Options struct {
-	PairingCode string
-	MediaDir    string
-	PollWait    time.Duration
-	CatalogWait time.Duration
+	MediaTools                                 *media.Tools
+	RelayURL, RelayControlURL, RelayAdminToken string
+	RTSPPort                                   int
+	PairingCode                                string
+	MediaDir                                   string
+	PollWait                                   time.Duration
+	CatalogWait                                time.Duration
 }
 type attempt struct {
 	count int
 	until time.Time
 }
 type Server struct {
+	relayJobs      chan struct{}
+	casts          map[string]*castSession
+	seen           map[string]time.Time
+	done           chan struct{}
+	closeOnce      sync.Once
 	db             *store.Store
 	opt            Options
 	events         *eventLog
@@ -58,13 +67,29 @@ func New(db *store.Store, opt Options) *Server {
 		opt.CatalogWait = 5 * time.Second
 	}
 	s := &Server{db: db, opt: opt, events: newEvents(), mux: http.NewServeMux(), attempts: map[string]attempt{}, sessions: map[string]*session{}, polls: make(chan struct{}, 32), catalogCache: map[string]catalogEntry{}}
+	s.relayJobs = make(chan struct{}, 4)
+	s.casts = map[string]*castSession{}
+	s.seen = map[string]time.Time{}
+	s.done = make(chan struct{})
+	if s.opt.RTSPPort == 0 {
+		s.opt.RTSPPort = 8554
+	}
+	go s.reapCasts()
 	s.configRevision = map[string]uint64{}
 	s.managed = map[string]bool{}
 	s.searchResults = map[string]searchResult{}
 	s.streams = make(chan struct{}, 4)
+	s.mux.HandleFunc("GET /v1/cast/receivers", s.auth(s.castReceivers))
+	s.mux.HandleFunc("POST /v1/cast", s.auth(s.createCast))
+	s.mux.HandleFunc("GET /v1/cast/active", s.auth(s.activeCast))
+	s.mux.HandleFunc("PUT /v1/cast/{cast}", s.auth(s.castLease))
+	s.mux.HandleFunc("POST /v1/cast/{cast}/ready", s.auth(s.castReady))
+	s.mux.HandleFunc("DELETE /v1/cast/{cast}", s.auth(s.stopCast))
+	s.mux.HandleFunc("POST /internal/relay/auth", s.relayAuth)
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, Health{"ok", 1}) })
 	s.mux.HandleFunc("POST /v1/devices/register", s.register)
 	s.mux.HandleFunc("GET /v1/device", s.auth(func(w http.ResponseWriter, r *http.Request, d domain.Device) { respond(w, 200, d) }))
+	s.mux.HandleFunc("GET /v1/device/preferences", s.auth(func(w http.ResponseWriter, r *http.Request, d domain.Device) { respond(w, 200, d.Preferences) }))
 	s.mux.HandleFunc("PUT /v1/device/preferences", s.auth(s.preferences))
 	s.mux.HandleFunc("PUT /v1/device/capabilities", s.auth(s.capabilities))
 	s.mux.HandleFunc("GET /v1/modules", s.auth(s.modules))
@@ -209,6 +234,9 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, domain.Devic
 			fail(w, 401, "unauthorized")
 			return
 		}
+		s.mu.Lock()
+		s.seen[d.ID] = time.Now()
+		s.mu.Unlock()
 		next(w, r, d)
 	}
 }
@@ -234,6 +262,13 @@ func (s *Server) preferences(w http.ResponseWriter, r *http.Request, d domain.De
 		p.SubtitleLanguages = []string{}
 	}
 	d.Preferences = p
+	if !p.AllowCasting {
+		for _, c := range s.casts {
+			if c.receiver == d.ID {
+				s.endCastLocked(c)
+			}
+		}
+	}
 	if s.db.Put(r.Context(), "devices", d.ID, d) != nil {
 		fail(w, 500, "storage_error")
 		return

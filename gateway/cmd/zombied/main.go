@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 	providerconfig "zombiebox.local/gateway/internal/config"
+	mediatools "zombiebox.local/gateway/internal/media"
 	"zombiebox.local/gateway/internal/store"
 
 	"zombiebox.local/gateway/internal/server"
@@ -25,6 +26,10 @@ func main() {
 	state := flag.String("state", ".local/gateway.db", "private SQLite database path")
 	media := flag.String("media-dir", ".local/media", "directory containing local media")
 	config := flag.String("config", "", "optional private provider configuration JSON")
+	relay := flag.String("relay-url", "", "private MediaMTX HLS base URL")
+	relayControl := flag.String("relay-control-url", "", "private MediaMTX control API base URL")
+	rtspPort := flag.Int("rtsp-port", 8554, "sender-visible RTSP port")
+	enableMedia := flag.Bool("media-tools", false, "enable local FFmpeg probing and conversion")
 	flag.Parse()
 	if *check != "" {
 		client := &http.Client{Timeout: 3 * time.Second}
@@ -38,6 +43,10 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+	if *relay != "" && len(os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN")) < 32 {
+		slog.Error("relay requires a private ZOMBIE_RELAY_ADMIN_TOKEN of at least 32 characters")
+		os.Exit(1)
 	}
 	db, err := store.Open(*state)
 	if err != nil {
@@ -53,7 +62,11 @@ func main() {
 		}
 		pairing = fmt.Sprintf("%06d", n.Int64()+100000)
 	}
-	app := server.New(db, server.Options{PairingCode: pairing, MediaDir: *media})
+	var tools *mediatools.Tools
+	if *enableMedia {
+		tools = mediatools.New("ffmpeg", "ffprobe")
+	}
+	app := server.New(db, server.Options{MediaTools: tools, PairingCode: pairing, MediaDir: *media, RelayURL: *relay, RelayControlURL: *relayControl, RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"), RTSPPort: *rtspPort})
 	if *config != "" {
 		configs, e := providerconfig.Load(*config, os.LookupEnv)
 		if e != nil {

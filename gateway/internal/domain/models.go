@@ -28,6 +28,7 @@ type Registration struct {
 	Memory          Memory   `json:"memory"`
 }
 type Preferences struct {
+	AllowCasting      bool     `json:"allowCasting"`
 	Mode              string   `json:"mode"`
 	UILanguage        string   `json:"uiLanguage"`
 	AudioLanguages    []string `json:"audioLanguages"`

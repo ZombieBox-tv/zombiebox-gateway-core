@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -11,10 +12,13 @@ import (
 	"strings"
 	"time"
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/media"
 	"zombiebox.local/gateway/internal/providers"
 )
 
 type session struct {
+	mode          string
+	castID        string
 	device        string
 	ticket        string
 	expires       time.Time
@@ -28,8 +32,13 @@ type session struct {
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var req struct {
 		ItemID string `json:"itemId"`
+		Mode   string `json:"mode"`
 	}
 	if !decode(w, r, &req) {
+		return
+	}
+	if req.Mode != "" && req.Mode != "AUTO" && req.Mode != "DIRECT_PLAY" && req.Mode != "REMUX" && req.Mode != "TRANSCODE" && req.Mode != "EXTERNAL_PLAYER" {
+		fail(w, 400, "invalid_playback_mode")
 		return
 	}
 	found := s.searchSource(r.Context(), d.ID, req.ItemID)
@@ -53,6 +62,19 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 502, "stream_unavailable")
 		return
 	}
+	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE") && (resolved.Path == "" || s.opt.MediaTools == nil) {
+		fail(w, 409, "conversion_unavailable")
+		return
+	}
+	mode, err := s.playbackMode(r.Context(), resolved, d, req.Mode)
+	if err != nil {
+		if errors.Is(err, media.ErrBusy) {
+			fail(w, 429, "media_busy")
+		} else {
+			fail(w, 502, "media_probe_failed")
+		}
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, x := range s.sessions {
@@ -69,14 +91,19 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	ticket := randomID(24)
 	expires := time.Now().Add(6 * time.Hour)
 	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	s.sessions[id] = &session{mode: mode, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS
 	if p.State == "ENDED" || resolved.Live {
 		resume = 0
 	}
-	plan := domain.Plan{Version: 1, SessionID: id, Mode: "DIRECT_PLAY", URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
+	plan := domain.Plan{Version: 1, SessionID: id, Mode: mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
+	if mode == "REMUX" || mode == "TRANSCODE" {
+		plan.MIME = "video/mp4"
+		plan.Seekable = false
+		plan.ResumeMS = 0
+	}
 	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
 	respond(w, 201, plan)
 }
@@ -99,6 +126,10 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Devic
 	sess := s.sessions[r.PathValue("session")]
 	if sess == nil || sess.device != d.ID {
 		fail(w, 404, "session_not_found")
+		return
+	}
+	if sess.source.Live {
+		respond(w, 200, map[string]string{"state": p.State})
 		return
 	}
 	p.Item = sess.source.Item
@@ -129,6 +160,9 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	if sess == nil || sess.device != d.ID {
 		fail(w, 404, "session_not_found")
 		return
+	}
+	if c := s.casts[sess.castID]; c != nil {
+		s.endCastLocked(c)
 	}
 	sess.cancel()
 	delete(s.sessions, id)
@@ -179,6 +213,29 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", src.MIME)
 	w.Header().Set("Cache-Control", "private, no-store")
+	if src.Path != "" && (sess.mode == "REMUX" || sess.mode == "TRANSCODE") {
+		if r.Header.Get("Range") != "" && r.Header.Get("Range") != "bytes=0-" {
+			fail(w, 416, "conversion_not_seekable")
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		if r.Method == "HEAD" {
+			return
+		}
+		writer := &conversionWriter{contextWriter: contextWriter{ResponseWriter: w, ctx: ctx}}
+		if err := s.opt.MediaTools.Convert(ctx, src.Path, sess.mode, writer); err != nil {
+			if !writer.started {
+				if errors.Is(err, media.ErrBusy) {
+					fail(w, 429, "media_busy")
+				} else {
+					fail(w, 502, "conversion_failed")
+				}
+			} else {
+				panic(http.ErrAbortHandler)
+			}
+		}
+		return
+	}
 	if src.Path != "" {
 		f, err := os.Open(src.Path)
 		if err != nil {
@@ -274,8 +331,12 @@ var mediaHTTP = &http.Client{Transport: &http.Transport{
 
 // Close cancels streams before the process drains its HTTP server.
 func (s *Server) Close() {
+	s.closeOnce.Do(func() { close(s.done) })
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, c := range s.casts {
+		s.endCastLocked(c)
+	}
 	for id, x := range s.sessions {
 		x.cancel()
 		delete(s.sessions, id)
@@ -294,4 +355,15 @@ func (w contextWriter) Write(p []byte) (int, error) {
 	}
 	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(30 * time.Second))
 	return w.ResponseWriter.Write(p)
+}
+
+// Do not append a JSON error to a partially transmitted MP4.
+type conversionWriter struct {
+	contextWriter
+	started bool
+}
+
+func (w *conversionWriter) Write(p []byte) (int, error) {
+	w.started = true
+	return w.contextWriter.Write(p)
 }
