@@ -8,6 +8,6 @@ import (
 
 func testDependencies() Dependencies {
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
-	return Dependencies{Browse: adapters, YouTubeReceiver: adapters, Artwork: artwork.New(httpclient.Metadata()), Catalog: adapters, Search: adapters, Resolver: adapters, Player: adapters, Browser: adapters, ControlHTTP: httpclient.Private(), StreamHTTP: httpclient.Streaming()}
+	return Dependencies{Reception: adapters, Browse: adapters, YouTubeReceiver: adapters, Artwork: artwork.New(httpclient.Metadata()), Catalog: adapters, Search: adapters, Resolver: adapters, Player: adapters, Browser: adapters, ControlHTTP: httpclient.Private(), StreamHTTP: httpclient.Streaming()}
 }
 func newTestServer(db Persistence, opt Options) *Server { return New(db, opt, testDependencies()) }

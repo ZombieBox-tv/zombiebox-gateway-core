@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/catalog"
+	"zombiebox.local/gateway/internal/receivers/inbox"
 
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
 )
@@ -30,30 +31,31 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
-	browse            *catalog.Browser
-	youtubeReceiver   *youtubereceiver.Service
-	probeKey          string
-	browser           *browserSession
-	integrationChecks chan struct{}
-	relayJobs         chan struct{}
-	casts             map[string]*castSession
-	seen              map[string]time.Time
-	done              chan struct{}
-	closeOnce         sync.Once
-	db                Persistence
-	deps              Dependencies
-	opt               Options
-	events            *eventLog
-	mux               *http.ServeMux
-	mu                sync.Mutex
-	attempts          map[string]attempt
-	sessions          map[string]*session
-	polls             chan struct{}
-	catalogCache      map[string]catalogEntry
-	searchResults     map[string]searchResult
-	configRevision    map[string]uint64
-	managed           map[string]bool
-	streams           chan struct{}
+	mediaReceiverInbox *inbox.Service
+	browse             *catalog.Browser
+	youtubeReceiver    *youtubereceiver.Service
+	probeKey           string
+	browser            *browserSession
+	integrationChecks  chan struct{}
+	relayJobs          chan struct{}
+	casts              map[string]*castSession
+	seen               map[string]time.Time
+	done               chan struct{}
+	closeOnce          sync.Once
+	db                 Persistence
+	deps               Dependencies
+	opt                Options
+	events             *eventLog
+	mux                *http.ServeMux
+	mu                 sync.Mutex
+	attempts           map[string]attempt
+	sessions           map[string]*session
+	polls              chan struct{}
+	catalogCache       map[string]catalogEntry
+	searchResults      map[string]searchResult
+	configRevision     map[string]uint64
+	managed            map[string]bool
+	streams            chan struct{}
 }
 
 func New(db Persistence, opt Options, deps Dependencies) *Server {
@@ -91,6 +93,8 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	s.managed = map[string]bool{}
 	s.searchResults = map[string]searchResult{}
 	s.streams = make(chan struct{}, 4)
+	s.mediaReceiverInbox = inbox.New(receiverAdapter{s}, receiverAdapter{s})
+	go s.reapMediaReceiver()
 	s.routes()
 	return s
 }

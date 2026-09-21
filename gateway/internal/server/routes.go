@@ -8,6 +8,9 @@ import (
 )
 
 func (s *Server) routes() {
+	for _, method := range []string{"GET", "PUT", "DELETE"} {
+		s.mux.HandleFunc(method+" /v1/media-receiver", s.auth(s.mediaReceiver))
+	}
 	s.mux.HandleFunc("POST /v1/youtube/receiver", s.auth(s.startYouTubeReceiver))
 	s.mux.HandleFunc("GET /v1/youtube/receiver/{receiver}", s.auth(s.youTubeReceiverOperation))
 	s.mux.HandleFunc("POST /v1/youtube/receiver/{receiver}/state", s.auth(s.youTubeReceiverOperation))

@@ -33,6 +33,9 @@ type Search interface {
 type Resolver interface {
 	Resolve(context.Context, domain.Source) (domain.Source, error)
 }
+type Reception interface {
+	Reception(context.Context, string, domain.Config) (*domain.Source, domain.NowPlaying, error)
+}
 type Player interface {
 	SpotifyStatus(context.Context, domain.Config) (domain.NowPlaying, error)
 	SpotifyAuthorization(context.Context, domain.Config) (domain.AuthorizationPrompt, error)
@@ -64,6 +67,7 @@ type HTTPClient interface {
 // Dependencies are immutable after construction. Media and Artwork are optional.
 // Keep control requests and unbounded-duration streaming on separate transports.
 type Dependencies struct {
+	Reception       Reception
 	RemoteMedia     RemoteMedia
 	Browse          catalog.Backend
 	YouTubeReceiver YouTubeReceiver

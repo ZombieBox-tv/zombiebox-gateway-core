@@ -42,6 +42,8 @@ func TestWireContracts(t *testing.T) {
 		t.Fatal(browse.Body)
 	}
 	samples["BrowsePage"] = browse.Body.Bytes()
+	samples["MediaReceiver"] = call(s, "GET", "/v1/media-receiver", "", "contract-device", token, "").Body.Bytes()
+	samples["MediaReceiverSelection"] = json.RawMessage(`{"provider":"spotify"}`)
 
 	for name, path := range map[string]string{"IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
 		w := call(s, "GET", path, "", "contract-device", token, "")
@@ -98,7 +100,7 @@ func TestWireContracts(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/status" {
-			w.Write([]byte(`{"stopped":true,"volume_steps":100}`))
+			w.Write([]byte(`{"stopped":false,"volume_steps":100,"track":{"name":"Contract song","artist_names":["Contract artist"]}}`))
 			return
 		}
 		w.Write([]byte(`{}`))
@@ -107,6 +109,12 @@ func TestWireContracts(t *testing.T) {
 	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"spotify": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}, "rebrowser": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}}); err != nil {
 		t.Fatal(err)
 	}
+	call(s, "PUT", "/v1/media-receiver", `{"provider":"spotify"}`, "contract-device", token, "")
+	receiverState := call(s, "GET", "/v1/media-receiver", "", "contract-device", token, "")
+	if receiverState.Code != 200 {
+		t.Fatal(receiverState.Body)
+	}
+	samples["MediaReceiver"] = receiverState.Body.Bytes()
 	samples["NowPlaying"] = call(s, "GET", "/v1/player/spotify", "", "contract-device", token, "").Body.Bytes()
 	samples["AuthorizationPrompt"] = call(s, "GET", "/v1/player/spotify/authorization", "", "contract-device", token, "123456").Body.Bytes()
 	samples["BrowserSession"] = call(s, "POST", "/v1/browser", `{"url":"https://example.org"}`, "contract-device", token, "").Body.Bytes()

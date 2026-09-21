@@ -5,7 +5,8 @@
   "notes": [
     "Local component scope; product exit gates remain open. No hosted milestones exist.",
     "Dev.10: shared local media tracks/text subtitles and client Home refinement. Cast consumes the protocol transport update. Product exit gates remain open.",
-    "Dev.11: Hierarchical Plex/Jellyfin/Stremio browsing, progressive remote probing/conversion and paired YouTube adaptive mux; bounded injected adapters. Live/HLS adaptation and receiver completion remain open. Product exit gates remain open."
+    "Dev.11: Hierarchical Plex/Jellyfin/Stremio browsing, progressive remote probing/conversion and paired YouTube adaptive mux; bounded injected adapters. Live/HLS adaptation and receiver completion remain open. Product exit gates remain open.",
+    "Dev.12: Selected-client Spotify/AirPlay leases, fresh activity routing, owned controls and adaptive Cast encoder budgets. Account/OEM/physical gates remain open."
   ],
   "milestones": [
     {
@@ -79,5 +80,5 @@
       "remoteId": null
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.11"
+  "developmentCheckpoint": "v0.1.0-dev.12"
 }

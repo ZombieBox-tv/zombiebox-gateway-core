@@ -19,3 +19,7 @@ issues/milestones can be attached to the shared GitHub Project once remotes exis
 
 Hierarchical Plex/Jellyfin/Stremio browsing, progressive remote probing/conversion and paired YouTube adaptive mux; bounded injected adapters. Live/HLS adaptation and receiver completion remain open.
 No product milestone or physical/account gate is completed by this checkpoint.
+
+## dev.12 increment
+
+Selected-client Spotify/AirPlay leases, fresh activity routing, owned controls and adaptive Cast encoder budgets. Account/OEM/physical gates remain open.

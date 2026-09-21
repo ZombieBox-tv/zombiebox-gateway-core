@@ -150,9 +150,8 @@ func (s *Server) spotifyAuthorization(w http.ResponseWriter, r *http.Request, d 
 }
 
 func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request, d domain.Device) {
-	// This controls a shared Connect device. Require the operator code until a
-	// per-receiver ownership lease is implemented; pairing alone is insufficient.
-	if !s.admin(w, r) {
+	// The selected receiver may control its leased output; other clients need the operator.
+	if !s.mediaReceiverInbox.Owned(d.ID) && !s.admin(w, r) {
 		return
 	}
 	var command providers.PlayerCommand

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/playback"
 	"zombiebox.local/gateway/internal/providers"
 )
 
@@ -58,13 +59,18 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 409, "receiver_unavailable")
 		return
 	}
+	video, err := playback.CastProfile(receiver)
+	if err != nil {
+		fail(w, 409, "receiver_media_unsupported")
+		return
+	}
 	if len(s.casts) >= 1 || len(s.sessions) >= 64 || len(s.relayJobs) == cap(s.relayJobs) {
 		fail(w, 429, "cast_busy")
 		return
 	}
 	c := &castSession{id: randomID(16), sender: sender.ID, receiver: receiver.ID, publishToken: randomID(24), readToken: randomID(24), expires: time.Now().Add(90 * time.Second)}
 	s.casts[c.id] = c
-	respond(w, 201, map[string]any{"castId": c.id, "publishPath": "zombie/" + c.id, "publishUser": "zombie", "publishToken": c.publishToken, "rtspPort": s.opt.RTSPPort, "leaseSeconds": 90, "video": map[string]any{"codec": "h264", "maxWidth": 1280, "maxHeight": 720, "fps": 30, "bitrate": 2000000}})
+	respond(w, 201, map[string]any{"castId": c.id, "publishPath": "zombie/" + c.id, "publishUser": "zombie", "publishToken": c.publishToken, "rtspPort": s.opt.RTSPPort, "leaseSeconds": 90, "video": video})
 }
 func (s *Server) castLease(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	s.mu.Lock()

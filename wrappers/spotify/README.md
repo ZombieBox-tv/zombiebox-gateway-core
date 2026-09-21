@@ -8,8 +8,8 @@ models. Provider tokens and raw upstream identities never reach Android.
 
 Run `make services-build`, then `make spotify-up`. In client Settings → Gateway
 services, enter the operator code and choose **Show Spotify pairing code**. Finish
-the pairing on your phone, select Zombie Box in Spotify and open the Spotify
-Connect item on the TV. `go-librespot` requires an eligible Spotify account; real
+the pairing on your phone. On the client select Settings → Receive Spotify / AirPlay
+→ Spotify, then select Zombie Box in Spotify; active audio is routed automatically. `go-librespot` requires an eligible Spotify account; real
 account playback remains unverified until credentials are supplied.
 
 Private configuration: `.local/spotify/worker.json` and
@@ -20,8 +20,9 @@ advertised by the default bridged container. `volume_steps` must remain 100 for
 the current semantic percentage command mapping.
 
 Read status at `GET /v1/player/spotify`. Shared player writes and authorization
-codes currently require a paired device plus `X-Zombie-Admin-Code`; per-receiver
-control leases and seamless music across separate Android Activities remain open.
+codes require a paired device plus `X-Zombie-Admin-Code`, except that dev.12 permits
+player commands by the selected receiver lease owner. Authorization codes always
+require the operator. Seamless music across separate Android Activities remains open.
 Closing a media stream releases its FIFO reader; it does not disconnect the
 Spotify account. The next listening session reopens the bridge.
 

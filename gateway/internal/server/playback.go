@@ -161,6 +161,10 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Devic
 	respond(w, 200, map[string]string{"state": p.State})
 }
 func (s *Server) stop(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	if s.mediaReceiverInbox.Dismiss(d.ID, r.PathValue("session")) {
+		respond(w, 200, map[string]string{"state": "STOPPED"})
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := r.PathValue("session")
@@ -330,6 +334,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 // Deadlines apply to each upstream read, including a stalled media body.
 // Close cancels streams before the process drains its HTTP server.
 func (s *Server) Close() {
+	s.mediaReceiverInbox.Close()
 	s.closeOnce.Do(func() { close(s.done) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	s.youtubeReceiver.Close(ctx)

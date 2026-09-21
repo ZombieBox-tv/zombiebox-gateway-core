@@ -77,6 +77,7 @@ func main() {
 	}
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
 	deps := server.Dependencies{
+		Reception:       adapters,
 		Browse:          adapters,
 		YouTubeReceiver: adapters,
 		Artwork:         artwork.New(httpclient.Metadata()),

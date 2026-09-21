@@ -40,3 +40,7 @@ remain development work.
 Dev.11 adds [hierarchical browse and progressive remote adaptation](docs/browsing-remote-media.md),
 including a paired adaptive YouTube resolver. Live/HLS conversion and complete
 provider/account workflows remain open.
+
+Dev.12 adds [selected-client Spotify/AirPlay reception](docs/media-receiver.md),
+leased controls and receiver-aware Cast budgets. These share existing playback
+sessions; account, OEM and physical A/V evidence remains separate.

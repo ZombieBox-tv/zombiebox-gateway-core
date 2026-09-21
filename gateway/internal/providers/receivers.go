@@ -117,13 +117,17 @@ func (a *Adapters) Spotify(ctx context.Context, c Config) ([]Source, error) {
 	if err != nil {
 		return nil, err
 	}
+	return []Source{spotifySource(c, state)}, nil
+}
+
+func spotifySource(c Config, state NowPlaying) Source {
 	item := domain.Item{ID: "spotify-connect", Provider: "spotify", Kind: "audio", Title: "Spotify Connect", Subtitle: "Select Zombie Box in Spotify, then listen here", Playable: true}
 	if state.Item != nil {
 		item = *state.Item
 		item.Playable = true
 	}
 	headers, _ := wrapperHeaders(c)
-	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}}, nil
+	return Source{Item: item, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}
 }
 
 type PlayerCommand = domain.PlayerCommand

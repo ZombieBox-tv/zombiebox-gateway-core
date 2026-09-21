@@ -17,8 +17,9 @@ No host firewall changes are applied automatically.
 `make services-smoke` verifies synthetic RTP to HLS, including audio without video.
 That evidence does not validate iOS negotiation, metadata/artwork, PIN UX,
 sender disconnect/reconnect, A/V synchronization or physical legacy playback.
-Select the matching source after starting AirPlay; automatic receiver routing
-and Now Playing interruption/restore remain open. HLS state is disposable and
+Dev.12 client Settings → Receive Spotify / AirPlay → AirPlay arms foreground
+reception. Fresh worker activity opens video or audio automatically and confirmed
+end restores interrupted playback. Metadata/artwork and full recovery remain open. HLS state is disposable and
 bounded to recent segments. Capture/protected-content restrictions remain those
 of the sender and upstream protocol implementation.
 
