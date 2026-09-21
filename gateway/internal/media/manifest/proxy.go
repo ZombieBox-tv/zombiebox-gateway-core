@@ -3,6 +3,7 @@ package manifest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -212,7 +213,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) {
 		// Never let a disguised playlist make the demuxer fetch unrewritten URLs.
 		first, _ := reader.Peek(512)
 		trimmed := strings.TrimSpace(strings.TrimPrefix(string(first), "\ufeff"))
-		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "<") {
+		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "<") || bytes.HasPrefix(first, []byte{0xff, 0xfe}) || bytes.HasPrefix(first, []byte{0xfe, 0xff}) || bytes.HasPrefix(first, []byte{0, 0, 0xfe, 0xff}) {
 			http.Error(w, "unexpected manifest", 502)
 			return
 		}

@@ -33,6 +33,14 @@ func readXML(body []byte) (*element, error) {
 		case xml.Directive:
 			return nil, errors.New("XML directives unsupported")
 		case xml.StartElement:
+			// FFmpeg accepts case-insensitive DASH element names. Normalize the
+			// same vocabulary before rewriting so case variants cannot bypass it.
+			for _, name := range []string{"MPD", "Period", "AdaptationSet", "Representation", "BaseURL", "SegmentTemplate", "SegmentList", "SegmentBase", "Initialization", "SegmentURL", "RepresentationIndex", "ContentProtection", "Location", "UTCTiming", "PatchLocation"} {
+				if strings.EqualFold(t.Name.Local, name) {
+					t.Name.Local = name
+					break
+				}
+			}
 			count++
 			if count > 10000 || len(stack) > 32 {
 				return nil, errors.New("XML limit")

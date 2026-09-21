@@ -35,3 +35,6 @@ credentials, byte ranges, refresh and rejected external references. Full runs th
 media test binary with packaged FFmpeg and external networking disabled. Physical
 players and Termux/Bionic remain unverified. This is not adaptive bitrate selection
 or complete remote track/subtitle support.
+
+Dev.15 additionally normalizes the case-insensitive element vocabulary accepted
+by FFmpeg and rejects UTF-16/32 manifest signatures in segment responses.

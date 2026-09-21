@@ -8,7 +8,8 @@
     "Dev.11: Hierarchical Plex/Jellyfin/Stremio browsing, progressive remote probing/conversion and paired YouTube adaptive mux; bounded injected adapters. Live/HLS adaptation and receiver completion remain open. Product exit gates remain open.",
     "Dev.12: Selected-client Spotify/AirPlay leases, fresh activity routing, owned controls and adaptive Cast encoder budgets. Account/OEM/physical gates remain open.",
     "Dev.13: Explicit retry positions and opt-in continuous live MPEG-TS adaptation; bounded conversion replacement. HLS/DASH conversion remains open. Product exit gates remain open.",
-    "Dev.14: Bounded clear HLS/DASH manifest adaptation, authenticated segment graph, remux/transcode and planner integration shared by Full/Edge. Product exit gates remain open."
+    "Dev.14: Bounded clear HLS/DASH manifest adaptation, authenticated segment graph, remux/transcode and planner integration shared by Full/Edge. Product exit gates remain open.",
+    "Dev.15: Normalize DASH element case before URI rewriting and reject encoded manifests disguised as media segments; no physical gate changes."
   ],
   "milestones": [
     {

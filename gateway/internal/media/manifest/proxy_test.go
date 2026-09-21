@@ -15,6 +15,7 @@ func TestRejectsEscapingManifests(t *testing.T) {
 		{"hls", "#EXTM3U\n#EXTINF:1,\nfile:///etc/passwd\n"},
 		{"hls", "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"https://keys.test/key\"\n"},
 		{"dash", `<MPD type="dynamic"><Period><AdaptationSet><Representation><SegmentList startNumber="5"><SegmentURL media="segment.m4s"/></SegmentList></Representation></AdaptationSet></Period></MPD>`},
+		{"dash", `<MPD><Period><AdaptationSet><Representation><baseurl>file:///etc/passwd</baseurl></Representation></AdaptationSet></Period></MPD>`},
 		{"dash", `<!DOCTYPE MPD [<!ENTITY x SYSTEM "file:///etc/passwd">]><MPD>&x;</MPD>`},
 		{"dash", `<MPD><Period><AdaptationSet><ContentProtection schemeIdUri="urn:test"/></AdaptationSet></Period></MPD>`},
 		{"dash", `<MPD xmlns:xlink="http://www.w3.org/1999/xlink"><Period xlink:href="https://outside.test/period"/></MPD>`},
@@ -163,5 +164,29 @@ func TestLiveRefreshRegistersNewSegmentsAndPreservesRange(t *testing.T) {
 		if res.StatusCode != 206 || string(body) != "2345" || res.Header.Get("Content-Range") != "bytes 2-5/10" {
 			t.Fatal("range response lost")
 		}
+	}
+}
+
+func TestSegmentCannotHideAnEncodedManifest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte{0xff, 0xfe, '<', 0, 'M', 0, 'P', 0, 'D', 0, '>', 0})
+	}))
+	defer upstream.Close()
+	p, err := Open(t.Context(), upstream.Client(), upstream.URL, "hls", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	segment, err := p.register(upstream.URL, "segment", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.Get(segment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 502 {
+		t.Fatal("accepted encoded nested manifest")
 	}
 }
