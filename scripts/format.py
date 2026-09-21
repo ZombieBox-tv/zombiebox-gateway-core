@@ -106,6 +106,8 @@ def main():
     for language in languages:
         if language == "go":
             paths = [path for path in files if path.suffix == ".go"]
+            if not paths:
+                continue
             tool = go_tool("goimports")
             if args.check:
                 dirty = subprocess.check_output(
@@ -125,6 +127,8 @@ def main():
                 run(tool, "-local", "zombiebox.local/gateway", "-w", *paths)
         elif language == "kotlin":
             paths = [path for path in files if path.suffix in (".kt", ".kts")]
+            if not paths:
+                continue
             options = ["--dry-run", "--set-exit-if-changed"] if args.check else []
             run(
                 "java",
@@ -137,6 +141,8 @@ def main():
             )
         elif language == "python":
             paths = [path for path in files if path.suffix == ".py"]
+            if not paths:
+                continue
             run(
                 "uvx",
                 "--from",
@@ -163,8 +169,12 @@ def main():
                 for path in files
                 if path.suffix in (".mjs", ".js", ".json", ".yaml", ".yml", ".xml")
             ]
+            if not paths:
+                continue
             run(
                 prettier_tool(),
+                "--ignore-path",
+                "tooling/format/ignore",
                 "--config",
                 "tooling/format/prettier.json",
                 "--check" if args.check else "--write",
@@ -172,6 +182,8 @@ def main():
             )
         elif language == "shell":
             paths = [path for path in files if path.suffix == ".sh"]
+            if not paths:
+                continue
             run(
                 go_tool("shfmt"), "-i", "4", "-ci", "-d" if args.check else "-w", *paths
             )

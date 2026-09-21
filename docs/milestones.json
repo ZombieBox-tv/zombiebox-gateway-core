@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "repository": "zombiebox-gateway-core",
+  "productRegistry": "workspace:docs/milestones.json",
+  "notes": ["Local component scope; product exit gates remain open. No hosted milestones exist."],
+  "milestones": [
+    {
+      "id": "M0",
+      "title": "Bootstrap / ADRs",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M1",
+      "title": "Handshake + Capability Scanner",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M3",
+      "title": "Media Capability Probes + Playback Planner",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M4",
+      "title": "Unified Media UI",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M5",
+      "title": "YouTube",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M6",
+      "title": "Spotify + AirPlay",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M7",
+      "title": "Android Mirror",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M8",
+      "title": "IPTV",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M9",
+      "title": "Rebrowser",
+      "status": "in_progress",
+      "completedAt": null,
+      "remoteId": null
+    },
+    {
+      "id": "M11",
+      "title": "Public beta",
+      "status": "planned",
+      "completedAt": null,
+      "remoteId": null
+    }
+  ]
+}

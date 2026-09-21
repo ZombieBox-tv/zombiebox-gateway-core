@@ -25,3 +25,15 @@ __pycache__/
 
 # User-supplied architecture reference, never product source.
 /resources/recora-app/
+
+# Independent checkout caches and local configuration
+.deps/
+.tools/
+.local/
+.gradle/
+**/build/
+local.properties
+dist/
+.codegraph/
+
+**/node_modules
