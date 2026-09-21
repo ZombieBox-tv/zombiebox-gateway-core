@@ -10,5 +10,6 @@ RUN apk add --no-cache ffmpeg=8.0.1-r1
 COPY --from=build /threadfin /usr/local/bin/threadfin
 COPY --from=build /src/LICENSE /usr/share/licenses/threadfin/LICENSE
 COPY --from=build /src/ZOMBIE_UPSTREAM_COMMIT /usr/share/licenses/threadfin/COMMIT
+COPY LICENSE NOTICE /usr/share/doc/zombiebox/
 USER 65532:65532
 ENTRYPOINT ["threadfin", "-config", "/state", "-bind", "0.0.0.0", "-port", "34400"]

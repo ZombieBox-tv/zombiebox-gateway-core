@@ -70,6 +70,7 @@ type Programme struct {
 }
 
 type Item struct {
+	GuideState  string      `json:"guideState,omitempty"`
 	BrowseID    string      `json:"browseId,omitempty"`
 	Programmes  []Programme `json:"programmes,omitempty"`
 	ID          string      `json:"id"`

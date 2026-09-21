@@ -16,5 +16,6 @@ RUN apk add --no-cache ffmpeg=8.0.1-r1 alsa-lib=1.2.14-r2 libogg=1.3.6-r0 libvor
 COPY --from=build /go-librespot /zombie-worker /usr/local/bin/
 COPY --from=build /upstream/LICENSE /usr/share/licenses/go-librespot/LICENSE
 COPY --from=build /upstream/ZOMBIE_UPSTREAM_COMMIT /usr/share/licenses/go-librespot/COMMIT
+COPY LICENSE NOTICE /usr/share/doc/zombiebox/
 USER 65532:65532
 ENTRYPOINT ["zombie-worker"]

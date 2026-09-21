@@ -1,0 +1,13 @@
+Zombiebox
+Copyright (C) 2026 diegog0477 and contributors
+
+First-party source is licensed under GPL-3.0-only (GNU General Public License,
+version 3 only). See LICENSE for the complete terms. This software comes without
+warranty, to the extent permitted by law.
+
+Third-party source, dependencies, reference artwork, firmware and documentation
+retain their respective copyright and license terms. They are not relicensed by
+this notice. Reference clones and proprietary/device resources are not part of
+our first-party source distributions. Preserve upstream notices when packaging
+any dependency. See the dependency inventory and third-party notices accompanying
+each distribution; an inventory alone is not a license-compliance determination.

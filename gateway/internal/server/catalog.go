@@ -256,7 +256,16 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		for _, raw := range stored {
 			var p domain.Progress
 			if json.Unmarshal(raw, &p) == nil && p.PositionMS > 0 && p.State != "ENDED" {
-				if item, ok := available[p.Item.ID]; ok {
+				item, ok := available[p.Item.ID]
+				if !ok && p.Item.Playable {
+					s.mu.Lock()
+					config, revision := s.config(r.Context(), p.Item.Provider), s.configRevision[p.Item.Provider]
+					s.mu.Unlock()
+					if config.Enabled && s.browse.Known(r.Context(), d.ID, p.Item.ID, config, revision) {
+						item, ok = p.Item, true
+					}
+				}
+				if ok {
 					p.Item = item
 					p.Item.PositionMS = p.PositionMS
 					if p.DurationMS > 0 {
@@ -291,9 +300,10 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 			kind = "channel_row"
 		}
 		screen.Sections = append(screen.Sections, domain.Section{ID: id, Type: kind, Title: providers.Titles[id], Items: items})
-		if screen.Hero == nil {
-			screen.Hero = &domain.Hero{Item: items[0], Description: items[0].Description, BackdropURL: items[0].ImageURL}
-		}
+
+	}
+	if search == "" {
+		screen.Hero = s.heroes.Select(r.Context(), d.ID, scope, screen.Sections)
 	}
 	respond(w, 200, screen)
 }

@@ -50,8 +50,8 @@ func ParseXMLTV(body []byte, now time.Time) (map[string][]domain.Programme, erro
 		// Descriptions are deliberately excluded from the channel row payload.
 		result[p.Channel] = append(result[p.Channel], domain.Programme{Title: p.Title, Start: begin.Unix(), End: end.Unix()})
 		sort.Slice(result[p.Channel], func(i, j int) bool { return result[p.Channel][i].Start < result[p.Channel][j].Start })
-		if len(result[p.Channel]) > 8 {
-			result[p.Channel] = result[p.Channel][:8]
+		if len(result[p.Channel]) > 48 {
+			result[p.Channel] = result[p.Channel][:48]
 		}
 	}
 }

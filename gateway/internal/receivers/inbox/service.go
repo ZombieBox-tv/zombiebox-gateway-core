@@ -60,6 +60,14 @@ func (s *Service) Claim(owner, provider string) error {
 	return nil
 }
 
+// Active includes an armed receiver, so another transport cannot steal its screen.
+func (s *Service) Active(owner string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expire()
+	return s.owner == owner
+}
+
 func (s *Service) Owned(owner string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,6 +123,7 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 	source, status, err := s.backend.Read(request, provider)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expire()
 	if s.owner != owner || s.generation != generation {
 		return Snapshot{}, ErrChanged
 	}

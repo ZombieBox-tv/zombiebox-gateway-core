@@ -82,6 +82,12 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 			fail(w, 400, "invalid_provider")
 			return
 		}
+		s.receiverClaims.Lock()
+		defer s.receiverClaims.Unlock()
+		if s.receiverBusy(d.ID, "media") {
+			fail(w, 409, "receiver_busy")
+			return
+		}
 		if err := s.mediaReceiverInbox.Claim(d.ID, request.Provider); err != nil {
 			fail(w, 409, "receiver_busy")
 			return

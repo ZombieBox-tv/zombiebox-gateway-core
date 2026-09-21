@@ -20,6 +20,7 @@ type HTTPClient interface {
 }
 
 type Adapters struct {
+	guides            guideCache
 	http, privateHTTP HTTPClient
 	catalog           map[string]Definition
 }

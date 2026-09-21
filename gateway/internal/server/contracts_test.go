@@ -122,6 +122,7 @@ func TestWireContracts(t *testing.T) {
 	s.deps.YouTubeReceiver = &receiverFixture{state: domain.YouTubeReceiverState{State: "READY", TVCode: "123456789"}}
 	s.youtubeReceiver = youtubereceiver.New(s.deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
 	s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}, "youtube_receiver": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}})
+	call(s, "DELETE", "/v1/media-receiver", "", "contract-device", token, "")
 	samples["YouTubeReceiverState"] = call(s, "POST", "/v1/youtube/receiver", `{}`, "contract-device", token, "").Body.Bytes()
 	hardware, _ := json.Marshal(hardwareFixture())
 	samples["HardwareReport"] = call(s, "PUT", "/v1/device/hardware", string(hardware), "contract-device", token, "").Body.Bytes()

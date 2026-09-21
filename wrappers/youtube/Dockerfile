@@ -3,6 +3,7 @@ WORKDIR /app
 COPY wrappers/youtube/package*.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY wrappers/youtube/*.mjs ./
+COPY LICENSE NOTICE /usr/share/doc/zombiebox/
 USER node
 ENV HOST=0.0.0.0 PORT=8091 ZOMBIE_YOUTUBE_CONFIG=/config/youtube.json
 EXPOSE 8091

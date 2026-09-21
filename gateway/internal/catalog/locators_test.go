@@ -38,6 +38,12 @@ func TestRestartResolvesFreshMediaWithoutPersistingCredentials(t *testing.T) {
 		t.Fatal(page, err)
 	}
 	restarted = NewPersistentBrowser(backend, db)
+	if !restarted.Known(ctx, "device", "episode", config, 0) || calls != 2 {
+		t.Fatal("saved Home identity should not perform a provider fetch")
+	}
+	if restarted.Known(ctx, "other-device", "episode", config, 0) {
+		t.Fatal("cross-device history")
+	}
 	source, ok := restarted.Resolve(ctx, "device", "episode", config, 0)
 	if !ok || source.Source.URL == "" || calls != 3 {
 		t.Fatal(source, ok, calls)
@@ -46,6 +52,9 @@ func TestRestartResolvesFreshMediaWithoutPersistingCredentials(t *testing.T) {
 		t.Fatal("cross-device locator")
 	}
 	config.Token = "different-account"
+	if restarted.Known(ctx, "device", "episode", config, 0) {
+		t.Fatal("cross-account history")
+	}
 	if _, ok := restarted.Resolve(ctx, "device", "episode", config, 0); ok {
 		t.Fatal("old account locator")
 	}

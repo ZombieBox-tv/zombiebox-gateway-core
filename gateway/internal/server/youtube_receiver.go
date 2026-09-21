@@ -22,6 +22,12 @@ func receiverError(w http.ResponseWriter, err error) {
 	fail(w, status, err.Error())
 }
 func (s *Server) startYouTubeReceiver(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	s.receiverClaims.Lock()
+	defer s.receiverClaims.Unlock()
+	if s.receiverBusy(d.ID, "youtube") {
+		fail(w, 409, "receiver_busy")
+		return
+	}
 	state, err := s.youtubeReceiver.Open(r.Context(), d.ID)
 	if err != nil {
 		receiverError(w, err)

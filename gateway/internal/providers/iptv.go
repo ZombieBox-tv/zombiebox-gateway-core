@@ -54,21 +54,22 @@ func (a *Adapters) IPTV(ctx context.Context, c Config) ([]Source, error) {
 		}
 	}
 	if c.EPGURL != "" {
-		if guideBody, e := a.request(ctx, c.EPGURL, nil); e == nil {
-			now := time.Now()
-			if guide, e := ParseXMLTV(guideBody, now); e == nil {
-				for i := range sources {
-					sources[i].Item.Programmes = guide[sources[i].EPGID]
-					for _, p := range sources[i].Item.Programmes {
-						if p.Start <= now.Unix() && p.End > now.Unix() {
-							sources[i].Item.Subtitle = p.Title
-							break
-						}
-					}
+		guide, state := a.guide(ctx, c.EPGURL)
+		now := time.Now().Unix()
+		for i := range sources {
+			sources[i].Item.GuideState = state
+			for _, programme := range guide[sources[i].EPGID] {
+				if programme.End <= now {
+					continue
+				}
+				sources[i].Item.Programmes = append(sources[i].Item.Programmes, programme)
+				if programme.Start <= now && programme.End > now {
+					sources[i].Item.Subtitle = programme.Title
 				}
 			}
 		}
 	}
+
 	return sources, nil
 }
 

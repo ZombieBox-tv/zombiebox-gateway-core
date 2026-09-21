@@ -52,6 +52,12 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 	if !decode(w, r, &request) {
 		return
 	}
+	s.receiverClaims.Lock()
+	defer s.receiverClaims.Unlock()
+	if s.receiverBusy(request.ReceiverID, "cast") {
+		fail(w, 409, "receiver_busy")
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var receiver domain.Device

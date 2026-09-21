@@ -21,7 +21,7 @@ func ValidHardware(report domain.HardwareReport) bool {
 	if report.GatewayLatencyMS < 0 || report.GatewayLatencyMS > 60000 || len(report.Network) > 40 {
 		return false
 	}
-	if len(report.ABIs) > 8 || len(report.Decoders) > 128 || len(report.ExternalPlayers) > 32 {
+	if len(report.IntegrationHints) > 32 || len(report.ABIs) > 8 || len(report.Decoders) > 128 || len(report.ExternalPlayers) > 32 {
 		return false
 	}
 
@@ -30,7 +30,7 @@ func ValidHardware(report domain.HardwareReport) bool {
 	if report.NativeDIAL != "UNKNOWN" || report.Multicast != "UNKNOWN" {
 		return false
 	}
-	for _, name := range append(append([]string{}, report.ABIs...), report.ExternalPlayers...) {
+	for _, name := range append(append(append([]string{}, report.ABIs...), report.ExternalPlayers...), report.IntegrationHints...) {
 		if len(name) > 200 {
 			return false
 		}

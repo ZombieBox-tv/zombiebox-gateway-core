@@ -13,5 +13,6 @@
   "dependencies": {
     "youtubei.js": "18.0.0",
     "quickjs-emscripten": "0.31.0"
-  }
+  },
+  "license": "GPL-3.0-only"
 }

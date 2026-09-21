@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/catalog"
+	"zombiebox.local/gateway/internal/home"
 	"zombiebox.local/gateway/internal/receivers/inbox"
 
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
@@ -31,6 +32,8 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
+	receiverClaims     sync.Mutex
+	heroes             *home.Heroes
 	mediaReceiverInbox *inbox.Service
 	browse             *catalog.Browser
 	youtubeReceiver    *youtubereceiver.Service
@@ -79,6 +82,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	}
 	s.youtubeReceiver = youtubereceiver.New(deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
 	s.browse = catalog.NewPersistentBrowser(deps.Browse, db)
+	s.heroes = home.New(db, time.Now)
 	s.probeKey = randomID(32)
 	s.relayJobs = make(chan struct{}, 4)
 	s.integrationChecks = make(chan struct{}, 2)

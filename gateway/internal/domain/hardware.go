@@ -5,6 +5,7 @@ type CodecHint struct {
 	Types []string `json:"types"`
 }
 type HardwareReport struct {
+	IntegrationHints []string    `json:"integrationHints,omitempty"`
 	Version          int         `json:"scannerVersion"`
 	Fingerprint      string      `json:"fingerprint"`
 	Product          string      `json:"product"`

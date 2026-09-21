@@ -38,3 +38,9 @@ The four requested block-1 changes are implemented; physical acceptance and broa
 
 Revisioned operation/HLS probes, bounded persistent browse locators, YouTube hierarchy, stable IPTV IDs, receiver metadata/artwork and browser egress/pointer/recovery.
 Product exit gates and physical/account acceptance remain open.
+
+## dev.17 increment
+
+Stable Home Hero, scoped deep-item history, bounded guide cache, receiver exclusion and native-inventory fields; all container recipes include GPL notices.
+
+No product milestone or physical gate is closed.

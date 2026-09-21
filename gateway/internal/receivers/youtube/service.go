@@ -48,6 +48,12 @@ type Service struct {
 func New(backend Backend, config func(context.Context, string) domain.Config, newID func() string) *Service {
 	return &Service{backend: backend, config: config, newID: newID}
 }
+func (s *Service) Active(device string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.owner != nil && s.owner.device == device && (s.owner.busy || time.Now().Before(s.owner.expires))
+}
+
 func (s *Service) Open(ctx context.Context, device string) (domain.YouTubeReceiverState, error) {
 	empty := domain.YouTubeReceiverState{}
 	s.mu.Lock()

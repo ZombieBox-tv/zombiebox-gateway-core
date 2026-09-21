@@ -3,6 +3,7 @@ WORKDIR /app
 COPY wrappers/youtube-receiver/package*.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY wrappers/youtube-receiver/*.mjs ./
+COPY LICENSE NOTICE /usr/share/doc/zombiebox/
 USER node
 ENV ZOMBIE_YOUTUBE_RECEIVER_CONFIG=/config/receiver.json
 EXPOSE 8095 8096

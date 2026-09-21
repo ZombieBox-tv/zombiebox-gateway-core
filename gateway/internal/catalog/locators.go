@@ -56,6 +56,12 @@ func (b *Browser) Provider(ctx context.Context, device, id string) string {
 	return locator.Provider
 }
 
+// Known validates a saved semantic item without fetching provider pages on Home.
+func (b *Browser) Known(ctx context.Context, device, id string, config domain.Config, revision uint64) bool {
+	locator, ok := b.locator(ctx, device, id)
+	return ok && locator.ConfigKey == configKey(config) && (locator.Instance != b.instance || locator.Revision == revision)
+}
+
 // Resolve renews the original provider page after cache expiry or gateway restart.
 // It does not persist signed streams, auth headers or upstream response objects.
 func (b *Browser) Resolve(ctx context.Context, device, id string, config domain.Config, revision uint64) (Entry, bool) {
