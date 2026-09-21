@@ -72,7 +72,7 @@ func main() {
 		tools = mediatools.New("ffmpeg", "ffprobe")
 	}
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
-	deps := server.Dependencies{Artwork: artwork.New(httpclient.Metadata()), Catalog: adapters, Search: adapters, Resolver: adapters, Player: adapters, Browser: adapters, Media: tools, ControlHTTP: httpclient.Private(), StreamHTTP: httpclient.Streaming()}
+	deps := server.Dependencies{YouTubeReceiver: adapters, Artwork: artwork.New(httpclient.Metadata()), Catalog: adapters, Search: adapters, Resolver: adapters, Player: adapters, Browser: adapters, Media: tools, ControlHTTP: httpclient.Private(), StreamHTTP: httpclient.Streaming()}
 	app := server.New(db, server.Options{ProbeDir: *probes, ThreadfinURL: *threadfin, PairingCode: pairing, MediaDir: *media, RelayURL: *relay, RelayControlURL: *relayControl, RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"), RTSPPort: *rtspPort}, deps)
 	if *config != "" {
 		configs, e := providerconfig.Load(*config, os.LookupEnv)

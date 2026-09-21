@@ -8,7 +8,7 @@ Local sources/ clones preserve their upstream licenses and are excluded from the
 - FFmpeg: license combination depends on build/components. Read COPYING*, LICENSE.md and build configuration before packaging.
 - go-librespot and UxPlay: upstream GPL licenses. External process boundaries do not remove distribution obligations.
 - Serenity: MIT reference. Future code copies must retain copyright and license.
-- yt-cast-receiver: inspect LICENSE before copying/distributing; do not infer license absence from GitHub metadata.
+- yt-cast-receiver 2.1.0: optional Node runtime dependency, exact npm lock and source commit bec77aceb537aa63a7bd67cb2fb3b4ad1139e9e8. package.json declares MIT, but the pinned checkout and published package contain no standalone license text. Retain package metadata and obtain the missing copyright/license notice before distribution; do not fabricate an attribution. Transitive npm licenses remain in the image and require the release inventory.
 - resources/ui-concepto.png: user-provided reference including third-party brands/artwork; not included in the APK.
 
 The author has not selected a license for first-party project code. Decide before publication.
@@ -24,3 +24,9 @@ The author has not selected a license for first-party project code. Decide befor
 - MediaMTX 1.21.1, MIT: locked commit 048255986f7e04b859b4c4efe651448ec785ecd4, upstream Full image pinned by digest. See mediamtx-LICENSE.txt. wrappers/mediamtx/android.patch changes only Android build constraints in a disposable Edge build copy; preserve its upstream attribution. Edge omits the unused standalone HLS JavaScript player and Raspberry Pi camera support.
 - github.com/wlynxg/anet v0.0.5, MIT: transitive MediaMTX Android interface compatibility helper, now cloned as a locked reference. Its Go linker exception and runtime verification limits are documented in ADR 0019.
 - Full now installs Alpine ffmpeg 8.0.1-r1 (including libx264). The image has GPL/LGPL-covered media dependencies; a full package/SBOM/source-and-notice inventory remains a public distribution gate. No such media libraries are linked into either Android APK.
+
+- yt-cast-receiver's README also flags its forked `peer-dial` dependency as free
+  for non-commercial use and directs commercial users to obtain author consent.
+  Do not describe the complete receiver dependency tree as uniformly MIT or
+  unrestricted open source. Resolve this dependency/license scope before public
+  distribution; the development checkpoint is not a distribution approval.

@@ -37,6 +37,13 @@ type Player interface {
 type Browser interface {
 	BrowserRequest(context.Context, domain.Config, string, string, any) ([]byte, error)
 }
+type YouTubeReceiver interface {
+	OpenReceiver(context.Context, domain.Config, string) (domain.YouTubeReceiverState, error)
+	PollReceiver(context.Context, domain.Config, string) (domain.YouTubeReceiverState, error)
+	AcknowledgeReceiver(context.Context, domain.Config, string, domain.ReceiverAcknowledgement) error
+	CloseReceiver(context.Context, domain.Config, string) error
+}
+
 type Artwork interface {
 	Image(context.Context, domain.Source, bool) ([]byte, error)
 }
@@ -52,15 +59,16 @@ type HTTPClient interface {
 // Dependencies are immutable after construction. Media and Artwork are optional.
 // Keep control requests and unbounded-duration streaming on separate transports.
 type Dependencies struct {
-	Artwork     Artwork
-	Catalog     Catalog
-	Search      Search
-	Resolver    Resolver
-	Player      Player
-	Browser     Browser
-	Media       Media
-	ControlHTTP HTTPClient
-	StreamHTTP  HTTPClient
+	YouTubeReceiver YouTubeReceiver
+	Artwork         Artwork
+	Catalog         Catalog
+	Search          Search
+	Resolver        Resolver
+	Player          Player
+	Browser         Browser
+	Media           Media
+	ControlHTTP     HTTPClient
+	StreamHTTP      HTTPClient
 }
 
 func (d Dependencies) validate(db Persistence) {

@@ -24,7 +24,7 @@ import (
 type Config = domain.Config
 type Source = domain.Source
 
-var Titles = map[string]string{"local": "My library", "plex": "Plex", "jellyfin": "Jellyfin", "stremio": "Stremio", "youtube": "YouTube", "spotify": "Spotify", "airplay": "AirPlay", "android_mirror": "Android Mirror", "iptv": "IPTV", "rebrowser": "Browser"}
+var Titles = map[string]string{"youtube_receiver": "YouTube Receiver", "local": "My library", "plex": "Plex", "jellyfin": "Jellyfin", "stremio": "Stremio", "youtube": "YouTube", "spotify": "Spotify", "airplay": "AirPlay", "android_mirror": "Android Mirror", "iptv": "IPTV", "rebrowser": "Browser"}
 var Order = []string{"local", "youtube", "plex", "jellyfin", "stremio", "spotify", "iptv", "airplay", "android_mirror", "rebrowser"}
 
 func Validate(c Config) error {

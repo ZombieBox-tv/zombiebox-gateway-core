@@ -38,6 +38,7 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
+	youtubeReceiver   *youtubeReceiver
 	probeKey          string
 	browser           *browserSession
 	integrationChecks chan struct{}
@@ -72,6 +73,10 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	}
 	s := &Server{db: db, opt: opt, deps: deps, events: newEvents(), mux: http.NewServeMux(), attempts: map[string]attempt{}, sessions: map[string]*session{}, polls: make(chan struct{}, 32), catalogCache: map[string]catalogEntry{}}
 	s.probeKey = randomID(32)
+	s.mux.HandleFunc("POST /v1/youtube/receiver", s.auth(s.startYouTubeReceiver))
+	s.mux.HandleFunc("GET /v1/youtube/receiver/{receiver}", s.auth(s.youTubeReceiverOperation))
+	s.mux.HandleFunc("POST /v1/youtube/receiver/{receiver}/state", s.auth(s.youTubeReceiverOperation))
+	s.mux.HandleFunc("DELETE /v1/youtube/receiver/{receiver}", s.auth(s.youTubeReceiverOperation))
 	s.mux.HandleFunc("GET /v1/artwork/{item}", s.auth(s.artwork))
 	s.mux.HandleFunc("GET /v1/probes", s.auth(s.probeManifest))
 	s.mux.HandleFunc("GET /v1/probes/{probe}", s.probeStream)
@@ -100,6 +105,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	s.mux.HandleFunc("GET /v1/device", s.auth(func(w http.ResponseWriter, r *http.Request, d domain.Device) { respond(w, 200, d) }))
 	s.mux.HandleFunc("GET /v1/device/preferences", s.auth(func(w http.ResponseWriter, r *http.Request, d domain.Device) { respond(w, 200, d.Preferences) }))
 	s.mux.HandleFunc("PUT /v1/device/preferences", s.auth(s.preferences))
+	s.mux.HandleFunc("PUT /v1/device/hardware", s.auth(s.hardwareReport))
 	s.mux.HandleFunc("PUT /v1/device/capabilities", s.auth(s.capabilities))
 	s.mux.HandleFunc("GET /v1/modules", s.auth(s.modules))
 	s.mux.HandleFunc("GET /v1/catalog", s.auth(s.catalogPage))
@@ -171,7 +177,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		fail(w, 426, "unsupported_protocol")
 		return
 	}
-	if req.Platform.AndroidAPI < 9 || req.Display.Width < 0 || req.Display.Height < 0 || req.Memory.ClassMB < 0 || len(req.Platform.ABIs) > 8 || req.ClientVersion == "" || len(req.ClientVersion) > 40 || !installationID.MatchString(req.InstallationID) {
+	if (req.Hardware != nil && !validHardware(*req.Hardware)) || req.Platform.AndroidAPI < 9 || req.Display.Width < 0 || req.Display.Height < 0 || req.Memory.ClassMB < 0 || len(req.Platform.ABIs) > 8 || req.ClientVersion == "" || len(req.ClientVersion) > 40 || !installationID.MatchString(req.InstallationID) {
 		fail(w, 400, "invalid_registration")
 		return
 	}
@@ -220,6 +226,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	req.PairingCode = ""
 	if !reflect.DeepEqual(existing.Registration.Platform, req.Platform) || existing.Registration.Memory != req.Memory {
+		existing.Capabilities = domain.Capabilities{Version: 1, DeviceID: existing.ID, Probes: []domain.Probe{}}
+	} else if req.Hardware == nil {
+		req.Hardware = existing.Registration.Hardware
+	}
+	if req.Hardware != nil && (existing.Registration.Hardware == nil || req.Hardware.Fingerprint != existing.Registration.Hardware.Fingerprint) {
 		existing.Capabilities = domain.Capabilities{Version: 1, DeviceID: existing.ID, Probes: []domain.Probe{}}
 	}
 	existing.Registration = req

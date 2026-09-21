@@ -41,6 +41,9 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		return
 	}
 	found := s.searchSource(r.Context(), d.ID, req.ItemID)
+	if found == nil {
+		found = s.youTubeReceiverSource(d.ID, req.ItemID)
+	}
 	var candidates []providers.Source
 	if found == nil {
 		candidates = s.catalog(r.Context())
@@ -318,6 +321,12 @@ func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.done) })
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.youtubeReceiver != nil && s.deps.YouTubeReceiver != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = s.deps.YouTubeReceiver.CloseReceiver(ctx, s.youtubeReceiver.config, s.youtubeReceiver.id)
+		cancel()
+		s.youtubeReceiver = nil
+	}
 	if s.browser != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_, _ = s.deps.Browser.BrowserRequest(ctx, s.browser.config, "DELETE", "/session/"+s.browser.id, nil)

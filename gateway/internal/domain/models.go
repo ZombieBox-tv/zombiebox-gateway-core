@@ -19,13 +19,14 @@ type Memory struct {
 	ClassMB    int `json:"memoryClassMb"`
 }
 type Registration struct {
-	ClientVersion   string   `json:"clientVersion"`
-	ProtocolVersion int      `json:"protocolVersion"`
-	InstallationID  string   `json:"installationId"`
-	PairingCode     string   `json:"pairingCode,omitempty"`
-	Platform        Platform `json:"platform"`
-	Display         Display  `json:"display"`
-	Memory          Memory   `json:"memory"`
+	Hardware        *HardwareReport `json:"hardware,omitempty"`
+	ClientVersion   string          `json:"clientVersion"`
+	ProtocolVersion int             `json:"protocolVersion"`
+	InstallationID  string          `json:"installationId"`
+	PairingCode     string          `json:"pairingCode,omitempty"`
+	Platform        Platform        `json:"platform"`
+	Display         Display         `json:"display"`
+	Memory          Memory          `json:"memory"`
 }
 type Preferences struct {
 	AllowCasting      bool     `json:"allowCasting"`

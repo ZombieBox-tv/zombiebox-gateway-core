@@ -69,7 +69,7 @@ func (s *Server) integrationList(w http.ResponseWriter, r *http.Request, d domai
 				continue
 			}
 			target = c.URL
-			if definition.ID == "youtube" || definition.ID == "rebrowser" || definition.ID == "spotify" {
+			if definition.ID == "youtube_receiver" || definition.ID == "youtube" || definition.ID == "rebrowser" || definition.ID == "spotify" {
 				target = strings.TrimRight(target, "/") + "/health"
 			}
 			if definition.ID == "airplay" {

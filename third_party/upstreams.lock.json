@@ -27,11 +27,11 @@
     {
       "name": "yt-cast-receiver",
       "url": "https://github.com/patrickkfkan/yt-cast-receiver.git",
-      "commit": "83d61fa169e33c5e0046c2440b99a17cd9493e73",
-      "referenceBranch": "master",
+      "commit": "bec77aceb537aa63a7bd67cb2fb3b4ad1139e9e8",
+      "referenceBranch": "v2.1.0",
       "purpose": "YouTube remote commands -> Zombie PlaybackSession; no direct player",
-      "licenseHint": null,
-      "status": "reference-only; not integrated"
+      "licenseHint": "MIT",
+      "status": "integrated private receiver wrapper; physical sender validation pending"
     },
     {
       "name": "plexgo",

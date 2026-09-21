@@ -16,7 +16,7 @@ func All() []Definition {
 		{"local", "local", "filesystem", "integrated", "available", "available"},
 		{"ffmpeg", "local", "ffmpeg/ffprobe", "integrated", "available", "native-build"},
 		{"youtube", "youtube", "YouTube.js", "partial", "available", "native-build"},
-		{"youtube_receiver", "youtube", "yt-cast-receiver", "pending", "pending", "pending"},
+		{"youtube_receiver", "youtube_receiver", "yt-cast-receiver", "partial", "experimental", "native-build"},
 		{"plex", "plex", "HTTP adapter", "partial", "available", "available"},
 		{"jellyfin", "jellyfin", "HTTP adapter", "partial", "available", "available"},
 		{"stremio", "stremio", "addon HTTP adapter", "partial", "available", "available"},

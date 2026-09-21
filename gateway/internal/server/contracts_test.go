@@ -87,6 +87,11 @@ func TestWireContracts(t *testing.T) {
 	samples["AuthorizationPrompt"] = call(s, "GET", "/v1/player/spotify/authorization", "", "contract-device", token, "123456").Body.Bytes()
 	samples["BrowserSession"] = call(s, "POST", "/v1/browser", `{"url":"https://example.org"}`, "contract-device", token, "").Body.Bytes()
 	samples["ProbeManifest"] = call(s, "GET", "/v1/probes", "", "contract-device", token, "").Body.Bytes()
+	s.deps.YouTubeReceiver = &receiverFixture{state: domain.YouTubeReceiverState{State: "READY", TVCode: "123456789"}}
+	s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}, "youtube_receiver": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}})
+	samples["YouTubeReceiverState"] = call(s, "POST", "/v1/youtube/receiver", `{}`, "contract-device", token, "").Body.Bytes()
+	hardware, _ := json.Marshal(hardwareFixture())
+	samples["HardwareReport"] = call(s, "PUT", "/v1/device/hardware", string(hardware), "contract-device", token, "").Body.Bytes()
 	data, err := json.Marshal(samples)
 	if err != nil {
 		t.Fatal(err)
