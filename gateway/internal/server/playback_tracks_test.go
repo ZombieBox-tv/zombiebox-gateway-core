@@ -34,7 +34,7 @@ func TestTrackOwnershipSelectionAndUnavailableSources(t *testing.T) {
 	other := pair(t, s, "track-other")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s.sessions["local"] = &session{device: "track-owner", source: domain.Source{Path: "/private/media.mkv"}, ctx: ctx, cancel: cancel, expires: time.Now().Add(time.Hour)}
+	s.sessions["local"] = &session{selection: domain.MediaSelection{Quality: "LOW"}, device: "track-owner", source: domain.Source{Path: "/private/media.mkv"}, ctx: ctx, cancel: cancel, expires: time.Now().Add(time.Hour)}
 	for _, tc := range []struct {
 		method, path, body string
 		status             int
@@ -75,6 +75,9 @@ func TestTrackOwnershipSelectionAndUnavailableSources(t *testing.T) {
 	}
 	if plan.TimelineOffsetMS != 1250 || plan.ResumeMS != 0 || plan.Seekable || plan.Mode != "TRANSCODE" {
 		t.Fatalf("timeline: %+v", plan)
+	}
+	if s.sessions[plan.SessionID].selection.Quality != "LOW" {
+		t.Fatal("audio selection lost bandwidth profile")
 	}
 	if s.sessions["local"].ctx.Err() != nil {
 		t.Fatal("old session cancelled before client adoption")

@@ -68,7 +68,7 @@ func TestRealTrackSelectionAndSubtitleExtraction(t *testing.T) {
 		t.Fatal(err)
 	}
 	selected := 2
-	err = tools.ConvertSelected(ctx, input, "TRANSCODE", domain.MediaSelection{AudioID: &selected, PositionMS: 1000}, file)
+	err = tools.ConvertSelected(ctx, input, "TRANSCODE", domain.MediaSelection{AudioID: &selected, PositionMS: 1000, Quality: "LOW"}, file)
 	file.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +76,9 @@ func TestRealTrackSelectionAndSubtitleExtraction(t *testing.T) {
 	result, err := tools.Probe(ctx, output)
 	if err != nil || len(result.Streams) != 2 || result.Streams[1].Codec != "aac" {
 		t.Fatalf("selected output: %+v %v", result, err)
+	}
+	if result.Streams[0].Width > 426 || result.Streams[0].Height > 240 {
+		t.Fatalf("low profile dimensions: %+v", result.Streams[0])
 	}
 	duration, _ := strconv.ParseFloat(result.Format.Duration, 64)
 	if duration < 1.8 || duration > 2.4 {

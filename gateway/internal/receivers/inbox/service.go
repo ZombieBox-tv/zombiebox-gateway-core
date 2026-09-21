@@ -1,4 +1,4 @@
-// Package inbox owns one explicitly selected foreground media receiver.
+// Package inbox owns one explicitly armed media receiver with optional sender handoff.
 package inbox
 
 import (
@@ -36,6 +36,7 @@ type Service struct {
 	clock                    func() time.Time
 	poll                     chan struct{}
 	owner, provider, blocked string
+	selection                selection
 	expires                  time.Time
 	generation               uint64
 	plan                     *domain.Plan
@@ -72,7 +73,7 @@ func (s *Service) Owned(owner string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expire()
-	return s.owner == owner && s.provider == "spotify"
+	return s.owner == owner && (s.provider == "spotify" || (s.provider == "auto" && s.selection.current == "spotify"))
 }
 
 func (s *Service) Release(owner string) {
@@ -89,6 +90,9 @@ func (s *Service) Dismiss(owner, session string) bool {
 	defer s.mu.Unlock()
 	if s.owner == owner && s.plan != nil && s.plan.SessionID == session {
 		s.blocked = s.plan.Item.ID
+		if s.provider == "auto" && s.selection.blocked != nil {
+			s.selection.blocked[s.selection.current] = s.plan.Item.ID
+		}
 		s.stopPlan()
 		return true
 	}
@@ -120,7 +124,7 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 	}
 	s.cancel = cancel
 	s.mu.Unlock()
-	source, status, err := s.backend.Read(request, provider)
+	values := s.read(request, provider)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expire()
@@ -128,6 +132,18 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 		return Snapshot{}, ErrChanged
 	}
 	s.cancel = nil
+	selected := provider
+	if provider == "auto" {
+		selected = s.selection.choose(values)
+	}
+	value := values[selected]
+	if selected == "" {
+		value.status = domain.NowPlaying{Provider: "auto", State: "STOPPED"}
+		if values["spotify"].err != nil && values["airplay"].err != nil {
+			value.err = values["spotify"].err
+		}
+	}
+	source, status, err := value.source, value.status, value.err
 	// Unknown network state never means sender stopped.
 	if err != nil {
 		return Snapshot{}, err
@@ -138,22 +154,26 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 	if source == nil {
 		s.stopPlan()
 		s.blocked = ""
-	} else if source.Item.ID != s.blocked {
+	} else if source.Item.ID != s.blocked && (provider != "auto" || s.selection.blocked[selected] != source.Item.ID) {
 		keyData, _ := json.Marshal(struct {
 			URL     string
 			Headers any
 		}{source.URL, source.Headers})
 		key := sha256.Sum256(keyData)
 		if s.plan == nil || s.plan.Item.ID != source.Item.ID || s.sourceKey != key {
-			s.stopPlan()
+			// Preserve the confirmed stream if replacement allocation fails.
 			plan, err := s.sessions.Start(owner, *source)
 			if err != nil {
 				return Snapshot{}, err
 			}
+			s.stopPlan()
 			s.plan = &plan
 			s.sourceKey = key
 		}
 		s.plan.Item = source.Item
+		if provider == "auto" {
+			s.selection.current = selected
+		}
 	}
 	out := Snapshot{Enabled: true, Provider: provider, NowPlaying: &status}
 	if s.plan != nil {
@@ -192,4 +212,5 @@ func (s *Service) clear() {
 	}
 	s.stopPlan()
 	s.owner, s.provider, s.blocked = "", "", ""
+	s.selection = selection{}
 }

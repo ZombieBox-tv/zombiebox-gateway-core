@@ -43,7 +43,7 @@ func TestWireContracts(t *testing.T) {
 	}
 	samples["BrowsePage"] = browse.Body.Bytes()
 	samples["MediaReceiver"] = call(s, "GET", "/v1/media-receiver", "", "contract-device", token, "").Body.Bytes()
-	samples["MediaReceiverSelection"] = json.RawMessage(`{"provider":"spotify"}`)
+	samples["MediaReceiverSelection"] = json.RawMessage(`{"provider":"auto"}`)
 
 	for name, path := range map[string]string{"DiagnosticReport": "/v1/diagnostics", "IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
 		w := call(s, "GET", path, "", "contract-device", token, "")
@@ -109,7 +109,7 @@ func TestWireContracts(t *testing.T) {
 	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"spotify": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}, "rebrowser": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}}); err != nil {
 		t.Fatal(err)
 	}
-	call(s, "PUT", "/v1/media-receiver", `{"provider":"spotify"}`, "contract-device", token, "")
+	call(s, "PUT", "/v1/media-receiver", `{"provider":"auto"}`, "contract-device", token, "")
 	receiverState := call(s, "GET", "/v1/media-receiver", "", "contract-device", token, "")
 	if receiverState.Code != 200 {
 		t.Fatal(receiverState.Body)

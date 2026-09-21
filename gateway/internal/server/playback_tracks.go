@@ -175,7 +175,7 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 	}
 	id, ticket := randomID(16), randomID(24)
 	ctx, cancel := context.WithDeadline(context.Background(), sess.expires)
-	selection := domain.MediaSelection{AudioID: request.AudioID, PositionMS: request.PositionMS}
+	selection := domain.MediaSelection{AudioID: request.AudioID, PositionMS: request.PositionMS, Quality: sess.selection.Quality}
 	s.sessions[id] = &session{
 		mode:       "TRANSCODE",
 		device:     d.ID,

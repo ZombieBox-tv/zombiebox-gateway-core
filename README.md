@@ -61,3 +61,5 @@ First-party code: [GPL-3.0-only](LICENSE). See [NOTICE](NOTICE) for third-party 
 Dev.18 adds [persistent artwork caching](docs/artwork-cache.md), shared by Full and Edge.
 
 Dev.19: Automatic language/track policy, remote text tracks, local sidecars, 48-hour mapped EPG, allowlisted diagnostics and atomic SQLite schema versioning.
+
+Dev.20: Automatic Spotify/AirPlay handoff with confirmed-activity selection and replacement preservation; fixed low-bandwidth conversion profile.

@@ -102,6 +102,9 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 }
 
 func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, adtsAAC bool, mode string, selection domain.MediaSelection, output io.Writer, manifestKind ...string) error {
+	if selection.Quality != "" && selection.Quality != "STANDARD" && selection.Quality != "LOW" {
+		return errors.New("invalid media quality")
+	}
 	if selection.PositionMS < 0 || selection.PositionMS > 7*24*60*60*1000 || (selection.AudioID != nil && *selection.AudioID < 0) {
 		return errors.New("invalid media selection")
 	}
@@ -153,7 +156,7 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 			args = append(args, "-bsf:a", "aac_adtstoasc")
 		}
 	} else {
-		args = append(args, "-c:v", "libx264", "-threads", "2", "-filter_threads", "1", "-preset", "veryfast", "-profile:v", "baseline", "-level:v", "3.0", "-pix_fmt", "yuv420p", "-vf", "scale=640:360:force_original_aspect_ratio=decrease:force_divisible_by=2", "-r", "30", "-b:v", "1000k", "-maxrate", "1200k", "-bufsize", "2400k", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100")
+		args = append(args, videoEncoding(selection.Quality)...)
 	}
 	args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
 	if err := t.runner.Run(ctx, t.ffmpeg, args, output); err != nil {

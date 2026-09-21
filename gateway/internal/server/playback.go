@@ -36,9 +36,14 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	var req struct {
 		ItemID     string `json:"itemId"`
 		Mode       string `json:"mode"`
+		Quality    string `json:"quality"`
 		PositionMS *int64 `json:"positionMs"`
 	}
 	if !decode(w, r, &req) {
+		return
+	}
+	if (req.Quality != "" && req.Quality != "STANDARD" && req.Quality != "LOW") || (req.Quality == "LOW" && req.Mode != "TRANSCODE") {
+		fail(w, 400, "invalid_playback_quality")
 		return
 	}
 	if req.PositionMS != nil && (*req.PositionMS < 0 || *req.PositionMS > 7*24*60*60*1000) {
@@ -103,7 +108,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	ticket := randomID(24)
 	expires := time.Now().Add(6 * time.Hour)
 	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	s.sessions[id] = &session{mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS

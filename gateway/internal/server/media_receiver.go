@@ -78,7 +78,7 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 		if !decode(w, r, &request) {
 			return
 		}
-		if request.Provider != "spotify" && request.Provider != "airplay" {
+		if request.Provider != "spotify" && request.Provider != "airplay" && request.Provider != "auto" {
 			fail(w, 400, "invalid_provider")
 			return
 		}

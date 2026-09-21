@@ -25,6 +25,7 @@ type SubtitleCue struct {
 }
 
 type MediaSelection struct {
+	Quality    string
 	AudioID    *int
 	PositionMS int64
 }
