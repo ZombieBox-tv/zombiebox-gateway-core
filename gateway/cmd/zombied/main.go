@@ -28,6 +28,8 @@ import (
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8090", "HTTP listen address (trusted LAN only when exposed)")
 	check := flag.String("healthcheck", "", "check gateway URL and exit")
+	stateCopy := flag.String("state-copy", "", "write a consistent private snapshot to a new file, then exit")
+	stateCheck := flag.Bool("state-check", false, "check existing state read-only without migration, then exit")
 	state := flag.String("state", ".local/gateway.db", "private SQLite database path")
 	probes := flag.String("probe-dir", "", "directory of synthetic capability fixtures")
 	media := flag.String("media-dir", ".local/media", "directory containing local media")
@@ -51,6 +53,22 @@ func main() {
 		if res.StatusCode != http.StatusOK {
 			os.Exit(1)
 		}
+		return
+	}
+	if *stateCheck || *stateCopy != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var err error
+		if *stateCopy != "" {
+			err = store.Snapshot(ctx, *state, *stateCopy)
+		} else {
+			err = store.Inspect(ctx, *state)
+		}
+		if err != nil {
+			slog.Error("state maintenance failed; existing files are preserved")
+			os.Exit(1)
+		}
+		fmt.Println("State maintenance completed")
 		return
 	}
 	if *relay != "" && len(os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN")) < 32 {

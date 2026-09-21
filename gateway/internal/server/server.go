@@ -32,6 +32,9 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
+	networkSamples     map[string]networkSample
+	networkJobs        chan struct{}
+	searchJobs         chan struct{}
 	receiverClaims     sync.Mutex
 	heroes             *home.Heroes
 	mediaReceiverInbox *inbox.Service
@@ -84,6 +87,9 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	s.browse = catalog.NewPersistentBrowser(deps.Browse, db)
 	s.heroes = home.New(db, time.Now)
 	s.probeKey = randomID(32)
+	s.networkSamples = map[string]networkSample{}
+	s.networkJobs = make(chan struct{}, 2)
+	s.searchJobs = make(chan struct{}, 2)
 	s.relayJobs = make(chan struct{}, 4)
 	s.integrationChecks = make(chan struct{}, 2)
 	s.casts = map[string]*castSession{}

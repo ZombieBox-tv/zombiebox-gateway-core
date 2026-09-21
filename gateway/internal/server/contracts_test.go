@@ -45,13 +45,21 @@ func TestWireContracts(t *testing.T) {
 	samples["MediaReceiver"] = call(s, "GET", "/v1/media-receiver", "", "contract-device", token, "").Body.Bytes()
 	samples["MediaReceiverSelection"] = json.RawMessage(`{"provider":"auto"}`)
 
-	for name, path := range map[string]string{"DiagnosticReport": "/v1/diagnostics", "IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
+	for name, path := range map[string]string{"SearchResults": "/v1/search?q=movie", "DiagnosticReport": "/v1/diagnostics", "IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
 		w := call(s, "GET", path, "", "contract-device", token, "")
 		if w.Code != 200 {
 			t.Fatal(w.Body)
 		}
 		samples[name] = w.Body.Bytes()
 	}
+	download := call(s, "GET", "/v1/network/sample", "", "contract-device", token, "")
+	samples["NetworkSampleReport"] = json.RawMessage(`{"sampleId":"` + download.Header().Get("X-Zombie-Sample") + `","bytes":1048576,"elapsedMs":1250}`)
+	report := call(s, "POST", "/v1/device/network", string(samples["NetworkSampleReport"]), "contract-device", token, "")
+	if report.Code != 200 {
+		t.Fatal(report.Body)
+	}
+	samples["NetworkEstimate"] = report.Body.Bytes()
+
 	var screen domain.Screen
 	json.Unmarshal(samples["ScreenModel"], &screen)
 	w := call(s, "POST", "/v1/playback", `{"itemId":"`+screen.Hero.Item.ID+`"}`, "contract-device", token, "")

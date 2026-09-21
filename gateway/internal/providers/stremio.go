@@ -45,6 +45,9 @@ func (a *Adapters) Stremio(ctx context.Context, c Config) ([]Source, error) {
 	return out, nil
 }
 func (a *Adapters) Resolve(ctx context.Context, source Source) (Source, error) {
+	if source.MIME == "application/x-zombie-plex" {
+		return a.resolvePlex(ctx, source)
+	}
 	if source.MIME == "application/x-zombie-youtube" {
 		return a.resolveYouTube(ctx, source)
 	}

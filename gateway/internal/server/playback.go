@@ -34,10 +34,11 @@ type session struct {
 
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var req struct {
-		ItemID     string `json:"itemId"`
-		Mode       string `json:"mode"`
-		Quality    string `json:"quality"`
-		PositionMS *int64 `json:"positionMs"`
+		ItemID            string `json:"itemId"`
+		Mode              string `json:"mode"`
+		Quality           string `json:"quality"`
+		NetworkAdaptation *bool  `json:"networkAdaptation"`
+		PositionMS        *int64 `json:"positionMs"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -92,6 +93,11 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		return
 	}
 	mode := decision.mode
+	if (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation) {
+		if quality := s.networkQuality(d, decision); quality != "" {
+			mode, req.Quality = "TRANSCODE", quality
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, x := range s.sessions {

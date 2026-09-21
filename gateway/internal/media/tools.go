@@ -72,7 +72,7 @@ func (t *Tools) probe(ctx context.Context, input string, remote bool, manifestKi
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height:stream_tags=language,title:stream_disposition=default,forced:format=format_name,duration", "-of", "json"}
+	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height:stream_tags=language,title:stream_disposition=default,forced:format=format_name,duration,bit_rate", "-of", "json"}
 	if remote {
 		args = remoteArguments(args, manifestKind...)
 	}

@@ -32,7 +32,11 @@ func (a *Adapters) browsePlex(ctx context.Context, c Config, parent, query strin
 		return domain.BrowseResult{}, errors.New("configuration required")
 	}
 	base := strings.TrimRight(c.URL, "/")
+	rootSearch := parent == "" && query != ""
 	path := "/library/sections"
+	if rootSearch {
+		path = "/hubs/search"
+	}
 	if strings.HasPrefix(parent, "section:") {
 		path += "/" + url.PathEscape(strings.TrimPrefix(parent, "section:")) + "/all"
 	}
@@ -42,6 +46,11 @@ func (a *Adapters) browsePlex(ctx context.Context, c Config, parent, query strin
 	q := url.Values{"X-Plex-Container-Start": {strconv.Itoa(offset)}, "X-Plex-Container-Size": {"40"}}
 	if query != "" {
 		q.Set("title", query)
+	}
+	if rootSearch {
+		q.Del("title")
+		q.Set("query", query)
+		q.Set("limit", "40")
 	}
 	if parent == "" {
 		q.Del("X-Plex-Container-Start")
@@ -57,12 +66,31 @@ func (a *Adapters) browsePlex(ctx context.Context, c Config, parent, query strin
 		Directories []plexNode `xml:"Directory"`
 		Videos      []plexNode `xml:"Video"`
 		Tracks      []plexNode `xml:"Track"`
+		Hubs        []struct {
+			Directories []plexNode `xml:"Directory"`
+			Videos      []plexNode `xml:"Video"`
+			Tracks      []plexNode `xml:"Track"`
+		} `xml:"Hub"`
 	}
 	if err := xml.Unmarshal(body, &data); err != nil {
 		return domain.BrowseResult{}, err
 	}
 	result := domain.BrowseResult{Sources: []Source{}, NextOffset: -1}
-	for _, node := range append(append(data.Directories, data.Videos...), data.Tracks...) {
+	nodes := append(append(data.Directories, data.Videos...), data.Tracks...)
+	for _, hub := range data.Hubs {
+		nodes = append(nodes, hub.Directories...)
+		nodes = append(nodes, hub.Videos...)
+		nodes = append(nodes, hub.Tracks...)
+	}
+	seen := map[string]bool{}
+	for _, node := range nodes {
+		if rootSearch && (node.RatingKey == "" || seen[node.RatingKey]) {
+			continue
+		}
+		seen[node.RatingKey] = true
+		if len(result.Sources) >= 400 {
+			break
+		}
 		source := Source{
 			Headers:        headers,
 			ArtworkHeaders: headers,
@@ -87,7 +115,10 @@ func (a *Adapters) browsePlex(ctx context.Context, c Config, parent, query strin
 			if node.Type == "track" {
 				source.MIME = "audio/mpeg"
 			}
-		} else if parent == "" {
+		} else if rootSearch && (node.Type == "movie" || node.Type == "episode" || node.Type == "track") {
+			source.URL = base + "/library/metadata/" + url.PathEscape(node.RatingKey)
+			source.MIME, source.Item.Playable = "application/x-zombie-plex", true
+		} else if parent == "" && !rootSearch {
 			source.Item.ID = "plex-section-" + node.Key
 			source.BrowsePath = "section:" + node.Key
 		} else if node.RatingKey != "" {
@@ -101,6 +132,9 @@ func (a *Adapters) browsePlex(ctx context.Context, c Config, parent, query strin
 		}
 	}
 	if parent == "" {
+		if rootSearch {
+			return sourcePage(result.Sources, offset), nil
+		}
 		return sourcePage(matchingSources(result.Sources, query), offset), nil
 	}
 	if offset+len(result.Sources) < data.Total {

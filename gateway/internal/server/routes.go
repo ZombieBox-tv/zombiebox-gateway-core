@@ -8,6 +8,9 @@ import (
 )
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("GET /v1/search", s.auth(s.globalSearch))
+	s.mux.HandleFunc("GET /v1/network/sample", s.auth(s.networkDownload))
+	s.mux.HandleFunc("POST /v1/device/network", s.auth(s.networkReport))
 	for _, method := range []string{"GET", "PUT", "DELETE"} {
 		s.mux.HandleFunc(method+" /v1/media-receiver", s.auth(s.mediaReceiver))
 	}

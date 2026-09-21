@@ -78,6 +78,7 @@ type Metadata struct {
 	Streams []Stream `json:"streams"`
 	Format  struct {
 		Name     string `json:"format_name"`
+		BitRate  string `json:"bit_rate"`
 		Duration string `json:"duration"`
 	} `json:"format"`
 }

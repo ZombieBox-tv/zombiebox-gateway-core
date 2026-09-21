@@ -48,3 +48,8 @@ No product milestone or physical gate is closed.
 ## dev.18 increment
 
 Dev.18: bounded persistent artwork derivatives, restart reuse, private cache keys, device/layout profiles and conditional HTTP caching. No physical milestone closes.
+
+## dev.21 increment
+
+Measured LAN bitrate planning, bounded federated provider search with Plex preview resolution and Stremio search catalogs, and read-only state inspection/consistent snapshot staging.
+No physical, account or product milestone closes.

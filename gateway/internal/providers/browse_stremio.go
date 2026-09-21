@@ -122,6 +122,8 @@ func (a *Adapters) addonCatalogs(ctx context.Context, base, query string, offset
 		return domain.BrowseResult{}, err
 	}
 	sources := []Source{}
+	searched, succeeded := 0, 0
+	seen := map[string]bool{}
 	for _, catalog := range manifest.Catalogs {
 		node := addonNode{Resource: "catalog", Type: catalog.Type, ID: catalog.ID}
 		for _, extra := range catalog.Extra {
@@ -131,6 +133,24 @@ func (a *Adapters) addonCatalogs(ctx context.Context, base, query string, offset
 			if extra.Name == "search" {
 				node.Search = true
 			}
+		}
+		if query != "" {
+			if !node.Search || searched >= 4 {
+				continue
+			}
+			searched++
+			page, err := a.addonPage(ctx, base, node, query, 0)
+			if err != nil {
+				continue
+			}
+			succeeded++
+			for _, source := range page.Sources {
+				if !seen[source.Item.ID] {
+					seen[source.Item.ID] = true
+					sources = append(sources, source)
+				}
+			}
+			continue
 		}
 		title := catalog.Name
 		if title == "" {
@@ -146,7 +166,10 @@ func (a *Adapters) addonCatalogs(ctx context.Context, base, query string, offset
 			},
 		})
 	}
-	return sourcePage(matchingSources(sources, query), offset), nil
+	if query != "" && succeeded == 0 {
+		return domain.BrowseResult{}, errors.New("addon search unavailable")
+	}
+	return sourcePage(sources, offset), nil
 }
 
 func (a *Adapters) addonPage(ctx context.Context, base string, node addonNode, query string, offset int) (domain.BrowseResult, error) {
