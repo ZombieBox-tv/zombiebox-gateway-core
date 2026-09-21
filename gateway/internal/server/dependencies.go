@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 

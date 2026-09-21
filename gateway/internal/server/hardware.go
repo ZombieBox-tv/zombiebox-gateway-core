@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"regexp"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 

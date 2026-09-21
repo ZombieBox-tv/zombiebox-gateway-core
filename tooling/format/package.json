@@ -1,0 +1,8 @@
+{
+  "name": "zombiebox-formatting",
+  "private": true,
+  "devDependencies": {
+    "prettier": "3.6.2",
+    "@prettier/plugin-xml": "3.4.2"
+  }
+}

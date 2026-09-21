@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 

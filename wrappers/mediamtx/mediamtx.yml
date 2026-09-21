@@ -28,4 +28,4 @@ pathDefaults:
   overridePublisher: false
   maxReaders: 2
 paths:
-  '~^zombie/[a-f0-9]{32}$':
+  "~^zombie/[a-f0-9]{32}$":

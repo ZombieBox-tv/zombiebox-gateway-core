@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 

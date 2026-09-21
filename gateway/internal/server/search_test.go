@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
 	"zombiebox.local/gateway/internal/providers"
 )
 

@@ -1,0 +1,14 @@
+{
+  "printWidth": 100,
+  "tabWidth": 2,
+  "plugins": ["./node_modules/@prettier/plugin-xml/src/plugin.js"],
+  "overrides": [
+    {
+      "files": "*.xml",
+      "options": {
+        "tabWidth": 4,
+        "xmlWhitespaceSensitivity": "ignore"
+      }
+    }
+  ]
+}

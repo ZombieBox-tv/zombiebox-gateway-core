@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
 	"zombiebox.local/gateway/internal/store"
 )
 

@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
 	"zombiebox.local/gateway/internal/artwork"
 	providerconfig "zombiebox.local/gateway/internal/config"
 	"zombiebox.local/gateway/internal/httpclient"

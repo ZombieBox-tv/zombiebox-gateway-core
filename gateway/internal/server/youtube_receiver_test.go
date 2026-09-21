@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 

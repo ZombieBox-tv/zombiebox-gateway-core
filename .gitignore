@@ -22,3 +22,6 @@
 __pycache__/
 *.pyc
 **/node_modules/
+
+# User-supplied architecture reference, never product source.
+/resources/recora-app/

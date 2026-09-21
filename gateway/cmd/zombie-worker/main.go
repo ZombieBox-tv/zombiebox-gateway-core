@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
 	"zombiebox.local/gateway/internal/worker"
 )
 
