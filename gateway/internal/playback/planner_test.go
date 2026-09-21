@@ -49,3 +49,11 @@ func TestProfileEvidenceDoesNotRejectOtherProfiles(t *testing.T) {
 		t.Fatal("measured 1080 High ignored")
 	}
 }
+
+func TestDetectedContainerOverridesProviderMime(t *testing.T) {
+	metadata := domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264", Width: 640, Height: 360}}}
+	metadata.Format.Name = "matroska,webm"
+	if mode := LocalMode(metadata, "video/mp4", domain.Capabilities{}, ""); mode != "REMUX" {
+		t.Fatal("trusted generic provider MIME over probe", mode)
+	}
+}

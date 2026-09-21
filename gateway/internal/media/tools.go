@@ -48,6 +48,14 @@ func localInput(path string) (string, error) {
 	return resolved, nil
 }
 func (t *Tools) Probe(ctx context.Context, path string) (Metadata, error) {
+	input, err := localInput(path)
+	if err != nil {
+		return Metadata{}, err
+	}
+	return t.probe(ctx, input, false)
+}
+
+func (t *Tools) probe(ctx context.Context, input string, remote bool) (Metadata, error) {
 	var result Metadata
 	select {
 	case t.probes <- struct{}{}:
@@ -55,15 +63,15 @@ func (t *Tools) Probe(ctx context.Context, path string) (Metadata, error) {
 	default:
 		return result, ErrBusy
 	}
-	input, err := localInput(path)
-	if err != nil {
-		return result, err
-	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height:stream_tags=language,title:stream_disposition=default,forced:format=format_name,duration", "-of", "json", input}
+	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height:stream_tags=language,title:stream_disposition=default,forced:format=format_name,duration", "-of", "json"}
+	if remote {
+		args = remoteArguments(args)
+	}
+	args = append(args, input)
 	output := &boundedBuffer{limit: 1 << 20}
-	if err = t.runner.Run(ctx, t.ffprobe, args, output); err != nil {
+	if err := t.runner.Run(ctx, t.ffprobe, args, output); err != nil {
 		return result, toolError(ctx, "probe_failed")
 	}
 	if json.Unmarshal(output.Bytes(), &result) != nil {
@@ -79,6 +87,14 @@ func (t *Tools) Convert(ctx context.Context, path, mode string, output io.Writer
 }
 
 func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selection domain.MediaSelection, output io.Writer) error {
+	input, err := localInput(path)
+	if err != nil {
+		return err
+	}
+	return t.convert(ctx, input, "", false, mode, selection, output)
+}
+
+func (t *Tools) convert(ctx context.Context, input, audioInput string, remote bool, mode string, selection domain.MediaSelection, output io.Writer) error {
 	if selection.PositionMS < 0 || selection.PositionMS > 7*24*60*60*1000 || (selection.AudioID != nil && *selection.AudioID < 0) {
 		return errors.New("invalid media selection")
 	}
@@ -105,13 +121,12 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 	if mode != "REMUX" && mode != "TRANSCODE" {
 		return errors.New("unsupported media mode")
 	}
-	input, err := localInput(path)
-	if err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Hour)
 	defer cancel()
 	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-max_alloc", "67108864", "-threads", "2", "-protocol_whitelist", "file,pipe"}
+	if remote {
+		args = remoteArguments(args)
+	}
 	if mode == "REMUX" && selection.PositionMS > 0 {
 		return errors.New("accurate resume requires transcoding")
 	}
@@ -120,6 +135,15 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 	}
 	args = append(args, "-i", input)
 	audio := "0:a:0?"
+	if audioInput != "" {
+		second := remoteArguments([]string{})
+		if selection.PositionMS > 0 {
+			second = append(second, "-ss", strconv.FormatFloat(float64(selection.PositionMS)/1000, 'f', 3, 64))
+		}
+		args = append(args, second...)
+		args = append(args, "-i", audioInput)
+		audio = "1:a:0"
+	}
 	if selection.AudioID != nil {
 		audio = "0:" + strconv.Itoa(*selection.AudioID)
 	}
@@ -130,7 +154,7 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 		args = append(args, "-c:v", "libx264", "-threads", "2", "-filter_threads", "1", "-preset", "veryfast", "-profile:v", "baseline", "-level:v", "3.0", "-pix_fmt", "yuv420p", "-vf", "scale=640:360:force_original_aspect_ratio=decrease:force_divisible_by=2", "-r", "30", "-b:v", "1000k", "-maxrate", "1200k", "-bufsize", "2400k", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100")
 	}
 	args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
-	if err = t.runner.Run(ctx, t.ffmpeg, args, output); err != nil {
+	if err := t.runner.Run(ctx, t.ffmpeg, args, output); err != nil {
 		return toolError(ctx, "conversion_failed")
 	}
 	return nil
@@ -155,3 +179,15 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 }
 
 func (b *boundedBuffer) Bytes() []byte { return b.data.Bytes() }
+
+// Restrict remote demuxers as well as protocols. Playlists, concat and nested
+// network references cannot escape the two loopback input routes.
+func remoteArguments(args []string) []string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-protocol_whitelist" {
+			args[i+1] = "http,tcp,pipe"
+			return append(args, "-format_whitelist", "mov,matroska,webm,mpegts,mp3,aac,flac,ogg,wav", "-http_proxy", "")
+		}
+	}
+	return append(args, "-protocol_whitelist", "http,tcp,pipe", "-format_whitelist", "mov,matroska,webm,mpegts,mp3,aac,flac,ogg,wav", "-http_proxy", "")
+}

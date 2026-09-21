@@ -49,6 +49,9 @@ func (s *Server) screenSources(ctx context.Context, device, provider, query stri
 }
 
 func (s *Server) searchSource(ctx context.Context, device, id string) *providers.Source {
+	if source := s.browseSource(ctx, device, id); source != nil {
+		return source
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry := s.searchResults[device]

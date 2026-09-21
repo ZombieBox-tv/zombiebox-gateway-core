@@ -1,0 +1,46 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"io"
+	"testing"
+
+	"zombiebox.local/gateway/internal/domain"
+)
+
+type remoteMediaStub struct{ err error }
+
+func (stub remoteMediaStub) ProbeRemote(context.Context, domain.Source) (domain.Metadata, error) {
+	return domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264", Width: 640, Height: 360}, {Type: "audio", Codec: "aac"}}}, stub.err
+}
+func (remoteMediaStub) ConvertRemote(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error {
+	return nil
+}
+
+func TestAdaptivePlaybackNeverReturnsVideoOnlyOrIgnoresFailedFragmentProbe(t *testing.T) {
+	s := testServer(t, nil, t.TempDir())
+	s.deps.RemoteMedia = remoteMediaStub{}
+	source := domain.Source{URL: "https://video.test/clip", AudioURL: "https://audio.test/clip", MIME: "video/mp4"}
+	device := domain.Device{}
+	if mode, err := s.playbackMode(context.Background(), source, device, ""); err != nil || mode != "REMUX" {
+		t.Fatal(mode, err)
+	}
+	for _, requested := range []string{"DIRECT_PLAY", "EXTERNAL_PLAYER"} {
+		if _, err := s.playbackMode(context.Background(), source, device, requested); err == nil {
+			t.Fatal("accepted video-only mode", requested)
+		}
+	}
+	device.Capabilities.Probes = []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}
+	if _, err := s.playbackMode(context.Background(), source, device, ""); err == nil {
+		t.Fatal("ignored failed fragment probe")
+	}
+	s.deps.RemoteMedia = remoteMediaStub{err: errors.New("network unavailable")}
+	if _, err := s.playbackMode(context.Background(), source, domain.Device{}, ""); err == nil {
+		t.Fatal("missing mux silently fell back")
+	}
+	source.AudioURL = ""
+	if mode, err := s.playbackMode(context.Background(), source, domain.Device{}, ""); err != nil || mode != "DIRECT_PLAY" {
+		t.Fatal("network failure treated as decoder failure", mode, err)
+	}
+}

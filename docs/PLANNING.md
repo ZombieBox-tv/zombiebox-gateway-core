@@ -14,3 +14,8 @@ and evolve shared protocol contracts in their owning repository.
 Keep a separate validation track for hardware/account/latency/memory evidence.
 Use development checkpoint tags until complete exit gates are evidenced. Hosted
 issues/milestones can be attached to the shared GitHub Project once remotes exist.
+
+## dev.11 increment
+
+Hierarchical Plex/Jellyfin/Stremio browsing, progressive remote probing/conversion and paired YouTube adaptive mux; bounded injected adapters. Live/HLS adaptation and receiver completion remain open.
+No product milestone or physical/account gate is completed by this checkpoint.

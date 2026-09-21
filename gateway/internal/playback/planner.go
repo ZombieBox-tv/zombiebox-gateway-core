@@ -27,7 +27,9 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 			native = false
 		}
 	}
-	if native && mime != "video/x-matroska" && mime != "video/webm" && status("http-progressive") != "FAIL" {
+	// Probe evidence takes precedence over a provider's generic video/mp4 label.
+	containerNeedsRemux := strings.Contains(metadata.Format.Name, "matroska") || strings.Contains(metadata.Format.Name, "webm") || metadata.Format.Name == "mpegts"
+	if native && !containerNeedsRemux && mime != "video/x-matroska" && mime != "video/webm" && status("http-progressive") != "FAIL" {
 		return "DIRECT_PLAY"
 	}
 	// Both conversion modes currently stream fragmented MP4. Known failures require external fallback.

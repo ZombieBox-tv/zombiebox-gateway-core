@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"zombiebox.local/gateway/internal/catalog"
+
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
 )
 
@@ -28,6 +30,7 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
+	browse            *catalog.Browser
 	youtubeReceiver   *youtubereceiver.Service
 	probeKey          string
 	browser           *browserSession
@@ -73,6 +76,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 		catalogCache: map[string]catalogEntry{},
 	}
 	s.youtubeReceiver = youtubereceiver.New(deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
+	s.browse = catalog.NewBrowser(deps.Browse)
 	s.probeKey = randomID(32)
 	s.relayJobs = make(chan struct{}, 4)
 	s.integrationChecks = make(chan struct{}, 2)

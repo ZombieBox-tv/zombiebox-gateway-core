@@ -8,6 +8,7 @@ import (
 
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
 
+	"zombiebox.local/gateway/internal/catalog"
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -52,6 +53,10 @@ type Media interface {
 	ConvertSelected(context.Context, string, string, domain.MediaSelection, io.Writer) error
 	Subtitles(context.Context, string, int) ([]domain.SubtitleCue, error)
 }
+type RemoteMedia interface {
+	ProbeRemote(context.Context, domain.Source) (domain.Metadata, error)
+	ConvertRemote(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error
+}
 type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
@@ -59,6 +64,8 @@ type HTTPClient interface {
 // Dependencies are immutable after construction. Media and Artwork are optional.
 // Keep control requests and unbounded-duration streaming on separate transports.
 type Dependencies struct {
+	RemoteMedia     RemoteMedia
+	Browse          catalog.Backend
 	YouTubeReceiver YouTubeReceiver
 	Artwork         Artwork
 	Catalog         Catalog

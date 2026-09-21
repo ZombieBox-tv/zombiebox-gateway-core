@@ -36,6 +36,13 @@ func TestWireContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := result.DeviceToken
+	browseFixture(t, s)
+	browse := call(s, "GET", "/v1/browse?provider=plex", "", "contract-device", token, "")
+	if browse.Code != 200 {
+		t.Fatal(browse.Body)
+	}
+	samples["BrowsePage"] = browse.Body.Bytes()
+
 	for name, path := range map[string]string{"IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
 		w := call(s, "GET", path, "", "contract-device", token, "")
 		if w.Code != 200 {

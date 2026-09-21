@@ -34,5 +34,9 @@ legacy runtime or end-to-end account/media compatibility.
 
 Dev.10 adds [local media tracks](docs/media-tracks.md): authenticated inventory,
 legacy audio switching with timeline offsets and bounded text subtitles through
-the injected FFmpeg adapter. Remote adaptation and automatic language selection
+the injected FFmpeg adapter. Live/manifest adaptation and automatic language selection
 remain development work.
+
+Dev.11 adds [hierarchical browse and progressive remote adaptation](docs/browsing-remote-media.md),
+including a paired adaptive YouTube resolver. Live/HLS conversion and complete
+provider/account workflows remain open.

@@ -19,6 +19,9 @@ type Config struct {
 }
 
 type Source struct {
+	AudioURL       string
+	AudioHeaders   http.Header
+	BrowsePath     string
 	ArtworkURL     string
 	ArtworkHeaders http.Header
 	EPGID          string

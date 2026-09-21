@@ -33,9 +33,9 @@ func New(client, privateClient HTTPClient) *Adapters {
 	a := &Adapters{http: client, privateHTTP: privateClient}
 	a.catalog = map[string]Definition{
 		"youtube":  {"youtube", []string{"catalog", "search", "playback"}, a.YouTube},
-		"plex":     {"plex", []string{"catalog", "playback"}, a.Plex},
-		"jellyfin": {"jellyfin", []string{"catalog", "playback"}, a.Jellyfin},
-		"stremio":  {"stremio", []string{"catalog", "playback"}, a.Stremio},
+		"plex":     {"plex", []string{"catalog", "browse", "playback"}, a.Plex},
+		"jellyfin": {"jellyfin", []string{"catalog", "browse", "playback"}, a.Jellyfin},
+		"stremio":  {"stremio", []string{"catalog", "browse", "playback"}, a.Stremio},
 		"iptv":     {"iptv", []string{"catalog", "playback", "epg"}, a.IPTV},
 		"spotify":  {"spotify", []string{"catalog", "playback", "now-playing", "remote-control"}, a.Spotify},
 		"airplay":  {"airplay", []string{"catalog", "playback", "screen-receiver"}, a.AirPlay},

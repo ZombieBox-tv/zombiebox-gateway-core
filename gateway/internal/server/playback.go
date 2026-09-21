@@ -66,7 +66,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 502, "stream_unavailable")
 		return
 	}
-	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE") && (resolved.Path == "" || s.deps.Media == nil) {
+	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE") && ((resolved.Path != "" && s.deps.Media == nil) || (resolved.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(resolved)))) {
 		fail(w, 409, "conversion_unavailable")
 		return
 	}
@@ -221,7 +221,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", src.MIME)
 	w.Header().Set("Cache-Control", "private, no-store")
-	if src.Path != "" && (sess.mode == "REMUX" || sess.mode == "TRANSCODE") {
+	if sess.mode == "REMUX" || sess.mode == "TRANSCODE" {
 		if r.Header.Get("Range") != "" && r.Header.Get("Range") != "bytes=0-" {
 			fail(w, 416, "conversion_not_seekable")
 			return
@@ -231,7 +231,13 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writer := &conversionWriter{contextWriter: contextWriter{ResponseWriter: w, ctx: ctx}}
-		if err := s.deps.Media.ConvertSelected(ctx, src.Path, sess.mode, sess.selection, writer); err != nil {
+		var err error
+		if src.Path != "" {
+			err = s.deps.Media.ConvertSelected(ctx, src.Path, sess.mode, sess.selection, writer)
+		} else {
+			err = s.deps.RemoteMedia.ConvertRemote(ctx, src, sess.mode, sess.selection, writer)
+		}
+		if err != nil {
 			if !writer.started {
 				if errors.Is(err, media.ErrBusy) {
 					fail(w, 429, "media_busy")

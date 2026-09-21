@@ -69,12 +69,37 @@ func main() {
 		pairing = fmt.Sprintf("%06d", n.Int64()+100000)
 	}
 	var tools server.Media
+	var remoteTools server.RemoteMedia
 	if *enableMedia {
-		tools = mediatools.New("ffmpeg", "ffprobe")
+		localTools := mediatools.New("ffmpeg", "ffprobe")
+		tools = localTools
+		remoteTools = mediatools.NewRemote(localTools, httpclient.Streaming())
 	}
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
-	deps := server.Dependencies{YouTubeReceiver: adapters, Artwork: artwork.New(httpclient.Metadata()), Catalog: adapters, Search: adapters, Resolver: adapters, Player: adapters, Browser: adapters, Media: tools, ControlHTTP: httpclient.Private(), StreamHTTP: httpclient.Streaming()}
-	app := server.New(db, server.Options{ProbeDir: *probes, ThreadfinURL: *threadfin, PairingCode: pairing, MediaDir: *media, RelayURL: *relay, RelayControlURL: *relayControl, RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"), RTSPPort: *rtspPort}, deps)
+	deps := server.Dependencies{
+		Browse:          adapters,
+		YouTubeReceiver: adapters,
+		Artwork:         artwork.New(httpclient.Metadata()),
+		Catalog:         adapters,
+		Search:          adapters,
+		Resolver:        adapters,
+		Player:          adapters,
+		Browser:         adapters,
+		Media:           tools,
+		RemoteMedia:     remoteTools,
+		ControlHTTP:     httpclient.Private(),
+		StreamHTTP:      httpclient.Streaming(),
+	}
+	app := server.New(db, server.Options{
+		ProbeDir:        *probes,
+		ThreadfinURL:    *threadfin,
+		PairingCode:     pairing,
+		MediaDir:        *media,
+		RelayURL:        *relay,
+		RelayControlURL: *relayControl,
+		RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"),
+		RTSPPort:        *rtspPort,
+	}, deps)
 	if *config != "" {
 		configs, e := providerconfig.Load(*config, os.LookupEnv)
 		if e != nil {

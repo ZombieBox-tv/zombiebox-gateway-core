@@ -1,5 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { Innertube, Platform, Log } from "youtubei.js";
+import { resolveFormats } from "./formats.mjs";
 import { evaluate } from "./interpreter.mjs";
 
 Platform.shim.eval = evaluate;
@@ -33,13 +34,8 @@ async function run() {
     }
     return { items };
   }
-  // A combined progressive format avoids pretending adaptive video-only is playable.
   const info = await yt.getBasicInfo(id);
-  const format = info.chooseFormat({ type: "video+audio", format: "mp4", quality: "360p" });
-  if (!format.has_audio || !format.has_video) throw new Error("combined_format_unavailable");
-  const url = await format.decipher(yt.session.player);
-  if (!url) throw new Error("stream_unavailable");
-  return { url, mimeType: "video/mp4" };
+  return resolveFormats(info, yt.session.player);
 }
 
 try {

@@ -54,16 +54,24 @@ func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, e
 		return source, err
 	}
 	var result struct {
-		URL  string `json:"url"`
-		MIME string `json:"mimeType"`
+		URL      string `json:"url"`
+		AudioURL string `json:"audioUrl"`
+		MIME     string `json:"mimeType"`
 	}
 	if json.Unmarshal(body, &result) != nil {
 		return source, errors.New("invalid wrapper stream")
 	}
-	target, err := url.Parse(result.URL)
-	if err != nil || target.Scheme != "https" || target.User != nil || target.Port() != "" || !strings.HasSuffix(strings.ToLower(target.Hostname()), ".googlevideo.com") || result.MIME != "video/mp4" {
+
+	if !youtubeStreamURL(result.URL) || (result.AudioURL != "" && !youtubeStreamURL(result.AudioURL)) || result.MIME != "video/mp4" {
 		return source, errors.New("invalid YouTube stream origin")
 	}
 	source.URL, source.MIME, source.Headers = result.URL, result.MIME, nil
+	source.AudioURL, source.AudioHeaders = result.AudioURL, nil
+
 	return source, nil
+}
+
+func youtubeStreamURL(raw string) bool {
+	target, err := url.Parse(raw)
+	return err == nil && len(raw) <= 16384 && target.Scheme == "https" && target.User == nil && target.Port() == "" && strings.HasSuffix(strings.ToLower(target.Hostname()), ".googlevideo.com")
 }
