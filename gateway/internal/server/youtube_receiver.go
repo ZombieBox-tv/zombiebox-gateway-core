@@ -22,9 +22,15 @@ func receiverError(w http.ResponseWriter, err error) {
 	fail(w, status, err.Error())
 }
 func (s *Server) startYouTubeReceiver(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	var request struct {
+		ReplaceExisting bool `json:"replaceExisting"`
+	}
+	if r.ContentLength != 0 && !decode(w, r, &request) {
+		return
+	}
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
-	if s.receiverBusy(d.ID, "youtube") {
+	if s.receiverBusy(d.ID, "youtube") && !request.ReplaceExisting {
 		fail(w, 409, "receiver_busy")
 		return
 	}
@@ -33,6 +39,8 @@ func (s *Server) startYouTubeReceiver(w http.ResponseWriter, r *http.Request, d 
 		receiverError(w, err)
 		return
 	}
+	s.retireReceivers(r.Context(), d.ID, "youtube")
+	s.events.publish(d.ID, "receiver.changed", map[string]string{"transport": "youtube"})
 	respond(w, 201, state)
 }
 func (s *Server) youTubeReceiverOperation(w http.ResponseWriter, r *http.Request, d domain.Device) {

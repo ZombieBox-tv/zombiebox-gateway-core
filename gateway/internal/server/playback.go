@@ -21,6 +21,7 @@ type session struct {
 	subtitleID    *int
 	selection     domain.MediaSelection
 	mode          string
+	receiverID    string
 	castID        string
 	device        string
 	ticket        string
@@ -35,6 +36,7 @@ type session struct {
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var req struct {
 		ItemID            string `json:"itemId"`
+		ReceiverID        string `json:"receiverId"`
 		Mode              string `json:"mode"`
 		Quality           string `json:"quality"`
 		NetworkAdaptation *bool  `json:"networkAdaptation"`
@@ -55,9 +57,19 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 400, "invalid_playback_mode")
 		return
 	}
-	found := s.searchSource(r.Context(), d.ID, req.ItemID)
-	if found == nil {
-		found = s.youTubeReceiverSource(d.ID, req.ItemID)
+	receiverID := ""
+	var found *domain.Source
+	if req.ReceiverID != "" {
+		found, receiverID = s.youtubeReceiver.SourceWithLease(d.ID, req.ItemID)
+		if found == nil || receiverID != req.ReceiverID {
+			fail(w, 409, "receiver_changed")
+			return
+		}
+	} else {
+		found = s.searchSource(r.Context(), d.ID, req.ItemID)
+		if found == nil {
+			found, receiverID = s.youtubeReceiver.SourceWithLease(d.ID, req.ItemID)
+		}
 	}
 	var candidates []providers.Source
 	if found == nil {
@@ -98,6 +110,13 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			mode, req.Quality = "TRANSCODE", quality
 		}
 	}
+
+	s.receiverClaims.Lock()
+	defer s.receiverClaims.Unlock()
+	if receiverID != "" && s.youtubeReceiver.SourceLease(d.ID, req.ItemID) != receiverID {
+		fail(w, 409, "receiver_changed")
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, x := range s.sessions {
@@ -114,7 +133,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	ticket := randomID(24)
 	expires := time.Now().Add(6 * time.Hour)
 	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	s.sessions[id] = &session{receiverID: receiverID, mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS

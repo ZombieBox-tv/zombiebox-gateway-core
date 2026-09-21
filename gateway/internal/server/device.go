@@ -28,6 +28,8 @@ func (s *Server) preferences(w http.ResponseWriter, r *http.Request, d domain.De
 			}
 		}
 	}
+	s.receiverClaims.Lock()
+	defer s.receiverClaims.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db.Get(r.Context(), "devices", d.ID, &d) != nil {

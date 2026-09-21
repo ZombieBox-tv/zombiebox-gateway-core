@@ -18,6 +18,7 @@ import (
 
 type castSession struct {
 	preparing                                                  bool
+	replaceExisting                                            bool
 	id, sender, receiver, publishToken, readToken, publisherID string
 	expires                                                    time.Time
 	plan                                                       *domain.Plan
@@ -47,14 +48,16 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		return
 	}
 	var request struct {
-		ReceiverID string `json:"receiverId"`
+		ReceiverID      string `json:"receiverId"`
+		ReplaceExisting bool   `json:"replaceExisting"`
 	}
 	if !decode(w, r, &request) {
 		return
 	}
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
-	if s.receiverBusy(request.ReceiverID, "cast") {
+	busy := s.receiverBusy(request.ReceiverID, "cast")
+	if busy && !request.ReplaceExisting {
 		fail(w, 409, "receiver_busy")
 		return
 	}
@@ -63,6 +66,10 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 	var receiver domain.Device
 	if request.ReceiverID == sender.ID || s.db.Get(r.Context(), "devices", request.ReceiverID, &receiver) != nil || !receiver.Preferences.AllowCasting || time.Since(s.seen[receiver.ID]) > 45*time.Second {
 		fail(w, 409, "receiver_unavailable")
+		return
+	}
+	if busy && !receiver.Preferences.AllowReceiverHandoff {
+		fail(w, 409, "receiver_busy")
 		return
 	}
 	video, err := playback.CastProfile(receiver)
@@ -74,7 +81,7 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 429, "cast_busy")
 		return
 	}
-	c := &castSession{id: randomID(16), sender: sender.ID, receiver: receiver.ID, publishToken: randomID(24), readToken: randomID(24), expires: time.Now().Add(90 * time.Second)}
+	c := &castSession{replaceExisting: request.ReplaceExisting, id: randomID(16), sender: sender.ID, receiver: receiver.ID, publishToken: randomID(24), readToken: randomID(24), expires: time.Now().Add(90 * time.Second)}
 	s.casts[c.id] = c
 	respond(w, 201, map[string]any{"castId": c.id, "publishPath": "zombie/" + c.id, "publishUser": "zombie", "publishToken": c.publishToken, "rtspPort": s.opt.RTSPPort, "leaseSeconds": 90, "video": video})
 }
@@ -90,6 +97,8 @@ func (s *Server) castLease(w http.ResponseWriter, r *http.Request, d domain.Devi
 	respond(w, 200, map[string]any{"state": "ACTIVE", "leaseSeconds": 90})
 }
 func (s *Server) castReady(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	s.receiverClaims.Lock()
+	defer s.receiverClaims.Unlock()
 	s.mu.Lock()
 	c := s.casts[r.PathValue("cast")]
 	if c == nil || c.sender != d.ID || time.Now().After(c.expires) {
@@ -153,29 +162,40 @@ func (s *Server) castReady(w http.ResponseWriter, r *http.Request, d domain.Devi
 			return
 		}
 	}
+	busy := s.receiverBusy(c.receiver, "cast")
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.casts[c.id] != c || time.Now().After(c.expires) {
-		fail(w, 404, "cast_not_found")
-		return
-	}
-	var receiver domain.Device
-	if s.db.Get(ctx, "devices", c.receiver, &receiver) != nil || !receiver.Preferences.AllowCasting {
-		s.endCastLocked(c)
+	var candidate domain.Device
+	valid := s.casts[c.id] == c && time.Now().Before(c.expires) && s.db.Get(ctx, "devices", c.receiver, &candidate) == nil && candidate.Preferences.AllowCasting
+	permitted := !busy || (c.replaceExisting && candidate.Preferences.AllowReceiverHandoff)
+	if !valid || !permitted || ctx.Err() != nil {
+		s.mu.Unlock()
 		fail(w, 409, "receiver_unavailable")
 		return
 	}
-	if c.plan == nil {
-		if len(s.sessions) >= 64 {
-			fail(w, 429, "session_limit")
-			return
-		}
-		id, ticket := randomID(16), randomID(24)
-		sessionCtx, sessionCancel := context.WithCancel(context.Background())
-		s.sessions[id] = &session{device: c.receiver, ticket: ticket, source: source, expires: time.Now().Add(24 * time.Hour), ctx: sessionCtx, cancel: sessionCancel, resources: map[string]string{}, castID: c.id}
-		c.plan = &domain.Plan{Version: 1, SessionID: id, Mode: "LIVE_LOW_LATENCY", URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: source.MIME, Live: true, Item: source.Item}
-		s.events.publish(c.receiver, "cast.started", c.plan)
+	if len(s.sessions) >= 64 {
+		s.mu.Unlock()
+		fail(w, 429, "session_limit")
+		return
 	}
+	id, ticket := randomID(16), randomID(24)
+	sessionCtx, sessionCancel := context.WithCancel(context.Background())
+	s.sessions[id] = &session{device: c.receiver, ticket: ticket, source: source, expires: time.Now().Add(24 * time.Hour), ctx: sessionCtx, cancel: sessionCancel, resources: map[string]string{}, castID: c.id}
+	plan := &domain.Plan{Version: 1, SessionID: id, Mode: "LIVE_LOW_LATENCY", URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: source.MIME, Live: true, Item: source.Item}
+	// Keep the staged plan invisible until the previous transport is retired.
+	c.expires = time.Now().Add(90 * time.Second)
+	s.mu.Unlock()
+	s.retireReceivers(ctx, c.receiver, "cast")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.casts[c.id] != c {
+		sessionCancel()
+		delete(s.sessions, id)
+		fail(w, 404, "cast_not_found")
+		return
+	}
+	c.plan = plan
+	s.events.publish(c.receiver, "receiver.changed", map[string]string{"transport": "cast"})
+	s.events.publish(c.receiver, "cast.started", plan)
 	respond(w, 200, map[string]string{"state": "ACTIVE"})
 }
 func (s *Server) activeCast(w http.ResponseWriter, r *http.Request, d domain.Device) {
@@ -190,6 +210,8 @@ func (s *Server) activeCast(w http.ResponseWriter, r *http.Request, d domain.Dev
 	respond(w, 200, map[string]any{"plan": nil})
 }
 func (s *Server) stopCast(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	s.receiverClaims.Lock()
+	defer s.receiverClaims.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.casts[r.PathValue("cast")]

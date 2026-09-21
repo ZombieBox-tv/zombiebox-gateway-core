@@ -53,3 +53,10 @@ Dev.18: bounded persistent artwork derivatives, restart reuse, private cache key
 
 Measured LAN bitrate planning, bounded federated provider search with Plex preview resolution and Stremio search catalogs, and read-only state inspection/consistent snapshot staging.
 No physical, account or product milestone closes.
+
+## dev.22 increment
+
+Device-scoped receiver replacement, readiness-gated Cast handoff with target consent, revoked YouTube command/source fencing and receiver-bound playback resolution.
+No product or physical acceptance gate closes.
+
+Verification: Go vet/race and 49 contract fixtures pass. Regression coverage includes failed replacement, readiness/consent rechecks, retired streams, and late YouTube poll/resolution rejection.

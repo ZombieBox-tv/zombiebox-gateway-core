@@ -123,6 +123,9 @@ func (s *Service) Poll(ctx context.Context, device, id string) (domain.YouTubeRe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.owner != owner {
+		return empty, ErrNotFound
+	}
 	owner.expires = time.Now().Add(45 * time.Second)
 	if command := state.Command; command != nil && command.Action == "play" {
 		config := s.config(ctx, "youtube")
@@ -168,7 +171,9 @@ func (s *Service) Stop(ctx context.Context, device, id string) error {
 	defer s.release(owner)
 	err = s.backend.CloseReceiver(ctx, owner.config, id)
 	s.mu.Lock()
-	s.owner = nil
+	if s.owner == owner {
+		s.owner = nil
+	}
 	s.mu.Unlock()
 	if err != nil {
 		return ErrUnavailable
@@ -176,14 +181,18 @@ func (s *Service) Stop(ctx context.Context, device, id string) error {
 	return nil
 }
 func (s *Service) Source(device, id string) *domain.Source {
+	source, _ := s.SourceWithLease(device, id)
+	return source
+}
+func (s *Service) SourceWithLease(device, id string) (*domain.Source, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	owner := s.owner
 	if owner == nil || owner.device != device || time.Now().After(owner.expires) || owner.source == nil || owner.source.Item.ID != id {
-		return nil
+		return nil, ""
 	}
 	copy := *owner.source
-	return &copy
+	return &copy, owner.id
 }
 func (s *Service) Close(ctx context.Context) {
 	s.mu.Lock()
@@ -194,4 +203,32 @@ func (s *Service) Close(ctx context.Context) {
 	if owner != nil && s.backend != nil {
 		_ = s.backend.CloseReceiver(ctx, owner.config, owner.id)
 	}
+}
+
+// Revoke detaches first, so an in-flight poll cannot resurrect an old lease.
+// The caller serializes new claims; private worker cleanup is bounded separately.
+func (s *Service) Revoke(ctx context.Context, device string) {
+	s.mu.Lock()
+	owner := s.owner
+	if owner == nil || owner.device != device {
+		s.mu.Unlock()
+		return
+	}
+	s.owner = nil
+	s.mu.Unlock()
+	if s.backend != nil {
+		cleanup, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		_ = s.backend.CloseReceiver(cleanup, owner.config, owner.id)
+	}
+}
+
+func (s *Service) SourceLease(device, item string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owner := s.owner
+	if owner == nil || owner.device != device || time.Now().After(owner.expires) || owner.source == nil || owner.source.Item.ID != item {
+		return ""
+	}
+	return owner.id
 }

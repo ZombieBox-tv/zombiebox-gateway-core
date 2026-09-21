@@ -65,3 +65,8 @@ Dev.19: Automatic language/track policy, remote text tracks, local sidecars, 48-
 Dev.20: Automatic Spotify/AirPlay handoff with confirmed-activity selection and replacement preservation; fixed low-bandwidth conversion profile.
 
 Dev.21: Measured LAN bitrate planning, bounded federated provider search with Plex preview resolution and Stremio search catalogs, and read-only state inspection/consistent snapshot staging.
+
+## dev.22 increment
+
+Device-scoped receiver replacement, readiness-gated Cast handoff with target consent, revoked YouTube command/source fencing and receiver-bound playback resolution.
+No product or physical acceptance gate closes.

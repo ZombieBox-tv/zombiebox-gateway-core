@@ -1,9 +1,12 @@
 package server
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Claim transitions are serialized independently of network/session state locks.
-// First explicitly armed receiver wins; users release it before choosing another.
+// Older callers retain first-armed exclusion. Replacement is explicit and scoped.
 func (s *Server) receiverBusy(device, requested string) bool {
 	if requested != "media" && s.mediaReceiverInbox.Active(device) {
 		return true
@@ -21,4 +24,32 @@ func (s *Server) receiverBusy(device, requested string) bool {
 		}
 	}
 	return false
+}
+
+// retireReceivers runs only after the replacement has been prepared successfully.
+// Never hold the session mutex across feature or private worker calls.
+func (s *Server) retireReceivers(ctx context.Context, device, keep string) {
+	if keep != "media" {
+		s.mediaReceiverInbox.Release(device)
+	}
+	if keep != "youtube" {
+		s.youtubeReceiver.Revoke(ctx, device)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if keep != "cast" {
+		for _, cast := range s.casts {
+			if cast.receiver == device {
+				s.endCastLocked(cast)
+			}
+		}
+	}
+	if keep != "youtube" {
+		for id, session := range s.sessions {
+			if session.device == device && session.receiverID != "" {
+				session.cancel()
+				delete(s.sessions, id)
+			}
+		}
+	}
 }

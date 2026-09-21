@@ -73,7 +73,8 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 	}
 	if r.Method == "PUT" {
 		var request struct {
-			Provider string `json:"provider"`
+			Provider        string `json:"provider"`
+			ReplaceExisting bool   `json:"replaceExisting"`
 		}
 		if !decode(w, r, &request) {
 			return
@@ -84,7 +85,7 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 		}
 		s.receiverClaims.Lock()
 		defer s.receiverClaims.Unlock()
-		if s.receiverBusy(d.ID, "media") {
+		if s.receiverBusy(d.ID, "media") && !request.ReplaceExisting {
 			fail(w, 409, "receiver_busy")
 			return
 		}
@@ -92,6 +93,8 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 			fail(w, 409, "receiver_busy")
 			return
 		}
+		s.retireReceivers(r.Context(), d.ID, "media")
+		s.events.publish(d.ID, "receiver.changed", map[string]string{"transport": "media"})
 		respond(w, 200, map[string]any{"enabled": true, "provider": request.Provider})
 		return
 	}
