@@ -28,7 +28,7 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 		}
 	}
 	// Probe evidence takes precedence over a provider's generic video/mp4 label.
-	containerNeedsRemux := strings.Contains(metadata.Format.Name, "matroska") || strings.Contains(metadata.Format.Name, "webm") || metadata.Format.Name == "mpegts"
+	containerNeedsRemux := strings.Contains(metadata.Format.Name, "matroska") || strings.Contains(metadata.Format.Name, "webm") || metadata.Format.Name == "mpegts" || metadata.Format.Name == "hls" || metadata.Format.Name == "dash" || strings.Contains(mime, "mpegurl") || strings.Contains(mime, "dash")
 	if native && !containerNeedsRemux && mime != "video/x-matroska" && mime != "video/webm" && status("http-progressive") != "FAIL" {
 		return "DIRECT_PLAY"
 	}

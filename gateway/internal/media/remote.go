@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/media/manifest"
 )
 
 type HTTPClient interface {
@@ -21,7 +22,7 @@ type HTTPClient interface {
 }
 
 // RemoteTools keeps provider URLs/headers out of process arguments. FFmpeg sees
-// only an ephemeral loopback origin with two finite, opaque input routes.
+// only an ephemeral loopback origin with opaque progressive routes or a bounded manifest graph.
 type RemoteTools struct {
 	tools *Tools
 	http  HTTPClient
@@ -39,7 +40,7 @@ func (t *RemoteTools) ProbeRemote(ctx context.Context, source domain.Source) (do
 		return domain.Metadata{}, err
 	}
 	defer bridge.close()
-	metadata, err := t.tools.probe(ctx, bridge.video, true)
+	metadata, err := t.tools.probe(ctx, bridge.video, true, bridge.kind)
 	if err != nil {
 		return metadata, err
 	}
@@ -67,10 +68,10 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 	}
 	defer bridge.close()
 	// TS AAC carries ADTS headers; copying to fragmented MP4 needs ASC.
-	// Probe only this container, and never apply an AAC filter to MP3/other audio.
+	// Manifests may contain TS. Never apply an AAC filter to MP3/other audio.
 	adtsAAC := false
-	if mode == "REMUX" && strings.EqualFold(strings.TrimSpace(strings.Split(source.MIME, ";")[0]), "video/mp2t") {
-		metadata, err := t.tools.probe(ctx, bridge.video, true)
+	if mode == "REMUX" && (bridge.kind != "" || strings.EqualFold(strings.TrimSpace(strings.Split(source.MIME, ";")[0]), "video/mp2t")) {
+		metadata, err := t.tools.probe(ctx, bridge.video, true, bridge.kind)
 		if err != nil {
 			return err
 		}
@@ -81,17 +82,25 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 			}
 		}
 	}
-	return t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, mode, selection, output)
+	return t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, mode, selection, output, bridge.kind)
 }
 
 type inputBridge struct {
 	video, audio string
+	kind         string
 	close        func()
 }
 
 func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBridge, error) {
 	if !RemoteCandidate(source) {
 		return inputBridge{}, errors.New("remote input unsupported")
+	}
+	if kind := ManifestKind(source); kind != "" {
+		proxy, err := manifest.Open(ctx, t.http, source.URL, kind, source.Headers)
+		if err != nil {
+			return inputBridge{}, err
+		}
+		return inputBridge{video: proxy.URL, kind: kind, close: proxy.Close}, nil
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -168,14 +177,32 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 	return bridge, nil
 }
 
-// Manifest protocols need a credential-safe resource graph, not arbitrary nested
-// FFmpeg requests. Keep them on the existing HLS relay until that graph is ready.
+// Manifest input uses a rewritten bounded resource graph; progressive input keeps two finite routes.
+// ManifestKind identifies declared manifests without enabling recursive demuxers for opaque input.
+func ManifestKind(source domain.Source) string {
+	mime := strings.ToLower(source.MIME)
+	parsed, _ := url.Parse(source.URL)
+	path := ""
+	if parsed != nil {
+		path = strings.ToLower(parsed.Path)
+	}
+	if strings.Contains(mime, "mpegurl") || strings.HasSuffix(path, ".m3u8") {
+		return "hls"
+	}
+	if strings.Contains(mime, "dash") || strings.HasSuffix(path, ".mpd") {
+		return "dash"
+	}
+	return ""
+}
 func RemoteCandidate(source domain.Source) bool {
-	if source.Path != "" || strings.Contains(strings.ToLower(source.MIME), "mpegurl") || strings.Contains(strings.ToLower(source.MIME), "dash") {
+	if source.Path != "" {
 		return false
 	}
-	// Live adaptation is limited to a single continuous MPEG-TS input.
-	if source.Live && (strings.ToLower(strings.TrimSpace(strings.Split(source.MIME, ";")[0])) != "video/mp2t" || source.AudioURL != "") {
+	kind := ManifestKind(source)
+	if kind != "" && source.AudioURL != "" {
+		return false
+	}
+	if source.Live && kind == "" && (strings.ToLower(strings.TrimSpace(strings.Split(source.MIME, ";")[0])) != "video/mp2t" || source.AudioURL != "") {
 		return false
 	}
 	for _, raw := range []string{source.URL, source.AudioURL} {
@@ -184,10 +211,6 @@ func RemoteCandidate(source domain.Source) bool {
 		}
 		parsed, err := url.Parse(raw)
 		if err != nil || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			return false
-		}
-		path := strings.ToLower(parsed.Path)
-		if strings.HasSuffix(path, ".m3u8") || strings.HasSuffix(path, ".mpd") {
 			return false
 		}
 	}

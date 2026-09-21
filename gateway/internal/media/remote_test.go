@@ -185,7 +185,7 @@ func TestRemoteProcessArgumentsContainNoProviderSecrets(t *testing.T) {
 	}
 }
 
-func TestLiveCandidateRejectsManifestsAndSeeking(t *testing.T) {
+func TestLiveCandidateAllowsDeclaredManifestsButRejectsSeeking(t *testing.T) {
 	source := domain.Source{URL: "https://channel.test/live", MIME: "video/mp2t", Live: true}
 	if !RemoteCandidate(source) {
 		t.Fatal("continuous TS rejected")
@@ -194,7 +194,7 @@ func TestLiveCandidateRejectsManifestsAndSeeking(t *testing.T) {
 	if err := remote.ConvertRemote(t.Context(), source, "REMUX", domain.MediaSelection{PositionMS: 1}, io.Discard); err == nil {
 		t.Fatal("accepted live seek")
 	}
-	for _, mime := range []string{"application/vnd.apple.mpegurl", "application/dash+xml", "video/mp4"} {
+	for _, mime := range []string{"video/mp4"} {
 		source.MIME = mime
 		if RemoteCandidate(source) {
 			t.Fatal("accepted unbounded live format", mime)
@@ -202,8 +202,8 @@ func TestLiveCandidateRejectsManifestsAndSeeking(t *testing.T) {
 	}
 	source.MIME = "video/mp2t"
 	source.URL += "/playlist.m3u8"
-	if RemoteCandidate(source) {
-		t.Fatal("accepted disguised playlist")
+	if !RemoteCandidate(source) {
+		t.Fatal("manifest graph path unavailable")
 	}
 }
 

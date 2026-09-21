@@ -22,7 +22,7 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 		return requested, nil
 	}
 	// Keep live direct relay in Auto; an explicit compatible retry may convert TS.
-	if source.Live && (requested == "" || requested == "AUTO") {
+	if source.Live && media.ManifestKind(source) == "" && (requested == "" || requested == "AUTO") {
 		return "DIRECT_PLAY", nil
 	}
 	if source.Path == "" {

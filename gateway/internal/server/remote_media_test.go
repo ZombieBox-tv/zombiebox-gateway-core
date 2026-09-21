@@ -59,3 +59,20 @@ func TestLiveTransportConvertsOnlyOnExplicitRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestManifestAutoConvertsBothLiveAndVod(t *testing.T) {
+	s := testServer(t, nil, t.TempDir())
+	s.deps.RemoteMedia = remoteMediaStub{}
+	for _, mime := range []string{"application/vnd.apple.mpegurl", "application/dash+xml"} {
+		for _, live := range []bool{false, true} {
+			source := domain.Source{URL: "https://source.test/manifest", MIME: mime, Live: live}
+			if mode, err := s.playbackMode(t.Context(), source, domain.Device{}, "AUTO"); err != nil || mode != "REMUX" {
+				t.Fatal(mime, live, mode, err)
+			}
+			device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}}}
+			if mode, err := s.playbackMode(t.Context(), source, device, "AUTO"); err != nil || mode != "EXTERNAL_PLAYER" {
+				t.Fatal(mode, err)
+			}
+		}
+	}
+}

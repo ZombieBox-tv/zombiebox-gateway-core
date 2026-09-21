@@ -55,7 +55,7 @@ func (t *Tools) Probe(ctx context.Context, path string) (Metadata, error) {
 	return t.probe(ctx, input, false)
 }
 
-func (t *Tools) probe(ctx context.Context, input string, remote bool) (Metadata, error) {
+func (t *Tools) probe(ctx context.Context, input string, remote bool, manifestKind ...string) (Metadata, error) {
 	var result Metadata
 	select {
 	case t.probes <- struct{}{}:
@@ -67,7 +67,7 @@ func (t *Tools) probe(ctx context.Context, input string, remote bool) (Metadata,
 	defer cancel()
 	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height:stream_tags=language,title:stream_disposition=default,forced:format=format_name,duration", "-of", "json"}
 	if remote {
-		args = remoteArguments(args)
+		args = remoteArguments(args, manifestKind...)
 	}
 	args = append(args, input)
 	output := &boundedBuffer{limit: 1 << 20}
@@ -94,7 +94,7 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 	return t.convert(ctx, input, "", false, false, mode, selection, output)
 }
 
-func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, adtsAAC bool, mode string, selection domain.MediaSelection, output io.Writer) error {
+func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, adtsAAC bool, mode string, selection domain.MediaSelection, output io.Writer, manifestKind ...string) error {
 	if selection.PositionMS < 0 || selection.PositionMS > 7*24*60*60*1000 || (selection.AudioID != nil && *selection.AudioID < 0) {
 		return errors.New("invalid media selection")
 	}
@@ -117,7 +117,7 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	defer cancel()
 	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-max_alloc", "67108864", "-threads", "2", "-protocol_whitelist", "file,pipe"}
 	if remote {
-		args = remoteArguments(args)
+		args = remoteArguments(args, manifestKind...)
 	}
 	if mode == "REMUX" && selection.PositionMS > 0 {
 		return errors.New("accurate resume requires transcoding")
@@ -176,13 +176,21 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 func (b *boundedBuffer) Bytes() []byte { return b.data.Bytes() }
 
 // Restrict remote demuxers as well as protocols. Playlists, concat and nested
-// network references cannot escape the two loopback input routes.
-func remoteArguments(args []string) []string {
+// network references require the rewritten manifest graph; opaque input keeps finite routes.
+func remoteArguments(args []string, kind ...string) []string {
+	formats := "mov,matroska,webm,mpegts,mp3,aac,flac,ogg,wav"
+	if len(kind) > 0 && kind[0] != "" {
+		formats += ",hls,dash"
+		if kind[0] == "hls" {
+			args = append(args, "-allowed_extensions", "ALL", "-extension_picky", "0")
+		}
+	}
+
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "-protocol_whitelist" {
 			args[i+1] = "http,tcp,pipe"
-			return append(args, "-format_whitelist", "mov,matroska,webm,mpegts,mp3,aac,flac,ogg,wav", "-http_proxy", "")
+			return append(args, "-format_whitelist", formats, "-http_proxy", "")
 		}
 	}
-	return append(args, "-protocol_whitelist", "http,tcp,pipe", "-format_whitelist", "mov,matroska,webm,mpegts,mp3,aac,flac,ogg,wav", "-http_proxy", "")
+	return append(args, "-protocol_whitelist", "http,tcp,pipe", "-format_whitelist", formats, "-http_proxy", "")
 }

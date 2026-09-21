@@ -28,3 +28,8 @@ Selected-client Spotify/AirPlay leases, fresh activity routing, owned controls a
 
 Explicit retry positions and opt-in continuous live MPEG-TS adaptation; bounded conversion replacement. HLS/DASH conversion remains open.
 No product milestone or physical/account gate closes with this checkpoint.
+
+## dev.14 increment
+
+Bounded clear HLS/DASH manifest adaptation, authenticated segment graph, remux/transcode and planner integration shared by Full/Edge.
+The four requested block-1 changes are implemented; physical acceptance and broader product gates remain open.
