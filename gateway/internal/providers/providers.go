@@ -88,6 +88,8 @@ func Fetch(ctx context.Context, id string, c Config, mediaDir string) ([]Source,
 		return []Source{}, nil
 	}
 	switch id {
+	case "youtube":
+		return YouTube(ctx, c)
 	case "iptv":
 		return IPTV(ctx, c)
 	case "jellyfin":
@@ -365,6 +367,9 @@ func Stremio(ctx context.Context, c Config) ([]Source, error) {
 	return out, nil
 }
 func Resolve(ctx context.Context, source Source) (Source, error) {
+	if source.MIME == "application/x-zombie-youtube" {
+		return resolveYouTube(ctx, source)
+	}
 	if source.MIME != "application/x-zombie-stremio" {
 		return source, nil
 	}

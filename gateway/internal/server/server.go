@@ -44,6 +44,7 @@ type Server struct {
 	sessions       map[string]*session
 	polls          chan struct{}
 	catalogCache   map[string]catalogEntry
+	searchResults  map[string]searchResult
 	configRevision map[string]uint64
 	managed        map[string]bool
 	streams        chan struct{}
@@ -59,6 +60,7 @@ func New(db *store.Store, opt Options) *Server {
 	s := &Server{db: db, opt: opt, events: newEvents(), mux: http.NewServeMux(), attempts: map[string]attempt{}, sessions: map[string]*session{}, polls: make(chan struct{}, 32), catalogCache: map[string]catalogEntry{}}
 	s.configRevision = map[string]uint64{}
 	s.managed = map[string]bool{}
+	s.searchResults = map[string]searchResult{}
 	s.streams = make(chan struct{}, 4)
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, Health{"ok", 1}) })
 	s.mux.HandleFunc("POST /v1/devices/register", s.register)

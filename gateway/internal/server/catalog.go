@@ -21,7 +21,7 @@ type catalogEntry struct {
 	loading bool
 }
 
-var implemented = map[string]bool{"local": true, "iptv": true, "plex": true, "jellyfin": true, "stremio": true}
+var implemented = map[string]bool{"local": true, "youtube": true, "iptv": true, "plex": true, "jellyfin": true, "stremio": true}
 
 func (s *Server) config(ctx context.Context, id string) providers.Config {
 	var c providers.Config
@@ -195,7 +195,11 @@ func (s *Server) modules(w http.ResponseWriter, r *http.Request, d domain.Device
 	respond(w, 200, map[string]any{"apiVersion": 1, "modules": s.moduleList(r.Context())})
 }
 func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
-	sources := s.catalog(r.Context())
+	sources, err := s.screenSources(r.Context(), d.ID, r.URL.Query().Get("provider"), r.URL.Query().Get("q"))
+	if err != nil {
+		fail(w, 502, "search_unavailable")
+		return
+	}
 	screen := domain.Screen{APIVersion: 1, UIVersion: 1, Screen: "home", Sections: []domain.Section{}}
 	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	scope := r.URL.Query().Get("provider")
@@ -206,7 +210,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		if scope != "" && scope != src.Item.Provider {
 			continue
 		}
-		if search != "" && !strings.Contains(strings.ToLower(src.Item.Title), search) {
+		if search != "" && scope != "youtube" && !strings.Contains(strings.ToLower(src.Item.Title), search) {
 			continue
 		}
 		rows[src.Item.Provider] = append(rows[src.Item.Provider], src.Item)

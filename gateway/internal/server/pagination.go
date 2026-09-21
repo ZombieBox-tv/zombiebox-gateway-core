@@ -22,8 +22,13 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 	provider := r.URL.Query().Get("provider")
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	matches := []domain.Item{}
-	for _, source := range s.catalog(r.Context()) {
-		if (provider == "" || source.Item.Provider == provider) && (query == "" || strings.Contains(strings.ToLower(source.Item.Title), query)) {
+	sources, err := s.screenSources(r.Context(), d.ID, provider, r.URL.Query().Get("q"))
+	if err != nil {
+		fail(w, 502, "search_unavailable")
+		return
+	}
+	for _, source := range sources {
+		if (provider == "" || source.Item.Provider == provider) && (query == "" || provider == "youtube" || strings.Contains(strings.ToLower(source.Item.Title), query)) {
 			matches = append(matches, source.Item)
 		}
 	}

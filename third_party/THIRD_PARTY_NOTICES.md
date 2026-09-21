@@ -16,3 +16,7 @@ The author has not selected a license for first-party project code. Decide befor
 - modernc.org/sqlite v1.38.2: BSD-3-Clause; Linux gateway dependency. See modernc-sqlite-LICENSE.txt and the locked source reference. SQLite itself is public-domain upstream code.
 - github.com/mattn/go-sqlite3 v1.14.32: MIT; Android/Termux gateway driver (CGO), not an APK dependency. See go-sqlite3-LICENSE.txt.
 - Go transitive dependency versions are locked by gateway/go.mod and go.sum. The distribution inventory must include their notices before a public binary release.
+
+- YouTube.js 18.0.0: MIT, optional Node wrapper dependency; see youtube-js-LICENSE.txt. npm dependencies and their licenses remain in the image's node_modules; package-lock.json pins exact transitive versions.
+- QuickJS Emscripten 0.31.0: MIT, bounded interpreter used only in the Node wrapper; see quickjs-emscripten-LICENSE.txt. Its WebAssembly runtime is not an Android APK native dependency. Retain package-bundled QuickJS/Emscripten and transitive notices before distribution.
+- Historical Serenity v1.9.4 and the current pinned revision informed navigation strategy. No Serenity code was copied; docs/design/serenity-navigation.md records the comparison.

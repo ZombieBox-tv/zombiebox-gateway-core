@@ -1,0 +1,9 @@
+{
+  "name": "@zombiebox/youtube-wrapper",
+  "version": "0.1.0-dev.3",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.22.2 <23" },
+  "scripts": { "start": "node --max-old-space-size=192 server.mjs", "test": "node --test" },
+  "dependencies": { "youtubei.js": "18.0.0", "quickjs-emscripten": "0.31.0" }
+}

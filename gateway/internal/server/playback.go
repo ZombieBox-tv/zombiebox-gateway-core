@@ -32,8 +32,12 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	if !decode(w, r, &req) {
 		return
 	}
-	var found *providers.Source
-	for _, src := range s.catalog(r.Context()) {
+	found := s.searchSource(r.Context(), d.ID, req.ItemID)
+	var candidates []providers.Source
+	if found == nil {
+		candidates = s.catalog(r.Context())
+	}
+	for _, src := range candidates {
 		if src.Item.ID == req.ItemID {
 			copy := src
 			found = &copy
