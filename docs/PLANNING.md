@@ -60,3 +60,8 @@ Device-scoped receiver replacement, readiness-gated Cast handoff with target con
 No product or physical acceptance gate closes.
 
 Verification: Go vet/race and 49 contract fixtures pass. Regression coverage includes failed replacement, readiness/consent rechecks, retired streams, and late YouTube poll/resolution rejection.
+
+## dev.23 increment
+
+Bounded credential-free UDP discovery, discovery-only CLI and pinned capture research references.
+Product exit gates and deferred physical acceptance remain open.

@@ -1,6 +1,6 @@
 {
   "lockVersion": 1,
-  "capturedAt": "2026-09-20",
+  "capturedAt": "2026-09-21",
   "note": "Reference source snapshots, not approved runtime versions. Preserve upstream notices.",
   "repositories": [
     {
@@ -194,6 +194,30 @@
       "purpose": "Chromium user-namespace sandbox seccomp reference",
       "licenseHint": "Apache-2.0",
       "status": "seccomp profile adapted for Chromium user namespaces; not a runtime library"
+    },
+    {
+      "name": "scrcpy",
+      "url": "https://github.com/Genymobile/scrcpy.git",
+      "commit": "19c1261d2e2cbf2b5e6a71a8b64cc1dd3ede06ac",
+      "referenceBranch": "HEAD",
+      "purpose": "Optional privileged/capture backend research; no runtime dependency or copied code",
+      "licenseHint": "Apache-2.0",
+      "status": "reference-only; not integrated",
+      "sparse": [
+        "doc"
+      ]
+    },
+    {
+      "name": "sndcpy",
+      "url": "https://github.com/rom1v/sndcpy.git",
+      "commit": "ea18ef2cbade57c28293aabbb9d1bbee9056ee1c",
+      "referenceBranch": "HEAD",
+      "purpose": "Optional privileged/capture backend research; no runtime dependency or copied code",
+      "licenseHint": "MIT",
+      "status": "reference-only; not integrated",
+      "sparse": [
+        "app/src/main"
+      ]
     }
   ]
 }

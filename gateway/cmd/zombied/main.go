@@ -17,6 +17,7 @@ import (
 
 	"zombiebox.local/gateway/internal/artwork"
 	providerconfig "zombiebox.local/gateway/internal/config"
+	"zombiebox.local/gateway/internal/discovery"
 	"zombiebox.local/gateway/internal/httpclient"
 	mediatools "zombiebox.local/gateway/internal/media"
 	"zombiebox.local/gateway/internal/providers"
@@ -41,7 +42,28 @@ func main() {
 	enableMedia := flag.Bool("media-tools", false, "enable local FFmpeg probing and conversion")
 	artworkDirectory := flag.String("artwork-cache", "", "processed image cache directory (default: artwork beside state database)")
 	artworkMiB := flag.Int("artwork-cache-mb", 64, "processed image disk budget in MiB, 0 disables persistence, maximum 512")
+	discoveryListen := flag.String("discovery-listen", "", "optional trusted LAN UDP discovery address, typically :8098")
+	discoveryPort := flag.Int("discovery-http-port", 8090, "client-visible HTTP port advertised by discovery")
+	discoveryOnly := flag.Bool("discovery-only", false, "run discovery only; no database, credentials or HTTP server")
 	flag.Parse()
+	if *discoveryOnly {
+		if *discoveryListen == "" {
+			slog.Error("discovery-only requires discovery-listen")
+			os.Exit(1)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		socket, err := discovery.Listen(*discoveryListen)
+		if err != nil {
+			slog.Error("discovery listen failed", "error", err)
+			os.Exit(1)
+		}
+		if err := discovery.Serve(ctx, socket, *discoveryPort); err != nil {
+			slog.Error("discovery failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *check != "" {
 		client := &http.Client{Timeout: 3 * time.Second}
 		res, err := client.Get(*check + "/health")
@@ -156,6 +178,18 @@ func main() {
 	fmt.Fprintln(os.Stderr, "Zombie pairing / administration code:", pairing)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *discoveryListen != "" {
+		socket, err := discovery.Listen(*discoveryListen)
+		if err != nil {
+			slog.Warn("discovery unavailable; manual pairing remains available", "error", err)
+		} else {
+			go func() {
+				if err := discovery.Serve(ctx, socket, *discoveryPort); err != nil {
+					slog.Warn("discovery stopped", "error", err)
+				}
+			}()
+		}
+	}
 	srv := &http.Server{Addr: *listen, Handler: app, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	shutdownDone := make(chan struct{})
 	go func() {

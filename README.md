@@ -70,3 +70,8 @@ Dev.21: Measured LAN bitrate planning, bounded federated provider search with Pl
 
 Device-scoped receiver replacement, readiness-gated Cast handoff with target consent, revoked YouTube command/source fencing and receiver-bound playback resolution.
 No product or physical acceptance gate closes.
+
+## dev.23 increment
+
+Bounded credential-free UDP discovery and optional discovery-only process; locked scrcpy/sndcpy research references.
+No product or physical acceptance gate closes.
