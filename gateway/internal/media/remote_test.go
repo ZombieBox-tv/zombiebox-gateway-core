@@ -184,3 +184,75 @@ func TestRemoteProcessArgumentsContainNoProviderSecrets(t *testing.T) {
 		t.Fatal(calls)
 	}
 }
+
+func TestLiveCandidateRejectsManifestsAndSeeking(t *testing.T) {
+	source := domain.Source{URL: "https://channel.test/live", MIME: "video/mp2t", Live: true}
+	if !RemoteCandidate(source) {
+		t.Fatal("continuous TS rejected")
+	}
+	remote := NewRemote(nil, nil)
+	if err := remote.ConvertRemote(t.Context(), source, "REMUX", domain.MediaSelection{PositionMS: 1}, io.Discard); err == nil {
+		t.Fatal("accepted live seek")
+	}
+	for _, mime := range []string{"application/vnd.apple.mpegurl", "application/dash+xml", "video/mp4"} {
+		source.MIME = mime
+		if RemoteCandidate(source) {
+			t.Fatal("accepted unbounded live format", mime)
+		}
+	}
+	source.MIME = "video/mp2t"
+	source.URL += "/playlist.m3u8"
+	if RemoteCandidate(source) {
+		t.Fatal("accepted disguised playlist")
+	}
+}
+
+func TestLiveTransportConversionPreservesAudioAndVideo(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg required")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe required")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	input := filepath.Join(dir, "live.ts")
+	args := []string{"-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "1", "-c:v", "libx264", "-threads", "1", "-c:a", "aac", "-f", "mpegts", input}
+	if output, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v %s", err, output)
+	}
+	fixture, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer live-fixture" {
+			w.WriteHeader(401)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		w.Write(fixture)
+	}))
+	defer upstream.Close()
+	remote := NewRemote(New(ffmpeg, ffprobe), upstream.Client())
+	source := domain.Source{URL: upstream.URL + "/live", MIME: "video/mp2t", Live: true, Headers: http.Header{"Authorization": {"Bearer live-fixture"}}}
+	for _, mode := range []string{"REMUX", "TRANSCODE"} {
+		var output bytes.Buffer
+		if err := remote.ConvertRemote(ctx, source, mode, domain.MediaSelection{}, &output); err != nil {
+			t.Fatal(mode, err)
+		}
+		path := filepath.Join(dir, mode+".mp4")
+		if err := os.WriteFile(path, output.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+		metadata, err := New(ffmpeg, ffprobe).Probe(ctx, path)
+		if err != nil || len(metadata.Streams) != 2 || metadata.Streams[0].Codec != "h264" || metadata.Streams[1].Codec != "aac" {
+			t.Fatal(mode, metadata, err)
+		}
+	}
+}

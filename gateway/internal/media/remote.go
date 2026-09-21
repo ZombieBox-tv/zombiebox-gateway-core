@@ -58,12 +58,30 @@ func (t *RemoteTools) ProbeRemote(ctx context.Context, source domain.Source) (do
 }
 
 func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, mode string, selection domain.MediaSelection, output io.Writer) error {
+	if source.Live && selection.PositionMS != 0 {
+		return errors.New("live input is not seekable")
+	}
 	bridge, err := t.bridge(ctx, source)
 	if err != nil {
 		return err
 	}
 	defer bridge.close()
-	return t.tools.convert(ctx, bridge.video, bridge.audio, true, mode, selection, output)
+	// TS AAC carries ADTS headers; copying to fragmented MP4 needs ASC.
+	// Probe only this container, and never apply an AAC filter to MP3/other audio.
+	adtsAAC := false
+	if mode == "REMUX" && strings.EqualFold(strings.TrimSpace(strings.Split(source.MIME, ";")[0]), "video/mp2t") {
+		metadata, err := t.tools.probe(ctx, bridge.video, true)
+		if err != nil {
+			return err
+		}
+		for _, stream := range metadata.Streams {
+			if stream.Type == "audio" {
+				adtsAAC = stream.Codec == "aac"
+				break
+			}
+		}
+	}
+	return t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, mode, selection, output)
 }
 
 type inputBridge struct {
@@ -153,7 +171,11 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 // Manifest protocols need a credential-safe resource graph, not arbitrary nested
 // FFmpeg requests. Keep them on the existing HLS relay until that graph is ready.
 func RemoteCandidate(source domain.Source) bool {
-	if source.Path != "" || source.Live || strings.Contains(source.MIME, "mpegurl") || strings.Contains(source.MIME, "dash") {
+	if source.Path != "" || strings.Contains(strings.ToLower(source.MIME), "mpegurl") || strings.Contains(strings.ToLower(source.MIME), "dash") {
+		return false
+	}
+	// Live adaptation is limited to a single continuous MPEG-TS input.
+	if source.Live && (strings.ToLower(strings.TrimSpace(strings.Split(source.MIME, ";")[0])) != "video/mp2t" || source.AudioURL != "") {
 		return false
 	}
 	for _, raw := range []string{source.URL, source.AudioURL} {

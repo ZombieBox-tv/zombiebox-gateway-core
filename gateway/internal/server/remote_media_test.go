@@ -44,3 +44,18 @@ func TestAdaptivePlaybackNeverReturnsVideoOnlyOrIgnoresFailedFragmentProbe(t *te
 		t.Fatal("network failure treated as decoder failure", mode, err)
 	}
 }
+
+func TestLiveTransportConvertsOnlyOnExplicitRetry(t *testing.T) {
+	s := testServer(t, nil, t.TempDir())
+	s.deps.RemoteMedia = remoteMediaStub{err: errors.New("must not probe Auto")}
+	source := domain.Source{URL: "https://channel.test/live", MIME: "video/mp2t", Live: true}
+	if mode, err := s.playbackMode(t.Context(), source, domain.Device{}, "AUTO"); err != nil || mode != "DIRECT_PLAY" {
+		t.Fatal(mode, err)
+	}
+	s.deps.RemoteMedia = remoteMediaStub{}
+	for _, requested := range []string{"REMUX", "TRANSCODE"} {
+		if mode, err := s.playbackMode(t.Context(), source, domain.Device{}, requested); err != nil || mode != requested {
+			t.Fatal(mode, err)
+		}
+	}
+}

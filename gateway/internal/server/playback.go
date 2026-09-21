@@ -32,10 +32,15 @@ type session struct {
 
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var req struct {
-		ItemID string `json:"itemId"`
-		Mode   string `json:"mode"`
+		ItemID     string `json:"itemId"`
+		Mode       string `json:"mode"`
+		PositionMS *int64 `json:"positionMs"`
 	}
 	if !decode(w, r, &req) {
+		return
+	}
+	if req.PositionMS != nil && (*req.PositionMS < 0 || *req.PositionMS > 7*24*60*60*1000) {
+		fail(w, 400, "invalid_position")
 		return
 	}
 	if req.Mode != "" && req.Mode != "AUTO" && req.Mode != "DIRECT_PLAY" && req.Mode != "REMUX" && req.Mode != "TRANSCODE" && req.Mode != "EXTERNAL_PLAYER" {
@@ -99,7 +104,13 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS
-	if p.State == "ENDED" || resolved.Live {
+	if p.State == "ENDED" {
+		resume = 0
+	}
+	if req.PositionMS != nil {
+		resume = *req.PositionMS
+	}
+	if resolved.Live {
 		resume = 0
 	}
 	plan := domain.Plan{Version: 1, SessionID: id, Mode: mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}

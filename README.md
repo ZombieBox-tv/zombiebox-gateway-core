@@ -44,3 +44,5 @@ provider/account workflows remain open.
 Dev.12 adds [selected-client Spotify/AirPlay reception](docs/media-receiver.md),
 leased controls and receiver-aware Cast budgets. These share existing playback
 sessions; account, OEM and physical A/V evidence remains separate.
+
+Dev.13: Explicit retry positions and opt-in continuous live MPEG-TS adaptation; bounded conversion replacement. HLS/DASH conversion remains open.

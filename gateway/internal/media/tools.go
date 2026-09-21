@@ -91,31 +91,23 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 	if err != nil {
 		return err
 	}
-	return t.convert(ctx, input, "", false, mode, selection, output)
+	return t.convert(ctx, input, "", false, false, mode, selection, output)
 }
 
-func (t *Tools) convert(ctx context.Context, input, audioInput string, remote bool, mode string, selection domain.MediaSelection, output io.Writer) error {
+func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, adtsAAC bool, mode string, selection domain.MediaSelection, output io.Writer) error {
 	if selection.PositionMS < 0 || selection.PositionMS > 7*24*60*60*1000 || (selection.AudioID != nil && *selection.AudioID < 0) {
 		return errors.New("invalid media selection")
 	}
 	// A replacement stream may arrive while cancellation reaps the previous
 	// FFmpeg process. Give it a bounded grace period without adding capacity.
-	if selection.AudioID != nil {
-		timer := time.NewTimer(2 * time.Second)
-		defer timer.Stop()
-		select {
-		case t.jobs <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-			return ErrBusy
-		}
-	} else {
-		select {
-		case t.jobs <- struct{}{}:
-		default:
-			return ErrBusy
-		}
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case t.jobs <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ErrBusy
 	}
 	defer func() { <-t.jobs }()
 	if mode != "REMUX" && mode != "TRANSCODE" {
@@ -150,6 +142,9 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote bo
 	args = append(args, "-map", "0:v:0?", "-map", audio, "-sn", "-dn", "-map_metadata", "-1")
 	if mode == "REMUX" {
 		args = append(args, "-c", "copy")
+		if adtsAAC {
+			args = append(args, "-bsf:a", "aac_adtstoasc")
+		}
 	} else {
 		args = append(args, "-c:v", "libx264", "-threads", "2", "-filter_threads", "1", "-preset", "veryfast", "-profile:v", "baseline", "-level:v", "3.0", "-pix_fmt", "yuv420p", "-vf", "scale=640:360:force_original_aspect_ratio=decrease:force_divisible_by=2", "-r", "30", "-b:v", "1000k", "-maxrate", "1200k", "-bufsize", "2400k", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100")
 	}

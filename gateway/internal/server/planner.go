@@ -21,6 +21,10 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 	if requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER" {
 		return requested, nil
 	}
+	// Keep live direct relay in Auto; an explicit compatible retry may convert TS.
+	if source.Live && (requested == "" || requested == "AUTO") {
+		return "DIRECT_PLAY", nil
+	}
 	if source.Path == "" {
 		if s.deps.RemoteMedia == nil || !media.RemoteCandidate(source) {
 			if source.AudioURL != "" {
