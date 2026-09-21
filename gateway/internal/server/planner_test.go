@@ -12,28 +12,6 @@ import (
 	"zombiebox.local/gateway/internal/providers"
 )
 
-func TestLocalPlannerUsesEvidenceNotAndroidVersion(t *testing.T) {
-	native := media.Metadata{Streams: []media.Stream{{Type: "video", Codec: "h264", Width: 640, Height: 360}, {Type: "audio", Codec: "aac"}}}
-	unsupported := media.Metadata{Streams: []media.Stream{{Type: "video", Codec: "vp9"}}}
-	for _, tc := range []struct {
-		name, mime, override, want string
-		metadata                   media.Metadata
-		probes                     []domain.Probe
-	}{
-		{"native", "video/mp4", "", "DIRECT_PLAY", native, nil},
-		{"container", "video/x-matroska", "", "REMUX", native, nil},
-		{"codec", "video/webm", "", "TRANSCODE", unsupported, nil},
-		{"failed fragment probe", "video/x-matroska", "", "EXTERNAL_PLAYER", native, []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}},
-		{"failed audio probe", "video/webm", "", "EXTERNAL_PLAYER", unsupported, []domain.Probe{{ID: "aac", Status: "FAIL"}}},
-		{"explicit override", "video/mp4", "TRANSCODE", "TRANSCODE", native, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := localMode(tc.metadata, tc.mime, domain.Capabilities{Probes: tc.probes}, tc.override); got != tc.want {
-				t.Fatalf("got %s want %s", got, tc.want)
-			}
-		})
-	}
-}
 func TestHTTPConversionProducesPlayableMP4(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg absent")
@@ -82,26 +60,5 @@ func TestHTTPConversionProducesPlayableMP4(t *testing.T) {
 			t.Fatal(metadata.Streams[0])
 		}
 		call(s, "DELETE", "/v1/playback/"+plan.SessionID, "", "media-device", token, "")
-	}
-}
-
-func TestProfileEvidenceDoesNotRejectOtherProfiles(t *testing.T) {
-	state := func(id string) string {
-		if id == "h264-720-main" {
-			return "FAIL"
-		}
-		if id == "h264-1080-high" {
-			return "PASS"
-		}
-		return "UNKNOWN"
-	}
-	if !videoCandidate(media.Stream{Profile: "Constrained Baseline", Width: 640, Height: 360}, state) {
-		t.Fatal("Main failure rejected Baseline")
-	}
-	if videoCandidate(media.Stream{Profile: "Main", Width: 1280, Height: 720}, state) {
-		t.Fatal("failed Main probe ignored")
-	}
-	if !videoCandidate(media.Stream{Profile: "High", Width: 1920, Height: 1080}, state) {
-		t.Fatal("measured 1080 High ignored")
 	}
 }

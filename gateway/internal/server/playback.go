@@ -320,14 +320,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 // Close cancels streams before the process drains its HTTP server.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.done) })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	s.youtubeReceiver.Close(ctx)
+	cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.youtubeReceiver != nil && s.deps.YouTubeReceiver != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = s.deps.YouTubeReceiver.CloseReceiver(ctx, s.youtubeReceiver.config, s.youtubeReceiver.id)
-		cancel()
-		s.youtubeReceiver = nil
-	}
 	if s.browser != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_, _ = s.deps.Browser.BrowserRequest(ctx, s.browser.config, "DELETE", "/session/"+s.browser.id, nil)

@@ -3,9 +3,9 @@
 
 import argparse
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--force", action="store_true")

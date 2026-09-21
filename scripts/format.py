@@ -4,9 +4,9 @@
 import argparse
 import hashlib
 import os
-from pathlib import Path
 import subprocess
 import urllib.request
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / ".tools/format"
@@ -137,6 +137,17 @@ def main():
             )
         elif language == "python":
             paths = [path for path in files if path.suffix == ".py"]
+            run(
+                "uvx",
+                "--from",
+                "ruff==0.13.2",
+                "ruff",
+                "check",
+                "--select",
+                "I",
+                *([] if args.check else ["--fix"]),
+                *paths,
+            )
             run(
                 "uvx",
                 "--from",

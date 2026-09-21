@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 
+	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -38,12 +40,7 @@ type Player interface {
 type Browser interface {
 	BrowserRequest(context.Context, domain.Config, string, string, any) ([]byte, error)
 }
-type YouTubeReceiver interface {
-	OpenReceiver(context.Context, domain.Config, string) (domain.YouTubeReceiverState, error)
-	PollReceiver(context.Context, domain.Config, string) (domain.YouTubeReceiverState, error)
-	AcknowledgeReceiver(context.Context, domain.Config, string, domain.ReceiverAcknowledgement) error
-	CloseReceiver(context.Context, domain.Config, string) error
-}
+type YouTubeReceiver = youtubereceiver.Backend
 
 type Artwork interface {
 	Image(context.Context, domain.Source, bool) ([]byte, error)

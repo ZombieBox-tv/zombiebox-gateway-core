@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
+
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/providers"
 )
@@ -89,6 +91,7 @@ func TestWireContracts(t *testing.T) {
 	samples["BrowserSession"] = call(s, "POST", "/v1/browser", `{"url":"https://example.org"}`, "contract-device", token, "").Body.Bytes()
 	samples["ProbeManifest"] = call(s, "GET", "/v1/probes", "", "contract-device", token, "").Body.Bytes()
 	s.deps.YouTubeReceiver = &receiverFixture{state: domain.YouTubeReceiverState{State: "READY", TVCode: "123456789"}}
+	s.youtubeReceiver = youtubereceiver.New(s.deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
 	s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}, "youtube_receiver": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}})
 	samples["YouTubeReceiverState"] = call(s, "POST", "/v1/youtube/receiver", `{}`, "contract-device", token, "").Body.Bytes()
 	hardware, _ := json.Marshal(hardwareFixture())

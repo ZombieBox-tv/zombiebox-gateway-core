@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -42,6 +44,7 @@ func TestYouTubeReceiverOwnsCommandsAndUsesNormalPlayback(t *testing.T) {
 	s := testServer(t, nil, "")
 	fixture := &receiverFixture{state: domain.YouTubeReceiverState{State: "READY", TVCode: "123 456 789"}}
 	s.deps.YouTubeReceiver = fixture
+	s.youtubeReceiver = youtubereceiver.New(s.deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
 	s.deps.Resolver = receiverResolver{}
 	for _, id := range []string{"youtube", "youtube_receiver"} {
 		s.SeedProviders(t.Context(), map[string]domain.Config{id: {Enabled: true, URL: "https://private.invalid", Token: strings.Repeat("private", 6)}})
@@ -91,7 +94,7 @@ func TestYouTubeReceiverOwnsCommandsAndUsesNormalPlayback(t *testing.T) {
 }
 func TestReceiverRejectsInvalidCommands(t *testing.T) {
 	for _, command := range []*domain.ReceiverCommand{{ID: strings.Repeat("a", 32), Action: "play", VideoID: "https://localhost"}, {ID: "bad", Action: "stop"}, {ID: strings.Repeat("a", 32), Action: "exec"}} {
-		if validReceiverState(domain.YouTubeReceiverState{ReceiverID: "owner", State: "READY", Command: command}, "owner") {
+		if youtubereceiver.ValidState(domain.YouTubeReceiverState{ReceiverID: "owner", State: "READY", Command: command}, "owner") {
 			t.Fatal("invalid command accepted")
 		}
 	}

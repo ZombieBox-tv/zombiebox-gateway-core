@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"zombiebox.local/gateway/internal/devices"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -49,12 +51,12 @@ func TestHardwareInvalidatesProbesOnlyWhenFingerprintChanges(t *testing.T) {
 func TestHardwareHintsCannotCertifyNativeBackends(t *testing.T) {
 	report := hardwareFixture()
 	report.NativeDIAL = "PASS"
-	if validHardware(report) {
+	if devices.ValidHardware(report) {
 		t.Fatal("inventory certified functional DIAL")
 	}
 	report = hardwareFixture()
 	report.Decoders = make([]domain.CodecHint, 129)
-	if validHardware(report) {
+	if devices.ValidHardware(report) {
 		t.Fatal("unbounded decoder inventory")
 	}
 }
