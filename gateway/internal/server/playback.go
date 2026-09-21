@@ -53,7 +53,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			break
 		}
 	}
-	if found == nil {
+	if found == nil || !found.Item.Playable {
 		fail(w, 404, "item_not_found")
 		return
 	}
@@ -251,6 +251,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(contextWriter{ResponseWriter: w, ctx: r.Context()}, r, "media", info.ModTime(), f)
 		return
 	}
+	if r.Method == "HEAD" && src.Live {
+		return
+	}
 	req, err := http.NewRequestWithContext(r.Context(), "GET", src.URL, nil)
 	if err != nil {
 		fail(w, 502, "stream_unavailable")
@@ -334,6 +337,12 @@ func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.done) })
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.browser != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = providers.BrowserRequest(ctx, s.browser.config, "DELETE", "/session/"+s.browser.id, nil)
+		cancel()
+		s.browser = nil
+	}
 	for _, c := range s.casts {
 		s.endCastLocked(c)
 	}

@@ -58,7 +58,7 @@
       "referenceBranch": "master",
       "purpose": "Spotify Connect external process; GPL distribution review required",
       "licenseHint": "GPL-3.0",
-      "status": "reference-only; not integrated"
+      "status": "Full wrapper integrated; real account and native Edge validation pending"
     },
     {
       "name": "uxplay",
@@ -67,7 +67,7 @@
       "referenceBranch": "master",
       "purpose": "AirPlay external process; GPL distribution review required",
       "licenseHint": "GPL-3.0",
-      "status": "reference-only; not integrated"
+      "status": "Full RTP/HLS wrapper integrated; physical iOS/legacy validation pending"
     },
     {
       "name": "mediamtx",
@@ -85,7 +85,7 @@
       "referenceBranch": "main",
       "purpose": "Full IPTV/EPG external process; Edge feasibility pending",
       "licenseHint": "MIT",
-      "status": "reference-only; not integrated"
+      "status": "Full package integrated; real playlist mapping and native Edge validation pending"
     },
     {
       "name": "browservice",
@@ -170,6 +170,30 @@
       "purpose": "MediaMTX Android network-interface dependency and Go linker compatibility reference",
       "licenseHint": "MIT",
       "status": "transitive MediaMTX dependency; native runtime validation pending"
+    },
+    {
+      "name": "puppeteer",
+      "url": "https://github.com/puppeteer/puppeteer.git",
+      "commit": "043cd46e594b39ea77343e221a59724183448059",
+      "referenceBranch": "puppeteer-core-v25.11.0",
+      "sparse": [
+        "docs"
+      ],
+      "purpose": "Maintained remote Chromium control behind RebrowserProvider",
+      "licenseHint": "Apache-2.0",
+      "status": "Puppeteer Core 25.11.0 runtime integrated behind private Rebrowser worker"
+    },
+    {
+      "name": "playwright-docker",
+      "url": "https://github.com/microsoft/playwright.git",
+      "commit": "ce480a952553175eae75342aad2c5e86cdf2cbba",
+      "referenceBranch": "v1.58.2",
+      "sparse": [
+        "utils/docker"
+      ],
+      "purpose": "Chromium user-namespace sandbox seccomp reference",
+      "licenseHint": "Apache-2.0",
+      "status": "seccomp profile adapted for Chromium user namespaces; not a runtime library"
     }
   ]
 }

@@ -19,6 +19,8 @@ No upstream installers, builds or npm install commands are run. The restore scri
 | Browservice | RebrowserProvider reference/candidate; upstream unmaintained |
 | Serenity | Google TV D-pad, overscan and player reference; never runtime |
 
-Rebrowser in the specification is our abstraction, not an external repository name. Do not confuse it with unrelated browser automation projects. A maintained provider/current CEF deployment still needs selection.
+Rebrowser in the specification is our abstraction, not an external repository name. Do not confuse it with unrelated browser automation projects. The maintained Chromium/Puppeteer provider is selected in ADR 0021; Browservice remains reference-only.
 
 Locked commits are reference snapshots, not approved runtime versions. Pin integrated dependencies in manifests/image digests as their wrappers are implemented. Review notices before copying code or distributing binaries.
+
+Puppeteer Core and Playwright Docker sandbox documentation are pinned in the lock file. The adapted seccomp policy retains its Apache-2.0 notice in wrappers/rebrowser.

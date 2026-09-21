@@ -87,17 +87,8 @@ func Fetch(ctx context.Context, id string, c Config, mediaDir string) ([]Source,
 	if !c.Enabled {
 		return []Source{}, nil
 	}
-	switch id {
-	case "youtube":
-		return YouTube(ctx, c)
-	case "iptv":
-		return IPTV(ctx, c)
-	case "jellyfin":
-		return Jellyfin(ctx, c)
-	case "plex":
-		return Plex(ctx, c)
-	case "stremio":
-		return Stremio(ctx, c)
+	if adapter, ok := catalogAdapters[id]; ok {
+		return adapter.Fetch(ctx, c)
 	}
 	return nil, errors.New("adapter not implemented")
 }

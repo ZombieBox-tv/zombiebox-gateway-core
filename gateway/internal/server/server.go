@@ -26,6 +26,7 @@ type Health struct {
 	APIVersion int    `json:"apiVersion"`
 }
 type Options struct {
+	ThreadfinURL                               string
 	MediaTools                                 *media.Tools
 	RelayURL, RelayControlURL, RelayAdminToken string
 	RTSPPort                                   int
@@ -39,24 +40,26 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
-	relayJobs      chan struct{}
-	casts          map[string]*castSession
-	seen           map[string]time.Time
-	done           chan struct{}
-	closeOnce      sync.Once
-	db             *store.Store
-	opt            Options
-	events         *eventLog
-	mux            *http.ServeMux
-	mu             sync.Mutex
-	attempts       map[string]attempt
-	sessions       map[string]*session
-	polls          chan struct{}
-	catalogCache   map[string]catalogEntry
-	searchResults  map[string]searchResult
-	configRevision map[string]uint64
-	managed        map[string]bool
-	streams        chan struct{}
+	browser           *browserSession
+	integrationChecks chan struct{}
+	relayJobs         chan struct{}
+	casts             map[string]*castSession
+	seen              map[string]time.Time
+	done              chan struct{}
+	closeOnce         sync.Once
+	db                *store.Store
+	opt               Options
+	events            *eventLog
+	mux               *http.ServeMux
+	mu                sync.Mutex
+	attempts          map[string]attempt
+	sessions          map[string]*session
+	polls             chan struct{}
+	catalogCache      map[string]catalogEntry
+	searchResults     map[string]searchResult
+	configRevision    map[string]uint64
+	managed           map[string]bool
+	streams           chan struct{}
 }
 
 func New(db *store.Store, opt Options) *Server {
@@ -68,6 +71,7 @@ func New(db *store.Store, opt Options) *Server {
 	}
 	s := &Server{db: db, opt: opt, events: newEvents(), mux: http.NewServeMux(), attempts: map[string]attempt{}, sessions: map[string]*session{}, polls: make(chan struct{}, 32), catalogCache: map[string]catalogEntry{}}
 	s.relayJobs = make(chan struct{}, 4)
+	s.integrationChecks = make(chan struct{}, 2)
 	s.casts = map[string]*castSession{}
 	s.seen = map[string]time.Time{}
 	s.done = make(chan struct{})
@@ -96,6 +100,14 @@ func New(db *store.Store, opt Options) *Server {
 	s.mux.HandleFunc("GET /v1/catalog", s.auth(s.catalogPage))
 	s.mux.HandleFunc("GET /v1/home", s.auth(s.home))
 	s.mux.HandleFunc("GET /v1/events", s.auth(s.poll))
+	s.mux.HandleFunc("GET /v1/integrations", s.auth(s.integrationList))
+	s.mux.HandleFunc("POST /v1/browser", s.auth(s.startBrowser))
+	s.mux.HandleFunc("GET /v1/browser/{browser}/frame", s.auth(s.browserOperation))
+	s.mux.HandleFunc("POST /v1/browser/{browser}/input", s.auth(s.browserOperation))
+	s.mux.HandleFunc("DELETE /v1/browser/{browser}", s.auth(s.browserOperation))
+	s.mux.HandleFunc("GET /v1/player/spotify", s.auth(s.nowPlaying))
+	s.mux.HandleFunc("GET /v1/player/spotify/authorization", s.auth(s.spotifyAuthorization))
+	s.mux.HandleFunc("POST /v1/player/spotify", s.auth(s.playerCommand))
 	s.mux.HandleFunc("GET /v1/providers", s.auth(s.providers))
 	s.mux.HandleFunc("PUT /v1/providers/{provider}", s.auth(s.configureProvider))
 	s.mux.HandleFunc("POST /v1/playback", s.auth(s.playback))

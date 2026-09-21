@@ -1,13 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/providers"
 )
 
 // The Python schema check invokes this test with an isolated capture path.
@@ -30,7 +33,7 @@ func TestWireContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := result.DeviceToken
-	for name, path := range map[string]string{"Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
+	for name, path := range map[string]string{"IntegrationResponse": "/v1/integrations", "Health": "/health", "ScreenModel": "/v1/home", "DeviceRecord": "/v1/device", "ProviderStatusResponse": "/v1/providers", "EventBatch": "/v1/events?wait=0"} {
 		w := call(s, "GET", path, "", "contract-device", token, "")
 		if w.Code != 200 {
 			t.Fatal(w.Body)
@@ -65,6 +68,24 @@ func TestWireContracts(t *testing.T) {
 		t.Fatal(ready.Body)
 	}
 	samples["ActiveCast"] = call(s, "GET", "/v1/cast/active", "", "contract-receiver", receiver, "").Body.Bytes()
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/code" {
+			w.WriteHeader(204)
+			return
+		}
+		if r.URL.Path == "/status" {
+			w.Write([]byte(`{"stopped":true,"volume_steps":100}`))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer worker.Close()
+	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"spotify": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}, "rebrowser": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}}); err != nil {
+		t.Fatal(err)
+	}
+	samples["NowPlaying"] = call(s, "GET", "/v1/player/spotify", "", "contract-device", token, "").Body.Bytes()
+	samples["AuthorizationPrompt"] = call(s, "GET", "/v1/player/spotify/authorization", "", "contract-device", token, "123456").Body.Bytes()
+	samples["BrowserSession"] = call(s, "POST", "/v1/browser", `{"url":"https://example.org"}`, "contract-device", token, "").Body.Bytes()
 	data, err := json.Marshal(samples)
 	if err != nil {
 		t.Fatal(err)

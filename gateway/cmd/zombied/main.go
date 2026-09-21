@@ -26,6 +26,7 @@ func main() {
 	state := flag.String("state", ".local/gateway.db", "private SQLite database path")
 	media := flag.String("media-dir", ".local/media", "directory containing local media")
 	config := flag.String("config", "", "optional private provider configuration JSON")
+	threadfin := flag.String("threadfin-url", "", "optional private Threadfin control base URL")
 	relay := flag.String("relay-url", "", "private MediaMTX HLS base URL")
 	relayControl := flag.String("relay-control-url", "", "private MediaMTX control API base URL")
 	rtspPort := flag.Int("rtsp-port", 8554, "sender-visible RTSP port")
@@ -66,7 +67,7 @@ func main() {
 	if *enableMedia {
 		tools = mediatools.New("ffmpeg", "ffprobe")
 	}
-	app := server.New(db, server.Options{MediaTools: tools, PairingCode: pairing, MediaDir: *media, RelayURL: *relay, RelayControlURL: *relayControl, RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"), RTSPPort: *rtspPort})
+	app := server.New(db, server.Options{ThreadfinURL: *threadfin, MediaTools: tools, PairingCode: pairing, MediaDir: *media, RelayURL: *relay, RelayControlURL: *relayControl, RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"), RTSPPort: *rtspPort})
 	if *config != "" {
 		configs, e := providerconfig.Load(*config, os.LookupEnv)
 		if e != nil {

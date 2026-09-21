@@ -1,0 +1,9 @@
+{
+  "name": "zombiebox-rebrowser-worker",
+  "private": true,
+  "version": "0.1.0-dev.5",
+  "type": "module",
+  "engines": {"node": ">=22.12.0"},
+  "scripts": {"start": "node server.mjs", "test": "node --test"},
+  "dependencies": {"puppeteer-core": "25.11.0"}
+}

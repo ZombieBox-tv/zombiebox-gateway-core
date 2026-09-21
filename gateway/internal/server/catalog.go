@@ -21,8 +21,6 @@ type catalogEntry struct {
 	loading bool
 }
 
-var implemented = map[string]bool{"local": true, "youtube": true, "iptv": true, "plex": true, "jellyfin": true, "stremio": true}
-
 func (s *Server) config(ctx context.Context, id string) providers.Config {
 	var c providers.Config
 	_ = s.db.Get(ctx, "providers", id, &c)
@@ -41,7 +39,7 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request, d domain.Devi
 			out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": s.opt.RelayURL != "", "configured": s.opt.RelayURL != "", "hasToken": false, "implemented": true, "managedByServer": true})
 			continue
 		}
-		out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": c.Enabled, "configured": c.URL != "" || c.PlaylistPath != "", "hasToken": c.Token != "", "implemented": implemented[id], "managedByServer": s.managed[id]})
+		out = append(out, map[string]any{"id": id, "title": providers.Titles[id], "enabled": c.Enabled, "configured": c.URL != "" || c.PlaylistPath != "", "hasToken": c.Token != "", "implemented": providers.HasCatalog(id) || id == "rebrowser", "managedByServer": s.managed[id]})
 	}
 	respond(w, 200, map[string]any{"providers": out})
 }
@@ -121,7 +119,7 @@ func (s *Server) catalog(ctx context.Context) []providers.Source {
 	defer cancel()
 	var wg sync.WaitGroup
 	for _, id := range providers.Order {
-		if !implemented[id] {
+		if !providers.HasCatalog(id) {
 			continue
 		}
 		s.mu.Lock()
@@ -170,6 +168,21 @@ func (s *Server) moduleList(ctx context.Context) []domain.Module {
 	for _, id := range providers.Order {
 		c := s.config(ctx, id)
 		m := domain.Module{ID: id, Title: providers.Titles[id], State: "DISABLED", Features: []string{}, Message: "Configure this service in Settings"}
+		if id == "rebrowser" {
+			if c.Enabled {
+				m.State = "STARTING"
+				m.Features = []string{"browser"}
+				m.Message = "Browser starts when a session opens"
+				s.mu.Lock()
+				if s.browser != nil && !s.browser.busy && time.Since(s.browser.touched) < 90*time.Second {
+					m.State = "HEALTHY"
+					m.Message = ""
+				}
+				s.mu.Unlock()
+			}
+			out = append(out, m)
+			continue
+		}
 		if id == "android_mirror" {
 			if s.opt.RelayURL != "" {
 				m.State = "STARTING"
@@ -188,9 +201,9 @@ func (s *Server) moduleList(ctx context.Context) []domain.Module {
 			continue
 		}
 		if id == "local" || c.Enabled {
-			if implemented[id] {
+			if providers.HasCatalog(id) {
 				m.State = "HEALTHY"
-				m.Features = []string{"catalog", "playback"}
+				m.Features = providers.Features(id)
 				m.Message = ""
 				s.mu.Lock()
 				entry := s.catalogCache[id]
