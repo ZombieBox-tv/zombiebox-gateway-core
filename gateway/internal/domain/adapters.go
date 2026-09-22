@@ -20,6 +20,7 @@ type Config struct {
 }
 
 type Source struct {
+	Subtitles      []SubtitleSource
 	AudioURL       string
 	AudioHeaders   http.Header
 	BrowsePath     string
@@ -32,6 +33,17 @@ type Source struct {
 	Headers        http.Header
 	MIME           string
 	Live           bool
+}
+
+// SubtitleSource stays on the gateway; only semantic tracks/cues reach clients.
+type SubtitleSource struct {
+	URL      string
+	Headers  http.Header
+	Codec    string
+	Language string
+	Title    string
+	Default  bool
+	Forced   bool
 }
 
 type NowPlaying struct {

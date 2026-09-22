@@ -35,3 +35,42 @@ test("handoff keeps the listener and rejects acknowledgements from its former ep
   assert.equal(notifications, 2);
   bridge.close();
 });
+
+test("natural completion advances once and a receiver handoff fences queued advancement", async () => {
+  const receiver = new Receiver({});
+  const bridge = new Bridge();
+  let advances = 0;
+  receiver.session = {
+    id: "a".repeat(32),
+    epoch: "",
+    bridge,
+    player: {
+      async notifyExternalStateChange() {},
+      async next() {
+        advances++;
+      },
+    },
+  };
+  const feedback = (state, epoch = "") => ({
+    ...bridge.state,
+    state,
+    success: true,
+    commandId: "",
+    epoch,
+  });
+  receiver.acknowledge(feedback("PLAYING"));
+  receiver.acknowledge(feedback("ENDED"));
+  receiver.acknowledge(feedback("ENDED"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(advances, 1);
+  receiver.acknowledge(feedback("PLAYING"));
+  receiver.acknowledge(feedback("STOPPED"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(advances, 1);
+  receiver.acknowledge(feedback("PLAYING"));
+  receiver.acknowledge(feedback("ENDED"));
+  receiver.suspend("b".repeat(32));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(advances, 1);
+  bridge.close();
+});

@@ -1,6 +1,7 @@
 import YouTubeCastReceiver, { Constants } from "yt-cast-receiver";
 import { Bridge } from "./bridge.mjs";
 import { MemoryStore, RemotePlayer } from "./player.mjs";
+import { naturalCompletion } from "./completion.mjs";
 const logger = { error() {}, warn() {}, info() {}, debug() {}, setLevel() {} };
 
 /** Owns upstream lifetime and volatile state; knows nothing about HTTP requests. */
@@ -115,6 +116,9 @@ export class Receiver {
 
   acknowledge(state) {
     if ((state.epoch || "") !== this.session.epoch) throw Error("stale_epoch");
+    const current = this.session;
+    const epoch = current.epoch;
+    const advance = naturalCompletion(current.bridge.state, state, current.bridge.pending);
     this.session.bridge.acknowledge(state);
     // Command methods notify upstream after their promises resolve. Heartbeats
     // additionally propagate local remote-control changes and natural completion.
@@ -125,7 +129,20 @@ export class Receiver {
         ENDED: Constants.PLAYER_STATUSES.STOPPED,
         STOPPED: Constants.PLAYER_STATUSES.STOPPED,
       }[state.state];
-      void this.session.player.notifyExternalStateChange(status).catch(() => {});
+      void current.player
+        .notifyExternalStateChange(status)
+        .then(async () => {
+          if (
+            advance &&
+            this.session === current &&
+            current.epoch === epoch &&
+            !current.bridge.pending &&
+            current.bridge.state.state === "ENDED"
+          ) {
+            await current.player.next();
+          }
+        })
+        .catch(() => {});
     }
   }
 }

@@ -80,7 +80,7 @@ func trackDecision(metadata domain.Metadata, mode string, source domain.Source, 
 	if source.Live || source.AudioURL != "" || mode == "EXTERNAL_PLAYER" {
 		return decision
 	}
-	decision.audioID, decision.subtitleID = playback.PreferredTracks(metadata, device.Preferences)
+	decision.audioID, decision.subtitleID = playback.PreferredTracks(playback.WithSubtitles(metadata, source), device.Preferences)
 	if mode == "DIRECT_PLAY" && playback.RequiresAudioMapping(metadata, decision.audioID) {
 		decision.mode = "REMUX"
 		for _, probe := range device.Capabilities.Probes {

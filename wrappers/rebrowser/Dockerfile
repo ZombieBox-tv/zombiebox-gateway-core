@@ -5,6 +5,7 @@ COPY wrappers/rebrowser/package*.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY wrappers/rebrowser/*.mjs ./
 COPY LICENSE NOTICE /usr/share/doc/zombiebox/
+COPY docs/licenses/DIAL-LICENSE /usr/share/doc/zombiebox/DIAL-LICENSE
 USER node
 ENV HOME=/tmp ZOMBIE_BROWSER_CONFIG=/config/browser.json
 CMD ["node", "--max-old-space-size=96", "server.mjs"]

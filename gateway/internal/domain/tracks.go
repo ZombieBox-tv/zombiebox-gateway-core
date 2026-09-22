@@ -1,5 +1,8 @@
 package domain
 
+// ExternalSubtitleBase reserves session-local IDs for gateway-owned attachments.
+const ExternalSubtitleBase = 1600000000
+
 // Track IDs are stream indexes scoped to a playback session, never provider IDs.
 type Track struct {
 	ID         int    `json:"id"`

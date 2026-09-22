@@ -37,6 +37,7 @@ func (a *Adapters) resolvePlex(ctx context.Context, source Source) (Source, erro
 		if err != nil || part.IsAbs() || part.Host != "" || part.Fragment != "" {
 			continue
 		}
+		source.Subtitles = plexSubtitles(source.URL, source.Headers, node.Media[0].Parts[0].Streams)
 		source.URL = base.ResolveReference(part).String()
 		source.MIME = "video/mp4"
 		if node.Type == "track" {

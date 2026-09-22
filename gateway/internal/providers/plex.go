@@ -29,7 +29,8 @@ func (a *Adapters) Plex(ctx context.Context, c Config) ([]Source, error) {
 			Thumb   string `xml:"thumb,attr"`
 			Media   []struct {
 				Parts []struct {
-					Key string `xml:"key,attr"`
+					Key     string         `xml:"key,attr"`
+					Streams []plexSubtitle `xml:"Stream"`
 				} `xml:"Part"`
 			} `xml:"Media"`
 		} `xml:"Video"`
@@ -50,7 +51,7 @@ func (a *Adapters) Plex(ctx context.Context, c Config) ([]Source, error) {
 		if strings.HasPrefix(v.Thumb, "/") && !strings.HasPrefix(v.Thumb, "//") {
 			artURL = base + v.Thumb
 		}
-		out = append(out, Source{ArtworkURL: artURL, ArtworkHeaders: headers, Item: domain.Item{ID: "plex-" + v.Key, Provider: "plex", Kind: "video", Title: v.Title, Description: v.Summary, Playable: true}, URL: base + key, Headers: headers, MIME: "video/mp4"})
+		out = append(out, Source{Subtitles: plexSubtitles(base, headers, v.Media[0].Parts[0].Streams), ArtworkURL: artURL, ArtworkHeaders: headers, Item: domain.Item{ID: "plex-" + v.Key, Provider: "plex", Kind: "video", Title: v.Title, Description: v.Summary, Playable: true}, URL: base + key, Headers: headers, MIME: "video/mp4"})
 	}
 	return out, nil
 }

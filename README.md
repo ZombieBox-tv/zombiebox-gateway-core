@@ -118,3 +118,8 @@ Five-minute single-use QR consent, online target selection with local six-digit 
 ## dev.35 increment
 
 Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration.
+
+
+## dev.37 increment
+
+[Provider subtitle attachments](docs/provider-subtitles.md) use owned semantic tracks and bounded plain-text extraction. The YouTube worker advances natural queue completion once, with receiver-epoch fencing. Product milestones and physical acceptance remain open.

@@ -18,7 +18,7 @@ func (a *Adapters) browseJellyfin(ctx context.Context, c Config, parent, query s
 	}
 	base := strings.TrimRight(c.URL, "/")
 	path := "/Users/" + url.PathEscape(c.UserID) + "/Views"
-	q := url.Values{"StartIndex": {strconv.Itoa(offset)}, "Limit": {"40"}, "Fields": {"Overview"}}
+	q := url.Values{"StartIndex": {strconv.Itoa(offset)}, "Limit": {"40"}, "Fields": {"Overview,MediaSources"}}
 	if parent != "" || query != "" {
 		path = "/Users/" + url.PathEscape(c.UserID) + "/Items"
 		q.Set("ParentId", parent)
@@ -44,6 +44,7 @@ func (a *Adapters) browseJellyfin(ctx context.Context, c Config, parent, query s
 			IsFolder             bool
 			RunTimeTicks         int64
 			ImageTags            map[string]string
+			MediaSources         []jellyfinMediaSource
 		}
 	}
 	if err := json.Unmarshal(body, &data); err != nil {
@@ -76,6 +77,7 @@ func (a *Adapters) browseJellyfin(ctx context.Context, c Config, parent, query s
 			}
 			source.URL = base + path + url.PathEscape(item.ID) + "/stream?static=true"
 			source.MIME = mime
+			source.Subtitles = jellyfinSubtitles(base, item.ID, headers, item.MediaSources)
 		} else {
 			continue
 		}

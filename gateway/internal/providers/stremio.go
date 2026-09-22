@@ -58,13 +58,19 @@ func (a *Adapters) Resolve(ctx context.Context, source Source) (Source, error) {
 	if err != nil {
 		return source, err
 	}
-	var data struct{ Streams []struct{ URL string } }
+	var data struct {
+		Streams []struct {
+			URL       string
+			Subtitles []stremioSubtitle
+		}
+	}
 	if err = json.Unmarshal(body, &data); err != nil {
 		return source, err
 	}
 	for _, stream := range data.Streams {
 		u, e := url.Parse(stream.URL)
 		if e == nil && (u.Scheme == "http" || u.Scheme == "https") {
+			source.Subtitles = stremioSubtitles(stream.Subtitles)
 			source.URL = stream.URL
 			source.MIME = "video/mp4"
 			return source, nil

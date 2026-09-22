@@ -74,3 +74,13 @@ func timestamp(value string) (int64, error) {
 	}
 	return ((h*60+m)*60+s)*1000 + ms, nil
 }
+
+// TextFormat describes standalone text files that the gateway can normalize.
+func TextFormat(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "srt", "subrip", "vtt", "webvtt", "ass", "ssa":
+		return true
+	default:
+		return false
+	}
+}

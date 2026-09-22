@@ -17,5 +17,6 @@ COPY --from=build /src/LICENSE /usr/share/licenses/uxplay/LICENSE
 COPY --from=build /src/ZOMBIE_UPSTREAM_COMMIT /usr/share/licenses/uxplay/COMMIT
 ENV HOME=/state GST_REGISTRY=/state/gstreamer-registry.bin
 COPY LICENSE NOTICE /usr/share/doc/zombiebox/
+COPY docs/licenses/DIAL-LICENSE /usr/share/doc/zombiebox/DIAL-LICENSE
 USER 65532:65532
 ENTRYPOINT ["zombie-worker"]

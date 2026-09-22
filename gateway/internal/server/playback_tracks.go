@@ -56,7 +56,7 @@ func (s *Server) sessionTracks(ctx context.Context, sess *session) (domain.Track
 	if err := ctx.Err(); err != nil {
 		return domain.TrackInventory{}, err
 	}
-	inventory := playback.Inventory(*metadata, sess.selection.AudioID)
+	inventory := playback.Inventory(playback.WithSubtitles(*metadata, sess.source), sess.selection.AudioID)
 	inventory.SubtitleID = sess.subtitleID
 	if sess.source.Path == "" && s.deps.RemoteSubtitles == nil {
 		for index := range inventory.Tracks {

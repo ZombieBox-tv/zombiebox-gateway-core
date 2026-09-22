@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -17,6 +18,33 @@ type trackMedia struct{ calls int }
 func (m *trackMedia) Probe(context.Context, string) (domain.Metadata, error) {
 	m.calls++
 	return domain.Metadata{Streams: []domain.Stream{{Index: 1, Type: "audio", Codec: "aac"}, {Index: 2, Type: "subtitle", Codec: "subrip"}, {Index: 3, Type: "subtitle", Codec: "hdmv_pgs_subtitle"}}}, nil
+}
+
+func TestProviderAttachmentsExposeOnlyOwnedSemanticTracks(t *testing.T) {
+	s := testServer(t, nil, "")
+	owner := pair(t, s, "attachment-owner")
+	other := pair(t, s, "attachment-other")
+	s.deps.RemoteMedia = &remoteTrackMedia{}
+	s.deps.RemoteSubtitles = &remoteTrackMedia{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.sessions["attachment"] = &session{device: "attachment-owner", ctx: ctx, cancel: cancel,
+		expires: time.Now().Add(time.Hour), metadata: &domain.Metadata{},
+		source: domain.Source{URL: "https://provider.test/video.mp4", MIME: "video/mp4", Subtitles: []domain.SubtitleSource{{URL: "https://provider.test/sub.srt", Headers: http.Header{"X-Plex-Token": {"private-secret"}}, Codec: "srt", Language: "es", Title: "Spanish"}}}}
+	for _, path := range []string{"tracks", "subtitles/1600000000"} {
+		response := call(s, "GET", "/v1/playback/attachment/"+path, "", "attachment-owner", owner, "")
+		if response.Code != 200 || strings.Contains(response.Body.String(), "provider.test") || strings.Contains(response.Body.String(), "private-secret") {
+			t.Fatalf("unexpected attachment response: %d %s", response.Code, response.Body)
+		}
+		response = call(s, "GET", "/v1/playback/attachment/"+path, "", "attachment-other", other, "")
+		if response.Code != 404 {
+			t.Fatal("attachment exposed across devices")
+		}
+	}
+	response := call(s, "GET", "/v1/playback/attachment/subtitles/1600000001", "", "attachment-owner", owner, "")
+	if response.Code != 409 {
+		t.Fatal("unowned attachment index accepted")
+	}
 }
 func (*trackMedia) Convert(context.Context, string, string, io.Writer) error { return nil }
 func (*trackMedia) ConvertSelected(context.Context, string, string, domain.MediaSelection, io.Writer) error {

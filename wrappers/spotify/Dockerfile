@@ -17,5 +17,6 @@ COPY --from=build /go-librespot /zombie-worker /usr/local/bin/
 COPY --from=build /upstream/LICENSE /usr/share/licenses/go-librespot/LICENSE
 COPY --from=build /upstream/ZOMBIE_UPSTREAM_COMMIT /usr/share/licenses/go-librespot/COMMIT
 COPY LICENSE NOTICE /usr/share/doc/zombiebox/
+COPY docs/licenses/DIAL-LICENSE /usr/share/doc/zombiebox/DIAL-LICENSE
 USER 65532:65532
 ENTRYPOINT ["zombie-worker"]

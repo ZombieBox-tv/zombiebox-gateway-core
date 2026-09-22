@@ -22,7 +22,8 @@ type plexNode struct {
 	Duration  int64  `xml:"duration,attr"`
 	Media     []struct {
 		Parts []struct {
-			Key string `xml:"key,attr"`
+			Key     string         `xml:"key,attr"`
+			Streams []plexSubtitle `xml:"Stream"`
 		} `xml:"Part"`
 	} `xml:"Media"`
 }
@@ -112,6 +113,7 @@ func (a *Adapters) browsePlex(ctx context.Context, c Config, parent, query strin
 				continue
 			}
 			source.URL, source.MIME, source.Item.Playable = base+key, "video/mp4", true
+			source.Subtitles = plexSubtitles(base, headers, node.Media[0].Parts[0].Streams)
 			if node.Type == "track" {
 				source.MIME = "audio/mpeg"
 			}

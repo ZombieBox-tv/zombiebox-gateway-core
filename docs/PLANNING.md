@@ -109,3 +109,8 @@ Product exit gates and deferred physical acceptance remain open.
 
 Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration.
 Product milestone completion still requires its recorded acceptance gates.
+
+
+## dev.37 implementation checkpoint
+
+Provider text subtitle attachments, bounded extraction and language planning; idempotent YouTube natural queue completion. Full/Edge share behavior; product and physical gates remain open.

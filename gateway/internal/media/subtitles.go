@@ -36,6 +36,9 @@ func (t *RemoteTools) SubtitlesRemote(ctx context.Context, source domain.Source,
 	if source.Live || source.AudioURL != "" {
 		return nil, errors.New("remote subtitles unavailable")
 	}
+	if index >= domain.ExternalSubtitleBase {
+		return t.attachmentSubtitles(ctx, source, index-domain.ExternalSubtitleBase)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	bridge, err := t.bridge(ctx, source)
