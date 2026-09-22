@@ -48,8 +48,8 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 			}
 			return playbackDecision{}, err
 		}
-		mode := playback.LocalMode(metadata, source.MIME, device.Capabilities, requested)
 		if source.AudioURL != "" {
+			mode := playback.LocalMode(metadata, source.MIME, device.Capabilities, requested)
 			if mode == "DIRECT_PLAY" {
 				for _, probe := range device.Capabilities.Probes {
 					if probe.ID == "http-fmp4" && probe.Status == "FAIL" {
@@ -61,8 +61,9 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 			if mode == "EXTERNAL_PLAYER" {
 				return playbackDecision{}, errors.New("adaptive media unsupported")
 			}
+			return playbackDecision{mode: mode, metadata: &metadata}, nil
 		}
-		return trackDecision(metadata, mode, source, device), nil
+		return trackDecision(metadata, requested, source, device), nil
 	}
 	if s.deps.Media == nil {
 		return playbackDecision{mode: "DIRECT_PLAY"}, nil
@@ -71,24 +72,20 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 	if err != nil {
 		return playbackDecision{}, err
 	}
-	return trackDecision(metadata, playback.LocalMode(metadata, source.MIME, device.Capabilities, requested), source, device), nil
+	return trackDecision(metadata, requested, source, device), nil
 }
 
-func trackDecision(metadata domain.Metadata, mode string, source domain.Source, device domain.Device) playbackDecision {
+func trackDecision(metadata domain.Metadata, requested string, source domain.Source, device domain.Device) playbackDecision {
+	mode := playback.LocalMode(metadata, source.MIME, device.Capabilities, requested)
 	decision := playbackDecision{mode: mode, metadata: &metadata}
 	// Split YouTube inputs and live streams have no stable single-input track IDs.
-	if source.Live || source.AudioURL != "" || mode == "EXTERNAL_PLAYER" {
+	if source.Live || source.AudioURL != "" {
 		return decision
 	}
 	decision.audioID, decision.subtitleID = playback.PreferredTracks(playback.WithSubtitles(metadata, source), device.Preferences)
-	if mode == "DIRECT_PLAY" && playback.RequiresAudioMapping(metadata, decision.audioID) {
-		decision.mode = "REMUX"
-		for _, probe := range device.Capabilities.Probes {
-			if probe.ID == "http-fmp4" && probe.Status == "FAIL" {
-				decision.mode = "EXTERNAL_PLAYER"
-				decision.audioID, decision.subtitleID = nil, nil
-			}
-		}
+	decision.mode = playback.PreferredAudioMode(metadata, source.MIME, device.Capabilities, requested, decision.audioID)
+	if decision.mode == "EXTERNAL_PLAYER" {
+		decision.audioID, decision.subtitleID = nil, nil
 	}
 	return decision
 }

@@ -137,3 +137,5 @@ Explicit bounded HTTP/UDP/RTSP endpoint diagnostics with injected dialing, cance
 ## dev.41 guide and audio selection increment
 
 Capability-aware explicit audio replacement: selected-stream policy, remux at zero, accurate resumed conversion, failed-output/absent-adapter rejection and preservation of the old session. See docs/audio-selection.md. Product and physical gates remain open.
+
+Dev.42: automatic VOD planning evaluates the preferred audio before codec policy, maps incompatible alternate tracks out through remux and preserves source inventory, failures and explicit modes. Local/remote/HLS/DASH planner fixtures and real selected-output coverage; no physical or product gate closes.

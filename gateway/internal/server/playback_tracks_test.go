@@ -206,12 +206,12 @@ func TestLanguageDecisionSelectsRequestedAudioAndHonorsFragmentFailure(t *testin
 	second.Index, second.Tags.Language = 2, "spa"
 	metadata := domain.Metadata{Streams: []domain.Stream{first, second}}
 	device := domain.Device{Preferences: domain.Preferences{AudioLanguages: []string{"es-MX"}, SubtitleMode: "off"}}
-	decision := trackDecision(metadata, "DIRECT_PLAY", domain.Source{}, device)
+	decision := trackDecision(metadata, "AUTO", domain.Source{}, device)
 	if decision.mode != "REMUX" || decision.audioID == nil || *decision.audioID != 2 {
 		t.Fatal(decision)
 	}
 	device.Capabilities.Probes = []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}
-	if decision := trackDecision(metadata, "DIRECT_PLAY", domain.Source{}, device); decision.mode != "EXTERNAL_PLAYER" || decision.audioID != nil {
+	if decision := trackDecision(metadata, "AUTO", domain.Source{}, device); decision.mode != "EXTERNAL_PLAYER" || decision.audioID != nil {
 		t.Fatal(decision)
 	}
 }

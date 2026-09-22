@@ -25,3 +25,21 @@ ownership and session preservation. Real FFmpeg fixtures decode the second audio
 track in both remux and transcode outputs and check resumed duration. Legacy media
 execution, additional manifest combinations and physical/account acceptance remain
 open. These are selection sub-items, not completion of the media work package.
+
+## Automatic initial choice (dev.42)
+
+For single-input VOD, language/default preferences are resolved before codec policy.
+An unused incompatible audio track no longer forces video conversion. Compatible
+selected media can remux; incompatible selected media still transcodes or falls
+back according to actual probe evidence. If removing alternate tracks is necessary,
+original progressive playback cannot bypass the mapping step. Fully compatible
+original input retains the existing direct-play policy. Explicit mode overrides,
+network caps, live and split-input restrictions are unchanged.
+
+The original stream inventory is retained for later track changes and diagnostics.
+Local and remote planner fixtures include clear VOD HLS/DASH, failed fragment/AAC
+probes, explicit conversion and live/split exclusion. A generated AC3-English /
+AAC-Spanish file verifies that the automatic Spanish choice produces one AAC audio
+track through remux, preserves the video profile and decodes the expected 880 Hz
+signal. Container language metadata is deliberately stripped by the existing media
+adapter, so it is not used as proof of selection. This is host evidence only.
