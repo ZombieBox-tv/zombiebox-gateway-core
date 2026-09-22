@@ -57,7 +57,7 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request, device doma
 		"limitations": []string{"Module state is not account or media acceptance.", "Absent functional probe evidence remains UNKNOWN.", "URLs, credentials, installation IDs, fingerprints, titles and session tickets are excluded."},
 	}
 	if hardware := device.Registration.Hardware; hardware != nil {
-		report["hardware"] = map[string]any{"cores": hardware.CPUCores, "physicalMb": hardware.PhysicalMB, "storageFreeMb": hardware.StorageFreeMB, "glesVersion": hardware.GLES, "network": hardware.Network, "gatewayLatencyMs": hardware.GatewayLatencyMS, "decoderCount": len(hardware.Decoders), "nativeDial": hardware.NativeDIAL, "multicast": hardware.Multicast}
+		report["hardware"] = map[string]any{"cores": hardware.CPUCores, "physicalMb": hardware.PhysicalMB, "storageFreeMb": hardware.StorageFreeMB, "glesVersion": hardware.GLES, "network": hardware.Network, "gatewayLatencyMs": hardware.GatewayLatencyMS, "decoderCount": len(hardware.Decoders), "encoderCount": len(hardware.Encoders), "decoders": hardware.Decoders, "encoders": hardware.Encoders, "displays": hardware.Displays, "inventoryLimited": hardware.InventoryLimited, "nativeDial": hardware.NativeDIAL, "multicast": hardware.Multicast}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	respond(w, 200, report)

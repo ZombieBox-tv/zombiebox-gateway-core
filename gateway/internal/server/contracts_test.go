@@ -133,7 +133,10 @@ func TestWireContracts(t *testing.T) {
 	s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}, "youtube_receiver": {Enabled: true, URL: "https://fixture.invalid", Token: strings.Repeat("t", 32)}})
 	call(s, "DELETE", "/v1/media-receiver", "", "contract-device", token, "")
 	samples["YouTubeReceiverState"] = call(s, "POST", "/v1/youtube/receiver", `{}`, "contract-device", token, "").Body.Bytes()
-	hardware, _ := json.Marshal(hardwareFixture())
+	inventory := hardwareFixture()
+	inventory.Encoders = []domain.CodecHint{{Name: "Declared encoder", Types: []string{"video/avc"}, Acceleration: "UNKNOWN", Profiles: []domain.CodecProfileHint{{MIME: "video/avc", Profile: 1, Level: 256}}}}
+	inventory.Displays = []domain.DisplayHint{{ID: 0, Default: true, Width: 1920, Height: 1080, RefreshMilliHz: 60000, ActiveModeID: 1, Modes: []domain.DisplayModeHint{{ID: 1, Width: 1920, Height: 1080, RefreshMilliHz: 60000}}}}
+	hardware, _ := json.Marshal(inventory)
 	samples["HardwareReport"] = call(s, "PUT", "/v1/device/hardware", string(hardware), "contract-device", token, "").Body.Bytes()
 	companionContractSamples(t, s, samples, "contract-device", token)
 	data, err := json.Marshal(samples)

@@ -60,3 +60,44 @@ func TestHardwareHintsCannotCertifyNativeBackends(t *testing.T) {
 		t.Fatal("unbounded decoder inventory")
 	}
 }
+
+func TestNativeInventoryRemainsDeclarativeAndBounded(t *testing.T) {
+	report := hardwareFixture()
+	report.Decoders = []domain.CodecHint{{Name: "OEM.decoder", Types: []string{"video/hevc"}, Acceleration: "HARDWARE", Profiles: []domain.CodecProfileHint{{MIME: "video/hevc", Profile: 1, Level: 1024}}}}
+	report.Encoders = []domain.CodecHint{{Name: "OEM.encoder", Types: []string{"video/avc"}, Acceleration: "UNKNOWN"}}
+	report.Displays = []domain.DisplayHint{{ID: 0, Default: true, Width: 3840, Height: 2160, RefreshMilliHz: 59940, ActiveModeID: 1, Modes: []domain.DisplayModeHint{{ID: 1, Width: 3840, Height: 2160, RefreshMilliHz: 59940}}}}
+	if !devices.ValidHardware(report) {
+		t.Fatal("valid native inventory rejected")
+	}
+	s := testServer(t, nil, "")
+	token := pair(t, s, "inventory-device")
+	raw, _ := json.Marshal(report)
+	if w := call(s, "PUT", "/v1/device/hardware", string(raw), "inventory-device", token, ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	var device domain.Device
+	_ = s.db.Get(t.Context(), "devices", "inventory-device", &device)
+	if len(device.Capabilities.Probes) != 0 {
+		t.Fatal("inventory manufactured playback evidence")
+	}
+	w := call(s, "GET", "/v1/diagnostics", "", "inventory-device", token, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"encoderCount":1`) || !strings.Contains(w.Body.String(), `"refreshMilliHz":59940`) {
+		t.Fatal(w.Body)
+	}
+	for _, mutate := range []func(*domain.HardwareReport){
+		func(r *domain.HardwareReport) { r.Encoders[0].ProbeCandidates = []string{"h264-2160-high"} },
+		func(r *domain.HardwareReport) { r.Decoders[0].Acceleration = "PASS" },
+		func(r *domain.HardwareReport) { r.Decoders[0].Profiles[0].MIME = "video/avc" },
+		func(r *domain.HardwareReport) { r.Displays[0].ActiveModeID = 99 },
+		func(r *domain.HardwareReport) { r.Displays[0].Modes[0].Width = 1920 },
+		func(r *domain.HardwareReport) { r.Displays[0].RefreshMilliHz = 480001 },
+		func(r *domain.HardwareReport) { r.Displays = append(r.Displays, r.Displays[0]) },
+	} {
+		var candidate domain.HardwareReport
+		_ = json.Unmarshal(raw, &candidate)
+		mutate(&candidate)
+		if devices.ValidHardware(candidate) {
+			t.Fatal("invalid inventory accepted", candidate)
+		}
+	}
+}

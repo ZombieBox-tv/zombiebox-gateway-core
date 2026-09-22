@@ -99,3 +99,8 @@ Product milestones and physical acceptance remain open.
 
 Bounded companion media uploads, private temporary storage, actual stream probing/planning, consented VOD handoff and cleanup. Shared by Full and Edge; no MediaMTX dependency for files.
 Product milestones and deferred physical gates remain open.
+
+## dev.31 increment
+
+Bounded declarative decoder/encoder profiles and display modes, strict inventory validation and privacy-scoped diagnostic export shared by Full/Edge. Inventory does not create successful probes or select an OEM backend.
+Product milestone and physical/public distribution gates remain open.
