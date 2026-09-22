@@ -16,6 +16,12 @@ import (
 	"zombiebox.local/gateway/internal/providers"
 )
 
+type castRequest struct {
+	ReceiverID      string `json:"receiverId"`
+	ReplaceExisting bool   `json:"replaceExisting"`
+	MaxVideoHeight  *int   `json:"maxVideoHeight,omitempty"`
+}
+
 type castSession struct {
 	preparing                                                  bool
 	replaceExisting                                            bool
@@ -47,15 +53,15 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 503, "relay_disabled")
 		return
 	}
-	var request struct {
-		ReceiverID      string `json:"receiverId"`
-		ReplaceExisting bool   `json:"replaceExisting"`
-		MaxVideoHeight  int    `json:"maxVideoHeight"`
-	}
+	var request castRequest
 	if !decode(w, r, &request) {
 		return
 	}
-	if request.MaxVideoHeight != 0 && request.MaxVideoHeight != 720 && request.MaxVideoHeight != 1080 {
+	maxHeight := 720
+	if request.MaxVideoHeight != nil {
+		maxHeight = *request.MaxVideoHeight
+	}
+	if maxHeight != 720 && maxHeight != 1080 {
 		fail(w, 400, "invalid_cast_video_limit")
 		return
 	}
@@ -81,7 +87,7 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 409, "receiver_busy")
 		return
 	}
-	video, err := playback.CastProfileForSender(receiver, request.MaxVideoHeight, time.Now())
+	video, err := playback.CastProfileForSender(receiver, maxHeight, time.Now())
 	if err != nil {
 		fail(w, 409, "receiver_media_unsupported")
 		return

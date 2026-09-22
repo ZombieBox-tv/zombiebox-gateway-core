@@ -157,7 +157,7 @@ func TestCastWireNegotiatesCeilingWithoutRaisingOldSenders(t *testing.T) {
 		status, height int
 	}{
 		{"", 201, 360}, {`,"maxVideoHeight":720`, 201, 360},
-		{`,"maxVideoHeight":1080`, 201, 1080}, {`,"maxVideoHeight":2160`, 400, 0},
+		{`,"maxVideoHeight":1080`, 201, 1080}, {`,"maxVideoHeight":2160`, 400, 0}, {`,"maxVideoHeight":0`, 400, 0},
 	} {
 		w := call(s, "POST", "/v1/cast", `{"receiverId":"receiver-ceiling"`+example.extra+`}`, "sender-ceiling", token, "")
 		if w.Code != example.status {
