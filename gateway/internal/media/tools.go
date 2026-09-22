@@ -75,6 +75,8 @@ func (t *Tools) probe(ctx context.Context, input string, remote bool, manifestKi
 	args := []string{"-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe", "-probesize", "8388608", "-analyzeduration", "5000000", "-show_entries", "stream=index,codec_type,codec_name,profile,level,width,height,pix_fmt,r_frame_rate,avg_frame_rate,codec_tag_string,color_transfer,color_primaries:stream_tags=language,title:stream_disposition=default,forced:format=format_name,duration,bit_rate", "-of", "json"}
 	if remote {
 		args = remoteArguments(args, manifestKind...)
+	} else {
+		args = localFormats(args)
 	}
 	args = append(args, input)
 	output := &boundedBuffer{limit: 1 << 20}
@@ -128,6 +130,8 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-max_alloc", "67108864", "-threads", "2", "-protocol_whitelist", "file,pipe"}
 	if remote {
 		args = remoteArguments(args, manifestKind...)
+	} else {
+		args = localFormats(args)
 	}
 	if mode == "REMUX" && selection.PositionMS > 0 {
 		return errors.New("accurate resume requires transcoding")
@@ -203,4 +207,11 @@ func remoteArguments(args []string, kind ...string) []string {
 		}
 	}
 	return append(args, "-protocol_whitelist", "http,tcp,pipe", "-format_whitelist", formats, "-http_proxy", "")
+}
+
+// Local media is a self-contained container. Playlists/concat files must never
+// turn an uploaded file into requests for other gateway paths or remote URLs.
+// Manifest adaptation has its own bounded graph in RemoteTools.
+func localFormats(args []string) []string {
+	return append(args, "-format_whitelist", "mov,matroska,webm,mp3,wav,flac,ogg,avi,mpeg,mpegts,aac,asf,flv,srt,webvtt,ass")
 }

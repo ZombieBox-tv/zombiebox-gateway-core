@@ -183,6 +183,13 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 404, "session_not_found")
 		return
 	}
+	if sess.castID != "" {
+		if c := s.casts[sess.castID]; c != nil && c.mediaID != "" && (p.State == "ENDED" || p.State == "STOPPED") {
+			s.endCastLocked(c)
+		}
+		respond(w, 200, map[string]string{"state": p.State})
+		return
+	}
 	if sess.source.Live {
 		respond(w, 200, map[string]string{"state": p.State})
 		return

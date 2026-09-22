@@ -24,6 +24,7 @@ type castRequest struct {
 }
 
 type castSession struct {
+	mediaID                                                    string
 	preparing                                                  bool
 	replaceExisting                                            bool
 	id, sender, receiver, publishToken, readToken, publisherID string
@@ -124,6 +125,10 @@ func (s *Server) castLease(w http.ResponseWriter, r *http.Request, d domain.Devi
 		fail(w, 404, "cast_not_found")
 		return
 	}
+	if c.mediaID != "" {
+		fail(w, 409, "media_has_no_sender_lease")
+		return
+	}
 	c.expires = time.Now().Add(90 * time.Second)
 	respond(w, 200, map[string]any{"state": "ACTIVE", "leaseSeconds": 90})
 }
@@ -135,6 +140,11 @@ func (s *Server) castReady(w http.ResponseWriter, r *http.Request, d domain.Devi
 	if c == nil || c.sender != d.ID || time.Now().After(c.expires) {
 		s.mu.Unlock()
 		fail(w, 404, "cast_not_found")
+		return
+	}
+	if c.mediaID != "" {
+		s.mu.Unlock()
+		fail(w, 409, "media_has_no_relay")
 		return
 	}
 	if c.plan != nil {
@@ -296,6 +306,9 @@ func (s *Server) relayAuth(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) endCastLocked(c *castSession) {
 	delete(s.casts, c.id)
+	if c.mediaID != "" && s.deps.Uploads != nil {
+		s.deps.Uploads.Remove(strings.TrimPrefix(c.sender, "companion-"), c.mediaID)
+	}
 	if c.plan != nil {
 		if session := s.sessions[c.plan.SessionID]; session != nil {
 			session.cancel()
@@ -331,6 +344,9 @@ func (s *Server) reapCasts() {
 		case <-s.done:
 			return
 		case <-ticker.C:
+			if s.deps.Uploads != nil {
+				s.deps.Uploads.Sweep()
+			}
 			s.mu.Lock()
 			for _, c := range s.casts {
 				if time.Now().After(c.expires) || time.Since(s.seen[c.receiver]) > 60*time.Second {

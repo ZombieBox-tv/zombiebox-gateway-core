@@ -165,7 +165,7 @@ func (s *Server) companionStatus(w http.ResponseWriter, r *http.Request, g compa
 	s.mu.Lock()
 	castOnline := time.Since(s.seen[g.TargetID]) < 45*time.Second
 	s.mu.Unlock()
-	respond(w, 200, map[string]any{"grant": g, "remoteOnline": online, "lastCommand": result, "castAvailable": s.opt.RelayURL != "" && target.Preferences.AllowCasting && castOnline})
+	respond(w, 200, map[string]any{"grant": g, "remoteOnline": online, "lastCommand": result, "mediaAvailable": s.deps.Uploads != nil && s.deps.Media != nil && target.Preferences.AllowCasting && castOnline, "castAvailable": s.opt.RelayURL != "" && target.Preferences.AllowCasting && castOnline})
 }
 func (s *Server) companionCommand(w http.ResponseWriter, r *http.Request, g companion.Grant) {
 	var input struct {
@@ -235,6 +235,9 @@ func (s *Server) companionCastOperation(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) revokeCompanionCasts(id string) {
+	if s.deps.Uploads != nil {
+		defer s.deps.Uploads.RemoveOwner(id)
+	}
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
 	s.mu.Lock()

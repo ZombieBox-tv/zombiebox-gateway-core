@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/artwork"
+	"zombiebox.local/gateway/internal/companionmedia"
 	providerconfig "zombiebox.local/gateway/internal/config"
 	"zombiebox.local/gateway/internal/discovery"
 	"zombiebox.local/gateway/internal/httpclient"
@@ -137,8 +138,19 @@ func main() {
 			artworkCache = disk
 		}
 	}
+	var uploads server.MediaUploads
+	if *enableMedia {
+		disk, uploadErr := companionmedia.New(filepath.Join(filepath.Dir(*state), "companion-media"))
+		if uploadErr != nil {
+			slog.Warn("phone media uploads unavailable")
+		} else {
+			uploads = disk
+			defer disk.Close()
+		}
+	}
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
 	deps := server.Dependencies{
+		Uploads:         uploads,
 		Reception:       adapters,
 		Browse:          adapters,
 		YouTubeReceiver: adapters,

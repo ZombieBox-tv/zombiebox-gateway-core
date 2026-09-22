@@ -12,6 +12,7 @@ import (
 
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
 
+	"zombiebox.local/gateway/internal/companionmedia"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/providers"
 )
@@ -177,4 +178,19 @@ func companionContractSamples(t *testing.T, s *Server, samples map[string]json.R
 	samples["CompanionCommand"] = command.Body.Bytes()
 	samples["CompanionPoll"] = call(s, "POST", "/v1/device/remote/poll", `{"active":true}`, id, token, "").Body.Bytes()
 	samples["CompanionStatus"] = call(s, "GET", "/v1/companion/status", "", body.Request.ID, body.Token, "").Body.Bytes()
+	uploads, err := companionmedia.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploads.Close()
+	s.deps.Uploads = uploads
+	s.deps.Media = &trackMedia{}
+	file := "\x00\x00\x00\x18ftypisomcontents"
+	uploaded := call(s, "PUT", "/v1/companion/media/"+strings.Repeat("d", 32), file, body.Request.ID, body.Token, "")
+	if uploaded.Code != 201 {
+		t.Fatal(uploaded.Code, uploaded.Body)
+	}
+	samples["CompanionMediaReceipt"] = uploaded.Body.Bytes()
+	samples["CompanionMediaPlay"] = json.RawMessage(`{"title":"My video"}`)
+	samples["CompanionMediaStatus"] = call(s, "GET", "/v1/companion/media", "", body.Request.ID, body.Token, "").Body.Bytes()
 }

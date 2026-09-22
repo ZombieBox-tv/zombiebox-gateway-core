@@ -84,3 +84,8 @@ Opt-in 1080p Cast grants require fresh advancing receiver H.264/HLS probes. Olde
 
 Explicit SCREEN/AUDIO Cast negotiation, AAC/HLS receiver policy, mode-aware audio plans and unchanged consent/lease/revocation boundaries. Shared by Full and Edge.
 Product milestones and physical acceptance remain open.
+
+## dev.30 increment
+
+Bounded companion media uploads, private temporary storage, actual stream probing/planning, consented VOD handoff and cleanup. Shared by Full and Edge; no MediaMTX dependency for files.
+Product milestones and deferred physical gates remain open.

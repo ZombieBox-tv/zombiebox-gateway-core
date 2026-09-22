@@ -61,6 +61,8 @@ func (t *Tools) subtitles(ctx context.Context, input string, index int, remote b
 	args := []string{"-nostdin", "-v", "error", "-max_alloc", "67108864", "-threads", "1", "-protocol_whitelist", "file,pipe"}
 	if remote {
 		args = remoteArguments(args, kind...)
+	} else {
+		args = localFormats(args)
 	}
 	args = append(args, "-i", input, "-map", "0:"+strconv.Itoa(index), "-c:s", "srt", "-f", "srt", "pipe:1")
 	output := &boundedBuffer{limit: 2 << 20}

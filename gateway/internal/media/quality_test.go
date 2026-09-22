@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"zombiebox.local/gateway/internal/domain"
@@ -29,6 +30,9 @@ func TestLowBandwidthProfileIsBoundedAndRejectsArbitraryInput(t *testing.T) {
 	flags := map[string]string{}
 	for i := 0; i+1 < len(runner.args); i++ {
 		flags[runner.args[i]] = runner.args[i+1]
+	}
+	if !strings.Contains(flags["-format_whitelist"], "matroska") || strings.Contains(flags["-format_whitelist"], "concat") || strings.Contains(flags["-format_whitelist"], "hls") {
+		t.Fatal("unsafe local demuxers", flags)
 	}
 	if flags["-b:v"] != "400k" || flags["-maxrate"] != "500k" || flags["-b:a"] != "64k" || flags["-threads"] != "2" {
 		t.Fatal(flags)

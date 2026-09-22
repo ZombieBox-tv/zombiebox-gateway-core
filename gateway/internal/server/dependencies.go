@@ -9,6 +9,7 @@ import (
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
 
 	"zombiebox.local/gateway/internal/catalog"
+	"zombiebox.local/gateway/internal/companionmedia"
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -69,7 +70,17 @@ type HTTPClient interface {
 
 // Dependencies are immutable after construction. Media and Artwork are optional.
 // Keep control requests and unbounded-duration streaming on separate transports.
+type MediaUploads interface {
+	Put(context.Context, string, string, int64, io.Reader) (companionmedia.Asset, error)
+	Get(string, string) (companionmedia.Asset, error)
+	Retain(string, string) error
+	Remove(string, string)
+	RemoveOwner(string)
+	Sweep()
+}
+
 type Dependencies struct {
+	Uploads         MediaUploads
 	RemoteSubtitles RemoteSubtitles
 	Reception       Reception
 	RemoteMedia     RemoteMedia

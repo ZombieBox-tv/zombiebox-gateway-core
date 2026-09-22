@@ -20,6 +20,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/companion/status", s.companionAuth(s.companionStatus))
 	s.mux.HandleFunc("POST /v1/companion/commands", s.companionAuth(s.companionCommand))
 	s.mux.HandleFunc("DELETE /v1/companion/session", s.companionAuth(s.companionForget))
+	s.mux.HandleFunc("GET /v1/companion/media", s.companionAuth(s.companionMediaStatus))
+	s.mux.HandleFunc("PUT /v1/companion/media/{media}", s.companionAuth(s.companionMediaUpload))
+	s.mux.HandleFunc("POST /v1/companion/media/{media}/play", s.companionAuth(s.companionMediaPlay))
+	s.mux.HandleFunc("DELETE /v1/companion/media/{media}", s.companionAuth(s.companionMediaDelete))
 	s.mux.HandleFunc("POST /v1/companion/cast", s.companionAuth(s.companionCast))
 	for _, pattern := range []string{"PUT /v1/companion/cast/{cast}", "DELETE /v1/companion/cast/{cast}", "POST /v1/companion/cast/{cast}/ready"} {
 		s.mux.HandleFunc(pattern, s.companionAuth(s.companionCastOperation))
