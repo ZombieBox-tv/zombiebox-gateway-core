@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +20,7 @@ import (
 	"zombiebox.local/gateway/internal/artwork"
 	"zombiebox.local/gateway/internal/companionmedia"
 	providerconfig "zombiebox.local/gateway/internal/config"
+	"zombiebox.local/gateway/internal/diagnostics"
 	"zombiebox.local/gateway/internal/discovery"
 	"zombiebox.local/gateway/internal/httpclient"
 	mediatools "zombiebox.local/gateway/internal/media"
@@ -46,7 +49,26 @@ func main() {
 	discoveryListen := flag.String("discovery-listen", "", "optional trusted LAN UDP discovery address, typically :8098")
 	discoveryPort := flag.Int("discovery-http-port", 8090, "client-visible HTTP port advertised by discovery")
 	discoveryOnly := flag.Bool("discovery-only", false, "run discovery only; no database, credentials or HTTP server")
+	diagnose := flag.String("diagnose-address", "", "probe one local IPv4 endpoint without loading state or credentials, then exit")
+	diagnoseHTTP := flag.Int("diagnose-http-port", 8090, "diagnostic HTTP health port")
+	diagnoseUDP := flag.Int("diagnose-discovery-port", 8098, "diagnostic unicast discovery port")
+	diagnoseRTSP := flag.Int("diagnose-rtsp-port", 8554, "diagnostic RTSP OPTIONS port")
 	flag.Parse()
+	if *diagnose != "" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		report, err := diagnostics.Probe(ctx, &net.Dialer{}, diagnostics.Target{
+			Address: *diagnose, HTTPPort: *diagnoseHTTP, DiscoveryPort: *diagnoseUDP, RTSPPort: *diagnoseRTSP,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		if json.NewEncoder(os.Stdout).Encode(report) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if *discoveryOnly {
 		if *discoveryListen == "" {
 			slog.Error("discovery-only requires discovery-listen")

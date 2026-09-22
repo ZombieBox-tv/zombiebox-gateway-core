@@ -127,3 +127,9 @@ Bounded public URL queues, continuous measured downgrade planning, universal rec
 ## dev.39 navigation increment
 
 Dev.39: server-owned Stremio search catalog continuations retain query scope and reach upstream skip pages. Wider provider navigation and other V1 packages remain open.
+
+## dev.40 reception and diagnostics increment
+
+Explicit bounded HTTP/UDP/RTSP endpoint diagnostics with injected dialing, cancellation and credential-free reports. Reachability never grants media/account capabilities. Product milestones remain open.
+
+[Endpoint diagnostic usage and limits](docs/endpoint-diagnostics.md).
