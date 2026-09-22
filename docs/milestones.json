@@ -24,7 +24,8 @@
     "Dev.29: Explicit SCREEN/AUDIO Cast negotiation, AAC/HLS receiver policy, mode-aware audio plans and unchanged consent/lease/revocation boundaries. Shared by Full and Edge. Product and physical gates remain open.",
     "Dev.30: Bounded companion media uploads, private temporary storage, actual stream probing/planning, consented VOD handoff and cleanup. Shared by Full and Edge; no MediaMTX dependency for files. Product and physical gates remain open.",
     "Dev.31: Bounded declarative decoder/encoder profiles and display modes, strict inventory validation and privacy-scoped diagnostic export shared by Full/Edge. Inventory does not create successful probes or select an OEM backend. Product gates remain open.",
-    "Dev.32: Phone Media now admits bounded AVI, FLV and ASF/WMV containers. Real host upload/probe/transcode tests produce H.264/AAC and revoke finished streams; this is not physical Android codec acceptance. Product gates remain open."
+    "Dev.32: Phone Media now admits bounded AVI, FLV and ASF/WMV containers. Real host upload/probe/transcode tests produce H.264/AAC and revoke finished streams; this is not physical Android codec acceptance. Product gates remain open.",
+    "Dev.34: Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance."
   ],
   "milestones": [
     {
@@ -98,5 +99,5 @@
       "remoteId": null
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.32"
+  "developmentCheckpoint": "v0.1.0-dev.34"
 }

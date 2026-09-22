@@ -24,6 +24,8 @@ type Service struct {
 	attempts     map[string]rate
 	queues       map[string][]Command
 	online       map[string]time.Time
+	present      map[string]time.Time
+	textInputs   map[string]string
 	results      map[string]Result
 	delivered    map[string]receipt
 	commandRates map[string]rate
@@ -42,6 +44,8 @@ func New(db Persistence, now func() time.Time, random func(int) string, publish 
 		attempts:     map[string]rate{},
 		queues:       map[string][]Command{},
 		online:       map[string]time.Time{},
+		present:      map[string]time.Time{},
+		textInputs:   map[string]string{},
 		results:      map[string]Result{},
 		delivered:    map[string]receipt{},
 		commandRates: map[string]rate{},
@@ -128,7 +132,7 @@ func (s *Service) Invite(ctx context.Context, target, name string) (Invitation, 
 	if code == "" {
 		return Invitation{}, ErrBusy
 	}
-	value := Invitation{ID: s.random(16), TargetID: target, TargetName: name, Secret: s.random(32), Code: code, Expires: s.now().Add(2 * time.Minute)}
+	value := Invitation{ID: s.random(16), TargetID: target, TargetName: name, Secret: s.random(32), Code: code, Expires: s.now().Add(5 * time.Minute), AutoApprove: true}
 	err = s.db.PutMany(ctx, domain.Record{Bucket: "companion-invitations", ID: value.ID, Value: value})
 	return value, err
 }
@@ -162,39 +166,72 @@ func (s *Service) Join(ctx context.Context, ip string, input Join) (Request, str
 	if len(records) >= 64 {
 		return Request{}, "", ErrBusy
 	}
-	var invitation Invitation
-	if input.InvitationID != "" {
-		if !validHex(input.InvitationID, 32) || !validHex(input.Secret, 64) || s.db.Get(ctx, "companion-invitations", input.InvitationID, &invitation) != nil || !equal(invitation.Secret, input.Secret) {
-			return Request{}, "", ErrDenied
-		}
-	} else {
-		if len(input.Code) != 6 {
-			return Request{}, "", ErrDenied
-		}
-		records, err := s.db.List(ctx, "companion-invitations")
-		if err != nil {
-			return Request{}, "", err
-		}
-		for _, raw := range records {
-			var item Invitation
-			if json.Unmarshal(raw, &item) == nil && equal(item.Code, input.Code) && s.now().Before(item.Expires) {
-				invitation = item
-				break
-			}
-		}
-	}
-	if invitation.ID == "" || invitation.Used || !s.now().Before(invitation.Expires) {
-		return Request{}, "", ErrExpired
-	}
-	token := s.random(32)
-	request := Request{ID: s.random(16), TargetID: invitation.TargetID, Name: name, Comparison: s.shortCode(), State: "PENDING", Expires: invitation.Expires, TokenHash: digest(token)}
-	invitation.Used = true
-	err = s.db.PutMany(ctx, domain.Record{Bucket: "companion-invitations", ID: invitation.ID, Value: invitation}, domain.Record{Bucket: "companion-requests", ID: request.ID, Value: request})
+	invitation, qrConsent, err := s.joinTarget(ctx, input)
 	if err != nil {
 		return Request{}, "", err
 	}
+	if input.ClientKey != "" && !validHex(input.ClientKey, 64) {
+		return Request{}, "", ErrInvalid
+	}
+	clientHash := ""
+	if input.ClientKey != "" {
+		clientHash = digest(input.ClientKey)
+	}
+	originHash := digest(ip)
+	if !qrConsent {
+		blocked, err := s.blocked(ctx, invitation.TargetID, clientHash, originHash)
+		if err != nil {
+			return Request{}, "", err
+		}
+		if blocked {
+			return Request{}, "", ErrDenied
+		}
+		count := 0
+		for _, raw := range records {
+			var old Request
+			if json.Unmarshal(raw, &old) != nil {
+				return Request{}, "", ErrInvalid
+			}
+			if old.TargetID == invitation.TargetID && old.State == "PENDING" {
+				if old.OriginHash == originHash || (clientHash != "" && old.ClientHash == clientHash) {
+					return Request{}, "", ErrBusy
+				}
+				count++
+			}
+		}
+		if count >= 4 {
+			return Request{}, "", ErrBusy
+		}
+	}
+	token := s.random(32)
+	expires := s.now().Add(2 * time.Minute)
+	if !invitation.Expires.IsZero() && invitation.Expires.Before(expires) {
+		expires = invitation.Expires
+	}
+	request := Request{ID: s.random(16), TargetID: invitation.TargetID, Name: name, Comparison: s.shortCode(), State: "PENDING", Expires: expires, TokenHash: digest(token), ClientHash: clientHash, OriginHash: originHash}
+	updates := []domain.Record{}
+	if invitation.ID != "" {
+		invitation.Used = true
+		updates = append(updates, domain.Record{Bucket: "companion-invitations", ID: invitation.ID, Value: invitation})
+	}
+	if qrConsent {
+		all, err := s.db.List(ctx, "companion-grants")
+		if err != nil {
+			return Request{}, "", err
+		}
+		if len(all) >= 128 {
+			return Request{}, "", ErrBusy
+		}
+		request.State = "APPROVED"
+		grant := Grant{ID: request.ID, TargetID: invitation.TargetID, TargetName: invitation.TargetName, Name: name, TokenHash: request.TokenHash, Created: s.now()}
+		updates = append(updates, domain.Record{Bucket: "companion-grants", ID: grant.ID, Value: grant})
+	}
+	updates = append(updates, domain.Record{Bucket: "companion-requests", ID: request.ID, Value: request})
+	if err := s.db.PutMany(ctx, updates...); err != nil {
+		return Request{}, "", err
+	}
 	s.publish(invitation.TargetID)
-	request.TokenHash = ""
+	request.TokenHash, request.ClientHash, request.OriginHash = "", "", ""
 	return request, token, nil
 }
 
@@ -208,7 +245,7 @@ func (s *Service) RequestStatus(ctx context.Context, id, token string) (Request,
 	if !s.now().Before(value.Expires) {
 		return Request{}, ErrExpired
 	}
-	value.TokenHash = ""
+	value.TokenHash, value.ClientHash, value.OriginHash = "", "", ""
 	return value, nil
 }
 
@@ -226,14 +263,14 @@ func (s *Service) Pending(ctx context.Context, target string) ([]Request, error)
 			return nil, ErrInvalid
 		}
 		if item.TargetID == target && item.State == "PENDING" && s.now().Before(item.Expires) {
-			item.TokenHash = ""
+			item.TokenHash, item.ClientHash, item.OriginHash = "", "", ""
 			out = append(out, item)
 		}
 	}
 	return out, nil
 }
 
-func (s *Service) Decide(ctx context.Context, target, name, id string, accept bool) error {
+func (s *Service) Decide(ctx context.Context, target, name, id string, accept bool, ignore24h ...bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var request Request
@@ -245,6 +282,13 @@ func (s *Service) Decide(ctx context.Context, target, name, id string, accept bo
 	}
 	request.State = "DENIED"
 	records := []domain.Record{}
+	if len(ignore24h) > 0 && ignore24h[0] && !accept {
+		blocks, err := s.blockRecords(ctx, request)
+		if err != nil {
+			return err
+		}
+		records = append(records, blocks...)
+	}
 	if accept {
 		all, err := s.db.List(ctx, "companion-grants")
 		if err != nil {

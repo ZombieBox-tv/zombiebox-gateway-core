@@ -25,13 +25,14 @@ type Persistence interface {
 }
 
 type Invitation struct {
-	ID         string    `json:"id"`
-	TargetID   string    `json:"targetId"`
-	TargetName string    `json:"targetName"`
-	Secret     string    `json:"secret"`
-	Code       string    `json:"code"`
-	Expires    time.Time `json:"expires"`
-	Used       bool      `json:"used"`
+	ID          string    `json:"id"`
+	TargetID    string    `json:"targetId"`
+	TargetName  string    `json:"targetName"`
+	Secret      string    `json:"secret"`
+	Code        string    `json:"code"`
+	Expires     time.Time `json:"expires"`
+	Used        bool      `json:"used"`
+	AutoApprove bool      `json:"autoApprove,omitempty"`
 }
 
 type Request struct {
@@ -42,7 +43,9 @@ type Request struct {
 	State      string    `json:"state"`
 	Expires    time.Time `json:"expires"`
 	// Only hashes are persisted. Secret is returned to the initiating phone once.
-	TokenHash string `json:"tokenHash,omitempty"`
+	TokenHash  string `json:"tokenHash,omitempty"`
+	ClientHash string `json:"clientHash,omitempty"`
+	OriginHash string `json:"originHash,omitempty"`
 }
 
 type Grant struct {
@@ -55,6 +58,8 @@ type Grant struct {
 }
 
 type Join struct {
+	TargetID     string `json:"targetId,omitempty"`
+	ClientKey    string `json:"clientKey,omitempty"`
 	InvitationID string `json:"invitationId"`
 	Secret       string `json:"secret"`
 	Code         string `json:"code"`
@@ -62,6 +67,8 @@ type Join struct {
 }
 
 type Command struct {
+	Text        string    `json:"text,omitempty"`
+	InputID     string    `json:"inputId,omitempty"`
 	ID          string    `json:"id"`
 	GrantID     string    `json:"-"`
 	Action      string    `json:"action"`

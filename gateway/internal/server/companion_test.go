@@ -155,3 +155,38 @@ func TestCompanionCastCannotChooseAnotherTargetAndRevokeRetiresLease(t *testing.
 		t.Fatal("revoked lease renewed")
 	}
 }
+
+func TestNetworkPairingAndTextRoutes(t *testing.T) {
+	s := testServer(t, nil, "")
+	id := "c3b32045-a431-457c-9ba0-32a5464f43ec"
+	tv := pair(t, s, id)
+	lease := strings.Repeat("e", 32)
+	w := call(s, "POST", "/v1/device/remote/poll", `{"active":true,"inputId":"`+lease+`"}`, id, tv, "")
+	if w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	w = call(s, "GET", "/v1/companion/targets", "", "", "", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), id) || strings.Contains(w.Body.String(), tv) {
+		t.Fatal(w.Code, w.Body)
+	}
+	w = call(s, "POST", "/v1/companion/join", `{"name":"Phone","targetId":"`+id+`","clientKey":"`+strings.Repeat("b", 64)+`"}`, "", "", "")
+	var result struct {
+		Request companion.Request
+		Token   string
+	}
+	if w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Request.State != "PENDING" {
+		t.Fatal(w.Code, w.Body)
+	}
+	w = call(s, "POST", "/v1/device/companions/"+result.Request.ID+"/decision", `{"accept":true}`, id, tv, "")
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	w = call(s, "POST", "/v1/companion/commands", `{"action":"TEXT","text":"movie night","inputId":"`+lease+`"}`, result.Request.ID, result.Token, "")
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body)
+	}
+	w = call(s, "POST", "/v1/device/remote/poll", `{"active":true,"inputId":"`+lease+`"}`, id, tv, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "movie night") {
+		t.Fatal(w.Code, w.Body)
+	}
+}

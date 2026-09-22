@@ -99,3 +99,8 @@ Product milestone and physical/public distribution gates remain open.
 
 Phone Media now admits bounded AVI, FLV and ASF/WMV containers. Real host upload/probe/transcode tests produce H.264/AAC and revoke finished streams; this is not physical Android codec acceptance.
 Product milestones, physical validation and public distribution remain open.
+
+## dev.34 implementation checkpoint
+
+Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance.
+Product exit gates and deferred physical acceptance remain open.

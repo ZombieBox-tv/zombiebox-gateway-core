@@ -53,7 +53,7 @@ func (s *Server) companionInvite(w http.ResponseWriter, r *http.Request, d domai
 		companionFailure(w, err)
 		return
 	}
-	payload := map[string]any{"version": 1, "gateway": strings.TrimRight(body.Gateway, "/"), "invitationId": invitation.ID, "secret": invitation.Secret}
+	payload := map[string]any{"version": 2, "gateway": strings.TrimRight(body.Gateway, "/"), "invitationId": invitation.ID, "secret": invitation.Secret}
 	raw, _ := json.Marshal(payload)
 	png, err := qrcode.Encode(string(raw), qrcode.Medium, 384)
 	if err != nil {
@@ -120,12 +120,13 @@ func (s *Server) companionPending(w http.ResponseWriter, r *http.Request, d doma
 }
 func (s *Server) companionDecision(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var input struct {
-		Accept bool `json:"accept"`
+		Accept    bool `json:"accept"`
+		Ignore24h bool `json:"ignore24h,omitempty"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	if err := s.companions.Decide(r.Context(), d.ID, deviceName(d), r.PathValue("request"), input.Accept); err != nil {
+	if err := s.companions.Decide(r.Context(), d.ID, deviceName(d), r.PathValue("request"), input.Accept, input.Ignore24h); err != nil {
 		companionFailure(w, err)
 		return
 	}
@@ -165,17 +166,27 @@ func (s *Server) companionStatus(w http.ResponseWriter, r *http.Request, g compa
 	s.mu.Lock()
 	castOnline := time.Since(s.seen[g.TargetID]) < 45*time.Second
 	s.mu.Unlock()
-	respond(w, 200, map[string]any{"grant": g, "remoteOnline": online, "lastCommand": result, "mediaAvailable": s.deps.Uploads != nil && s.deps.Media != nil && target.Preferences.AllowCasting && castOnline, "castAvailable": s.opt.RelayURL != "" && target.Preferences.AllowCasting && castOnline})
+	respond(w, 200, map[string]any{"grant": g, "remoteOnline": online, "textInputId": s.companions.TextInput(g.TargetID), "lastCommand": result, "mediaAvailable": s.deps.Uploads != nil && s.deps.Media != nil && target.Preferences.AllowCasting && castOnline, "castAvailable": s.opt.RelayURL != "" && target.Preferences.AllowCasting && castOnline})
 }
 func (s *Server) companionCommand(w http.ResponseWriter, r *http.Request, g companion.Grant) {
 	var input struct {
 		Action   string `json:"action"`
+		Text     string `json:"text,omitempty"`
+		InputID  string `json:"inputId,omitempty"`
 		Provider string `json:"provider"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	command, err := s.companions.Send(r.Context(), g, input.Action, input.Provider)
+	var command companion.Command
+	var err error
+	if input.Action == "TEXT" && input.Provider == "" {
+		command, err = s.companions.SendText(r.Context(), g, input.Text, input.InputID)
+	} else if input.Text != "" || input.InputID != "" {
+		err = companion.ErrInvalid
+	} else {
+		command, err = s.companions.Send(r.Context(), g, input.Action, input.Provider)
+	}
 	if err != nil {
 		companionFailure(w, err)
 		return
@@ -184,12 +195,13 @@ func (s *Server) companionCommand(w http.ResponseWriter, r *http.Request, g comp
 }
 func (s *Server) companionPoll(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var input struct {
-		Active bool `json:"active"`
+		Active  bool   `json:"active"`
+		InputID string `json:"inputId,omitempty"`
 	}
 	if !decode(w, r, &input) {
 		return
 	}
-	respond(w, 200, map[string]any{"commands": s.companions.Poll(r.Context(), d.ID, input.Active)})
+	respond(w, 200, map[string]any{"commands": s.companions.Poll(r.Context(), d.ID, input.Active, input.InputID)})
 }
 func (s *Server) companionAck(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var input companion.Result
@@ -247,4 +259,13 @@ func (s *Server) revokeCompanionCasts(id string) {
 			s.endCastLocked(cast)
 		}
 	}
+}
+
+func (s *Server) companionTargets(w http.ResponseWriter, r *http.Request) {
+	targets, err := s.companions.Targets(r.Context())
+	if err != nil {
+		companionFailure(w, err)
+		return
+	}
+	respond(w, 200, map[string]any{"targets": targets})
 }

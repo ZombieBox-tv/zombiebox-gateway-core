@@ -34,7 +34,7 @@ func accepted(t *testing.T, s *companion.Service) (companion.Grant, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, token, err := s.Join(ctx, "127.0.0.1", companion.Join{InvitationID: inv.ID, Secret: inv.Secret, Name: "Phone"})
+	request, token, err := s.Join(ctx, "127.0.0.1", companion.Join{Code: inv.Code, Name: "Phone"})
 	if err != nil {
 		t.Fatal(err)
 	}

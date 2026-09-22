@@ -3,6 +3,8 @@ package companion
 import (
 	"context"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type receipt struct {
@@ -30,9 +32,30 @@ func validCommand(action, provider string) bool {
 }
 
 func (s *Service) Send(ctx context.Context, grant Grant, action, provider string) (Command, error) {
+	return s.send(ctx, grant, action, provider, "", "")
+}
+func (s *Service) SendText(ctx context.Context, grant Grant, text, inputID string) (Command, error) {
+	return s.send(ctx, grant, "TEXT", "", text, inputID)
+}
+func validText(text string) bool {
+	if !utf8.ValidString(text) || len(text) == 0 || utf8.RuneCountInString(text) > 512 {
+		return false
+	}
+	for _, r := range text {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+func (s *Service) send(ctx context.Context, grant Grant, action, provider, text, inputID string) (Command, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !validCommand(action, provider) {
+	if action == "TEXT" {
+		if !validText(text) || !validHex(inputID, 32) || s.textInputs[grant.TargetID] != inputID {
+			return Command{}, ErrInvalid
+		}
+	} else if !validCommand(action, provider) {
 		return Command{}, ErrInvalid
 	}
 	if !s.Active(ctx, grant.ID, grant.TargetID) {
@@ -56,7 +79,7 @@ func (s *Service) Send(ctx context.Context, grant Grant, action, provider string
 	if len(queue) >= 16 {
 		return Command{}, ErrBusy
 	}
-	command := Command{ID: s.random(16), GrantID: grant.ID, Action: action, Provider: provider, Expires: s.now().Add(2 * time.Second), RemainingMS: 2000}
+	command := Command{Text: text, InputID: inputID, ID: s.random(16), GrantID: grant.ID, Action: action, Provider: provider, Expires: s.now().Add(2 * time.Second), RemainingMS: 2000}
 	s.queues[grant.TargetID] = append(queue, command)
 	s.results[grant.ID] = Result{ID: command.ID, Status: "QUEUED"}
 	s.publish(grant.TargetID)
@@ -92,10 +115,24 @@ func (s *Service) expire() {
 
 // Poll consumes commands at most once. Lost replies expire instead of replaying
 // playback toggles after reconnect. The target reports execution separately.
-func (s *Service) Poll(ctx context.Context, target string, active bool) []Command {
+func (s *Service) Poll(ctx context.Context, target string, active bool, inputID ...string) []Command {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if active && len(inputID) == 1 && validHex(inputID[0], 32) {
+		s.textInputs[target] = inputID[0]
+	} else {
+		delete(s.textInputs, target)
+	}
 	s.expire()
+	for id, seen := range s.present {
+		if s.now().Sub(seen) > 15*time.Second {
+			delete(s.present, id)
+			delete(s.textInputs, id)
+		}
+	}
+	if len(s.present) < 128 || !s.present[target].IsZero() {
+		s.present[target] = s.now()
+	}
 	if active {
 		s.online[target] = s.now()
 	} else {
@@ -144,4 +181,13 @@ func (s *Service) RemoteStatus(target, grant string) (bool, Result) {
 	defer s.mu.Unlock()
 	s.expire()
 	return s.now().Sub(s.online[target]) <= 5*time.Second, s.results[grant]
+}
+
+func (s *Service) TextInput(target string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.now().Sub(s.online[target]) > 5*time.Second {
+		return ""
+	}
+	return s.textInputs[target]
 }

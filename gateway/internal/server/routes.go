@@ -15,6 +15,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/device/remote/poll", s.auth(s.companionPoll))
 	s.mux.HandleFunc("POST /v1/device/remote/ack", s.auth(s.companionAck))
 	s.mux.HandleFunc("POST /v1/companion/join", s.companionJoin)
+	s.mux.HandleFunc("GET /v1/companion/targets", s.companionTargets)
 	s.mux.HandleFunc("POST /v1/companion/requests/{request}", s.companionRequest)
 	s.mux.HandleFunc("POST /v1/companion/proof", s.companionProof)
 	s.mux.HandleFunc("GET /v1/companion/status", s.companionAuth(s.companionStatus))
