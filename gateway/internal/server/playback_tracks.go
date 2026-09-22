@@ -56,13 +56,19 @@ func (s *Server) sessionTracks(ctx context.Context, sess *session) (domain.Track
 	if err := ctx.Err(); err != nil {
 		return domain.TrackInventory{}, err
 	}
+	// ownedMediaSession returns a request-local copy. Retain this probe for the
+	// selection decision without a second process or mutating the shared session.
+	sess.metadata = metadata
 	inventory := playback.Inventory(playback.WithSubtitles(*metadata, sess.source), sess.selection.AudioID)
 	inventory.SubtitleID = sess.subtitleID
-	if sess.source.Path == "" && s.deps.RemoteSubtitles == nil {
-		for index := range inventory.Tracks {
-			if inventory.Tracks[index].Kind == "subtitle" {
-				inventory.Tracks[index].Selectable = false
-			}
+	for index := range inventory.Tracks {
+		track := &inventory.Tracks[index]
+		if sess.source.Path != "" {
+			track.Selectable = track.Selectable && s.deps.Media != nil
+		} else if track.Kind == "audio" {
+			track.Selectable = track.Selectable && s.deps.RemoteMedia != nil && media.RemoteCandidate(sess.source)
+		} else {
+			track.Selectable = track.Selectable && s.deps.RemoteSubtitles != nil
 		}
 	}
 	return inventory, nil
@@ -163,6 +169,13 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 		fail(w, 409, "audio_track_unavailable")
 		return
 	}
+	selection := domain.MediaSelection{AudioID: request.AudioID, PositionMS: request.PositionMS, Quality: sess.selection.Quality}
+	mode := playback.SelectedAudioMode(*sess.metadata, sess.source.MIME, d.Capabilities, selection, sess.mode)
+	if mode == "EXTERNAL_PLAYER" {
+		fail(w, 409, "audio_track_unavailable")
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions[r.PathValue("session")] == nil || sess.ctx.Err() != nil {
@@ -175,11 +188,10 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 	}
 	id, ticket := randomID(16), randomID(24)
 	ctx, cancel := context.WithDeadline(context.Background(), sess.expires)
-	selection := domain.MediaSelection{AudioID: request.AudioID, PositionMS: request.PositionMS, Quality: sess.selection.Quality}
 	s.sessions[id] = &session{
 		networkAdaptation: sess.networkAdaptation,
 		adaptation:        sess.adaptation,
-		mode:              "TRANSCODE",
+		mode:              mode,
 		device:            d.ID,
 		ticket:            ticket,
 		expires:           sess.expires,
@@ -195,7 +207,7 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 		Version:          1,
 		SubtitleID:       sess.subtitleID,
 		SessionID:        id,
-		Mode:             "TRANSCODE",
+		Mode:             mode,
 		URL:              "/v1/streams/" + id + "?ticket=" + ticket,
 		MIME:             "video/mp4",
 		Seekable:         false,

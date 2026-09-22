@@ -215,3 +215,39 @@ func TestLanguageDecisionSelectsRequestedAudioAndHonorsFragmentFailure(t *testin
 		t.Fatal(decision)
 	}
 }
+
+func TestAudioSelectionRejectsFailedOutputWithoutReplacingSession(t *testing.T) {
+	s := testServer(t, nil, "")
+	adapter := &trackMedia{}
+	s.deps.Media = adapter
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s.sessions["original"] = &session{device: "owner", source: domain.Source{Path: "/private/movie.mkv"}, ctx: ctx, cancel: cancel, expires: time.Now().Add(time.Hour)}
+	request := httptest.NewRequest("POST", "/", strings.NewReader(`{"audioId":1,"positionMs":1000}`))
+	request.SetPathValue("session", "original")
+	response := httptest.NewRecorder()
+	s.selectAudio(response, request, domain.Device{ID: "owner", Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}}})
+	if response.Code != 409 || len(s.sessions) != 1 || ctx.Err() != nil || adapter.calls != 1 {
+		t.Fatalf("failed output changed playback: %d sessions=%d probes=%d", response.Code, len(s.sessions), adapter.calls)
+	}
+	request = httptest.NewRequest("POST", "/", strings.NewReader(`{"audioId":1,"positionMs":0}`))
+	request.SetPathValue("session", "original")
+	response = httptest.NewRecorder()
+	s.selectAudio(response, request, domain.Device{ID: "owner"})
+	var plan domain.Plan
+	if err := json.Unmarshal(response.Body.Bytes(), &plan); err != nil || response.Code != 201 || plan.Mode != "REMUX" || adapter.calls != 2 {
+		t.Fatalf("compatible selection: %d %s", response.Code, response.Body)
+	}
+	s.sessions[plan.SessionID].cancel()
+	delete(s.sessions, plan.SessionID)
+	// Cached metadata does not manufacture a conversion adapter.
+	s.sessions["original"].metadata = &domain.Metadata{Streams: []domain.Stream{{Index: 1, Type: "audio", Codec: "aac"}}}
+	s.deps.Media = nil
+	request = httptest.NewRequest("POST", "/", strings.NewReader(`{"audioId":1,"positionMs":0}`))
+	request.SetPathValue("session", "original")
+	response = httptest.NewRecorder()
+	s.selectAudio(response, request, domain.Device{ID: "owner"})
+	if response.Code != 409 || len(s.sessions) != 1 {
+		t.Fatal("missing adapter accepted")
+	}
+}

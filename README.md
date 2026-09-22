@@ -133,3 +133,7 @@ Dev.39: server-owned Stremio search catalog continuations retain query scope and
 Explicit bounded HTTP/UDP/RTSP endpoint diagnostics with injected dialing, cancellation and credential-free reports. Reachability never grants media/account capabilities. Product milestones remain open.
 
 [Endpoint diagnostic usage and limits](docs/endpoint-diagnostics.md).
+
+## dev.41 guide and audio selection increment
+
+Capability-aware explicit audio replacement: selected-stream policy, remux at zero, accurate resumed conversion, failed-output/absent-adapter rejection and preservation of the old session. See docs/audio-selection.md. Product and physical gates remain open.

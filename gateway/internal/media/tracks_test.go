@@ -62,44 +62,54 @@ func TestRealTrackSelectionAndSubtitleExtraction(t *testing.T) {
 	if err != nil || len(remoteCues) != 1 || remoteCues[0].Text != "Hello Zombie" {
 		t.Fatal("remote text extraction", remoteCues, err)
 	}
-	output := filepath.Join(folder, "selected.mp4")
-	file, err := os.Create(output)
-	if err != nil {
-		t.Fatal(err)
-	}
 	selected := 2
-	err = tools.ConvertSelected(ctx, input, "TRANSCODE", domain.MediaSelection{AudioID: &selected, PositionMS: 1000, Quality: "LOW"}, file)
-	file.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := tools.Probe(ctx, output)
-	if err != nil || len(result.Streams) != 2 || result.Streams[1].Codec != "aac" {
-		t.Fatalf("selected output: %+v %v", result, err)
-	}
-	if result.Streams[0].Width > 426 || result.Streams[0].Height > 240 {
-		t.Fatalf("low profile dimensions: %+v", result.Streams[0])
-	}
-	duration, _ := strconv.ParseFloat(result.Format.Duration, 64)
-	if duration < 1.8 || duration > 2.4 {
-		t.Fatalf("position was not preserved: %f", duration)
-	}
-	// Compare the decoded spectral peak, not container metadata, to prove the
-	// requested second audio stream is in the output rather than the first one.
-	pcm, err := exec.CommandContext(ctx, ffmpeg, "-v", "error", "-i", output, "-map", "0:a", "-t", "1", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	crossings := 0
-	var previous int16
-	for i := 0; i+1 < len(pcm); i += 2 {
-		sample := int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8)
-		if previous < 0 && sample >= 0 {
-			crossings++
+	for _, mode := range []string{"TRANSCODE", "REMUX"} {
+		selection := domain.MediaSelection{AudioID: &selected}
+		expectedDuration := 3.0
+		if mode == "TRANSCODE" {
+			selection.PositionMS, selection.Quality = 1000, "LOW"
+			expectedDuration = 2.0
 		}
-		previous = sample
+		output := filepath.Join(folder, mode+"-selected.mp4")
+		file, err := os.Create(output)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = tools.ConvertSelected(ctx, input, mode, selection, file)
+		file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := tools.Probe(ctx, output)
+		if err != nil || len(result.Streams) != 2 || result.Streams[1].Codec != "aac" {
+			t.Fatalf("selected output: %+v %v", result, err)
+		}
+		if mode == "TRANSCODE" && (result.Streams[0].Width > 426 || result.Streams[0].Height > 240) {
+			t.Fatalf("low profile dimensions: %+v", result.Streams[0])
+		}
+		duration, _ := strconv.ParseFloat(result.Format.Duration, 64)
+		if duration < expectedDuration-0.2 || duration > expectedDuration+0.4 {
+			t.Fatalf("position was not preserved: %f", duration)
+		}
+		// Compare the decoded spectral peak, not container metadata, to prove the
+		// requested second audio stream is in the output rather than the first one.
+		// Skip mux/codec startup padding before measuring a full second.
+		pcm, err := exec.CommandContext(ctx, ffmpeg, "-v", "error", "-i", output, "-ss", "0.5", "-map", "0:a", "-t", "1", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		crossings := 0
+		var previous int16
+		for i := 0; i+1 < len(pcm); i += 2 {
+			sample := int16(uint16(pcm[i]) | uint16(pcm[i+1])<<8)
+			if previous < 0 && sample >= 0 {
+				crossings++
+			}
+			previous = sample
+		}
+		if crossings < 800 || crossings > 960 {
+			t.Fatalf("%s wrong audio stream: %d crossings", mode, crossings)
+		}
 	}
-	if crossings < 800 || crossings > 960 {
-		t.Fatalf("wrong audio stream: %d crossings", crossings)
-	}
+
 }
