@@ -80,6 +80,7 @@ type MediaUploads interface {
 }
 
 type Dependencies struct {
+	PublicMediaHTTP HTTPClient
 	Uploads         MediaUploads
 	RemoteSubtitles RemoteSubtitles
 	Reception       Reception

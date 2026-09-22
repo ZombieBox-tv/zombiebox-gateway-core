@@ -79,13 +79,17 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 		if !decode(w, r, &request) {
 			return
 		}
-		if request.Provider != "spotify" && request.Provider != "airplay" && request.Provider != "auto" {
+		if request.Provider != "spotify" && request.Provider != "airplay" && request.Provider != "auto" && request.Provider != "universal" {
 			fail(w, 400, "invalid_provider")
 			return
 		}
 		s.receiverClaims.Lock()
 		defer s.receiverClaims.Unlock()
-		if s.receiverBusy(d.ID, "media") && !request.ReplaceExisting {
+		if request.Provider == "universal" && (!d.Preferences.AllowReceiverHandoff || !d.Preferences.AllowCasting) {
+			fail(w, 409, "receiver_handoff_disabled")
+			return
+		}
+		if request.Provider != "universal" && s.receiverBusy(d.ID, "media") && !request.ReplaceExisting {
 			fail(w, 409, "receiver_busy")
 			return
 		}
@@ -93,11 +97,15 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 			fail(w, 409, "receiver_busy")
 			return
 		}
-		s.retireReceivers(r.Context(), d.ID, "media")
+		if request.Provider != "universal" {
+			s.retireReceivers(r.Context(), d.ID, "media")
+		}
 		s.events.publish(d.ID, "receiver.changed", map[string]string{"transport": "media"})
 		respond(w, 200, map[string]any{"enabled": true, "provider": request.Provider})
 		return
 	}
+	s.receiverClaims.Lock()
+	defer s.receiverClaims.Unlock()
 	snapshot, err := s.mediaReceiverInbox.Snapshot(r.Context(), d.ID)
 	if err != nil {
 		if errors.Is(err, inbox.ErrBusy) || errors.Is(err, inbox.ErrChanged) {
@@ -106,6 +114,17 @@ func (s *Server) mediaReceiver(w http.ResponseWriter, r *http.Request, d domain.
 			fail(w, 502, "receiver_unavailable")
 		}
 		return
+	}
+	if snapshot.Provider == "universal" {
+		if !d.Preferences.AllowReceiverHandoff || !d.Preferences.AllowCasting {
+			s.mediaReceiverInbox.Release(d.ID)
+			s.youtubeReceiver.Revoke(r.Context(), d.ID)
+			fail(w, 409, "receiver_handoff_disabled")
+			return
+		}
+		if snapshot.Plan != nil && s.receiverHasPlayback(d.ID, "media") {
+			s.retireReceivers(r.Context(), d.ID, "media")
+		}
 	}
 	respond(w, 200, snapshot)
 }

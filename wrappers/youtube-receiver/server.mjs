@@ -67,7 +67,7 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
-    const match = req.url.match(/^\/receiver\/([a-f0-9]{32})(\/state)?$/);
+    const match = req.url.match(/^\/receiver\/([a-f0-9]{32})(\/state|\/suspend)?$/);
     if (!match || !receiver.active || receiver.id !== match[1]) {
       json(res, 404, { error: "receiver_not_found" });
       return;
@@ -77,7 +77,12 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, receiver.snapshot());
       return;
     }
-    if (req.method === "POST" && match[2]) {
+    if (req.method === "POST" && match[2] === "/suspend") {
+      receiver.suspend((await body(req)).epoch);
+      json(res, 200, { suspended: true });
+      return;
+    }
+    if (req.method === "POST" && match[2] === "/state") {
       const state = await body(req);
       receiver.acknowledge(state);
       json(res, 200, { accepted: true });

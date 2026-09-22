@@ -104,3 +104,8 @@ Product milestones, physical validation and public distribution remain open.
 
 Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance.
 Product exit gates and deferred physical acceptance remain open.
+
+## dev.35 checkpoint
+
+Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration.
+Product milestone completion still requires its recorded acceptance gates.

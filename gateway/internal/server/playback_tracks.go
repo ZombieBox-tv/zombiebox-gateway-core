@@ -177,17 +177,19 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 	ctx, cancel := context.WithDeadline(context.Background(), sess.expires)
 	selection := domain.MediaSelection{AudioID: request.AudioID, PositionMS: request.PositionMS, Quality: sess.selection.Quality}
 	s.sessions[id] = &session{
-		mode:       "TRANSCODE",
-		device:     d.ID,
-		ticket:     ticket,
-		expires:    sess.expires,
-		source:     sess.source,
-		metadata:   sess.metadata,
-		subtitleID: sess.subtitleID,
-		ctx:        ctx,
-		cancel:     cancel,
-		selection:  selection,
-		resources:  map[string]string{},
+		networkAdaptation: sess.networkAdaptation,
+		adaptation:        sess.adaptation,
+		mode:              "TRANSCODE",
+		device:            d.ID,
+		ticket:            ticket,
+		expires:           sess.expires,
+		source:            sess.source,
+		metadata:          sess.metadata,
+		subtitleID:        sess.subtitleID,
+		ctx:               ctx,
+		cancel:            cancel,
+		selection:         selection,
+		resources:         map[string]string{},
 	}
 	plan := domain.Plan{
 		Version:          1,

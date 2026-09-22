@@ -150,6 +150,7 @@ func main() {
 	}
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
 	deps := server.Dependencies{
+		PublicMediaHTTP: httpclient.PublicDownloads(),
 		Uploads:         uploads,
 		Reception:       adapters,
 		Browse:          adapters,

@@ -24,7 +24,7 @@ type selection struct {
 
 func (s *Service) read(ctx context.Context, provider string) map[string]observation {
 	providers := []string{provider}
-	if provider == "auto" {
+	if provider == "auto" || provider == "universal" {
 		providers = []string{"spotify", "airplay"}
 	}
 	result := make(map[string]observation, len(providers))
@@ -55,7 +55,7 @@ func (p *selection) choose(values map[string]observation) string {
 			delete(p.blocked, id)
 		}
 		active := value.source != nil && value.status.State == "PLAYING"
-		if active && p.blocked[id] != value.source.Item.ID && id != p.current && (!p.playing[id] || p.pending == id || p.current == "") {
+		if active && p.blocked[id] != "*" && p.blocked[id] != value.source.Item.ID && id != p.current && (!p.playing[id] || p.pending == id || p.current == "") {
 			candidate = id
 		}
 		p.playing[id] = active
@@ -65,7 +65,7 @@ func (p *selection) choose(values map[string]observation) string {
 	if candidate == "" && p.current != "" && current.err == nil && current.source == nil {
 		for _, id := range []string{"spotify", "airplay"} {
 			value := values[id]
-			if value.err == nil && value.source != nil && value.status.State == "PLAYING" && p.blocked[id] != value.source.Item.ID {
+			if value.err == nil && value.source != nil && value.status.State == "PLAYING" && p.blocked[id] != "*" && p.blocked[id] != value.source.Item.ID {
 				candidate = id
 			}
 		}

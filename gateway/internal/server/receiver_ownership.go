@@ -30,10 +30,18 @@ func (s *Server) receiverBusy(device, requested string) bool {
 // Never hold the session mutex across feature or private worker calls.
 func (s *Server) retireReceivers(ctx context.Context, device, keep string) {
 	if keep != "media" {
-		s.mediaReceiverInbox.Release(device)
+		if s.mediaReceiverInbox.Listening(device) {
+			s.mediaReceiverInbox.Standby(device)
+		} else {
+			s.mediaReceiverInbox.Release(device)
+		}
 	}
 	if keep != "youtube" {
-		s.youtubeReceiver.Revoke(ctx, device)
+		if s.mediaReceiverInbox.Listening(device) {
+			s.youtubeReceiver.Suspend(ctx, device)
+		} else {
+			s.youtubeReceiver.Revoke(ctx, device)
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -52,4 +60,20 @@ func (s *Server) retireReceivers(ctx context.Context, device, keep string) {
 			}
 		}
 	}
+}
+
+func (s *Server) receiverHasPlayback(device, requested string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.casts {
+		if requested != "cast" && c.receiver == device && c.plan != nil && time.Now().Before(c.expires) {
+			return true
+		}
+	}
+	for _, session := range s.sessions {
+		if requested != "youtube" && session.device == device && session.receiverID != "" && session.ctx.Err() == nil {
+			return true
+		}
+	}
+	return false
 }

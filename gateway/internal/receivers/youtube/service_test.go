@@ -43,3 +43,28 @@ func TestRevokedPollCannotResurrectSourceOrLease(t *testing.T) {
 		t.Fatal("revoked receiver resurrected")
 	}
 }
+
+type suspendBackend struct{ delayedBackend }
+
+func (b *suspendBackend) SuspendReceiver(context.Context, domain.Config, string, string) error {
+	return nil
+}
+
+func TestSuspendedListenerRetainsLeaseButFencesLatePlay(t *testing.T) {
+	backend := &suspendBackend{delayedBackend{make(chan struct{}), make(chan struct{})}}
+	service := New(backend, func(context.Context, string) domain.Config {
+		return domain.Config{Enabled: true, URL: "https://fixture.invalid"}
+	}, func() string { return "lease" })
+	service.Open(t.Context(), "device")
+	done := make(chan error, 1)
+	go func() { _, err := service.Poll(t.Context(), "device", "lease"); done <- err }()
+	<-backend.started
+	service.Suspend(t.Context(), "device")
+	close(backend.finish)
+	if err := <-done; err != ErrBusy {
+		t.Fatal("late pre-handoff command accepted", err)
+	}
+	if !service.Active("device") || service.Source("device", "youtube-abcdefghijk") != nil {
+		t.Fatal("lost listener or retained source")
+	}
+}

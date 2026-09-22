@@ -255,7 +255,9 @@ func (s *Server) activeCast(w http.ResponseWriter, r *http.Request, d domain.Dev
 			return
 		}
 	}
-	respond(w, 200, map[string]any{"plan": nil})
+	owner := s.mediaQueue.Owner()
+	preparing := owner != "" && s.companions.Active(r.Context(), owner, d.ID)
+	respond(w, 200, map[string]any{"plan": nil, "preparing": preparing})
 }
 func (s *Server) stopCast(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	s.receiverClaims.Lock()
@@ -306,6 +308,9 @@ func (s *Server) relayAuth(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) endCastLocked(c *castSession) {
 	delete(s.casts, c.id)
+	if c.mediaID != "" {
+		s.mediaQueue.Complete(strings.TrimPrefix(c.sender, "companion-"), c.mediaID, false)
+	}
 	if c.mediaID != "" && s.deps.Uploads != nil {
 		s.deps.Uploads.Remove(strings.TrimPrefix(c.sender, "companion-"), c.mediaID)
 	}

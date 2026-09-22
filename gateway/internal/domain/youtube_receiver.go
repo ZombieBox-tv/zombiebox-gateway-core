@@ -10,12 +10,14 @@ type ReceiverCommand struct {
 	Muted      bool   `json:"muted,omitempty"`
 }
 type YouTubeReceiverState struct {
+	Epoch      string           `json:"epoch,omitempty"`
 	ReceiverID string           `json:"receiverId"`
 	State      string           `json:"state"`
 	TVCode     string           `json:"tvCode"`
 	Command    *ReceiverCommand `json:"command"`
 }
 type ReceiverAcknowledgement struct {
+	Epoch      string `json:"epoch,omitempty"`
 	CommandID  string `json:"commandId"`
 	Success    bool   `json:"success"`
 	State      string `json:"state"`

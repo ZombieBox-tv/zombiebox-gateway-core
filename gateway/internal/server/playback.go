@@ -13,24 +13,27 @@ import (
 
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/media"
+	"zombiebox.local/gateway/internal/playback"
 	"zombiebox.local/gateway/internal/providers"
 )
 
 type session struct {
-	metadata      *domain.Metadata
-	subtitleID    *int
-	selection     domain.MediaSelection
-	mode          string
-	receiverID    string
-	castID        string
-	device        string
-	ticket        string
-	expires       time.Time
-	source        providers.Source
-	ctx           context.Context
-	cancel        context.CancelFunc
-	resources     map[string]string
-	resourceOrder []string
+	networkAdaptation bool
+	adaptation        playback.Adaptation
+	metadata          *domain.Metadata
+	subtitleID        *int
+	selection         domain.MediaSelection
+	mode              string
+	receiverID        string
+	castID            string
+	device            string
+	ticket            string
+	expires           time.Time
+	source            providers.Source
+	ctx               context.Context
+	cancel            context.CancelFunc
+	resources         map[string]string
+	resourceOrder     []string
 }
 
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
@@ -86,6 +89,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 404, "item_not_found")
 		return
 	}
+	receiverCommand := s.youtubeReceiver.SourceCommand(d.ID, req.ItemID)
 	resolved, err := s.deps.Resolver.Resolve(r.Context(), *found)
 	if err != nil {
 		fail(w, 502, "stream_unavailable")
@@ -113,9 +117,24 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
-	if receiverID != "" && s.youtubeReceiver.SourceLease(d.ID, req.ItemID) != receiverID {
+	if receiverID != "" && (s.youtubeReceiver.SourceLease(d.ID, req.ItemID) != receiverID || s.youtubeReceiver.SourceCommand(d.ID, req.ItemID) != receiverCommand) {
 		fail(w, 409, "receiver_changed")
 		return
+	}
+	if receiverID != "" && s.mediaReceiverInbox.Listening(d.ID) {
+		s.mu.Lock()
+		full := len(s.sessions) >= 64
+		s.mu.Unlock()
+		if full {
+			fail(w, 429, "session_limit")
+			return
+		}
+		var current domain.Device
+		if s.db.Get(r.Context(), "devices", d.ID, &current) != nil || !current.Preferences.AllowReceiverHandoff || !current.Preferences.AllowCasting {
+			fail(w, 409, "receiver_handoff_disabled")
+			return
+		}
+		s.retireReceivers(r.Context(), d.ID, "youtube")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,7 +152,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	ticket := randomID(24)
 	expires := time.Now().Add(6 * time.Hour)
 	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{receiverID: receiverID, mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	s.sessions[id] = &session{networkAdaptation: (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation), receiverID: receiverID, mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS
@@ -184,7 +203,10 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Devic
 		return
 	}
 	if sess.castID != "" {
-		if c := s.casts[sess.castID]; c != nil && c.mediaID != "" && (p.State == "ENDED" || p.State == "STOPPED") {
+		if c := s.casts[sess.castID]; c != nil && c.mediaID != "" && (p.State == "ENDED" || p.State == "STOPPED" || p.State == "FAILED") {
+			if p.State == "ENDED" {
+				s.mediaQueue.Complete(strings.TrimPrefix(c.sender, "companion-"), c.mediaID, true)
+			}
 			s.endCastLocked(c)
 		}
 		respond(w, 200, map[string]string{"state": p.State})
@@ -388,6 +410,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 // Deadlines apply to each upstream read, including a stalled media body.
 // Close cancels streams before the process drains its HTTP server.
 func (s *Server) Close() {
+	s.mediaQueue.Close()
 	s.mediaReceiverInbox.Close()
 	s.closeOnce.Do(func() { close(s.done) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

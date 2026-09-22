@@ -60,3 +60,7 @@ func (a *Adapters) AcknowledgeReceiver(ctx context.Context, c Config, id string,
 func (a *Adapters) CloseReceiver(ctx context.Context, c Config, id string) error {
 	return a.receiverCall(ctx, c, "DELETE", "/receiver/"+id, nil, nil)
 }
+
+func (a *Adapters) SuspendReceiver(ctx context.Context, c Config, id, epoch string) error {
+	return a.receiverCall(ctx, c, "POST", "/receiver/"+id+"/suspend", map[string]string{"epoch": epoch}, nil)
+}

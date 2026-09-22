@@ -30,11 +30,13 @@ type Backend interface {
 	CloseReceiver(context.Context, domain.Config, string) error
 }
 type lease struct {
-	id, device string
-	config     domain.Config
-	expires    time.Time
-	busy       bool
-	source     *domain.Source
+	id, device    string
+	epoch         string
+	sourceCommand string
+	config        domain.Config
+	expires       time.Time
+	busy          bool
+	source        *domain.Source
 }
 type Service struct {
 	mu      sync.Mutex
@@ -126,6 +128,12 @@ func (s *Service) Poll(ctx context.Context, device, id string) (domain.YouTubeRe
 	if s.owner != owner {
 		return empty, ErrNotFound
 	}
+	if state.Epoch != owner.epoch {
+		return empty, ErrBusy
+	}
+	if owner.source == nil && state.Command != nil && state.Command.Action != "play" {
+		state.Command = nil
+	}
 	owner.expires = time.Now().Add(45 * time.Second)
 	if command := state.Command; command != nil && command.Action == "play" {
 		config := s.config(ctx, "youtube")
@@ -145,6 +153,7 @@ func (s *Service) Poll(ctx context.Context, device, id string) (domain.YouTubeRe
 			MIME:    "application/x-zombie-youtube",
 		}
 		owner.source = &source
+		owner.sourceCommand = command.ID
 		command.ItemID = source.Item.ID
 	}
 	return state, nil
@@ -158,6 +167,14 @@ func (s *Service) Acknowledge(ctx context.Context, device, id string, state doma
 	if !ValidAcknowledgement(state) {
 		return ErrInvalid
 	}
+	s.mu.Lock()
+	state.Epoch = owner.epoch
+	if owner.source == nil {
+		state.CommandID = ""
+		state.State = "STOPPED"
+		state.PositionMS, state.DurationMS = 0, 0
+	}
+	s.mu.Unlock()
 	if s.backend.AcknowledgeReceiver(ctx, owner.config, id, state) != nil {
 		return ErrUnavailable
 	}
@@ -231,4 +248,49 @@ func (s *Service) SourceLease(device, item string) string {
 		return ""
 	}
 	return owner.id
+}
+
+// Suspend preserves discovery/TV Code only when the worker supports epoch fencing.
+// Old polls/acks cannot recreate media after another protocol takes the screen.
+func (s *Service) Suspend(ctx context.Context, device string) {
+	backend, ok := s.backend.(interface {
+		SuspendReceiver(context.Context, domain.Config, string, string) error
+	})
+	if !ok {
+		s.Revoke(ctx, device)
+		return
+	}
+	s.mu.Lock()
+	owner := s.owner
+	if owner == nil || owner.device != device {
+		s.mu.Unlock()
+		return
+	}
+	epoch := s.newID()
+	owner.epoch, owner.source = epoch, nil
+	owner.sourceCommand = ""
+	s.mu.Unlock()
+	request, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if backend.SuspendReceiver(request, owner.config, owner.id, epoch) != nil {
+		s.Revoke(ctx, device)
+	}
+}
+
+func (s *Service) CurrentID(device string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owner != nil && s.owner.device == device && time.Now().Before(s.owner.expires) {
+		return s.owner.id
+	}
+	return ""
+}
+
+func (s *Service) SourceCommand(device, item string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owner == nil || s.owner.device != device || s.owner.source == nil || s.owner.source.Item.ID != item || time.Now().After(s.owner.expires) {
+		return ""
+	}
+	return s.owner.sourceCommand
 }

@@ -98,3 +98,44 @@ func TestPlaybackAppliesNetworkQualityAndRespectsOverrides(t *testing.T) {
 		}
 	}
 }
+
+func TestContinuousAdaptationPreservesSessionUntilClientAdoption(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "Movie.mp4"), []byte("fixture"), 0600)
+	s := testServer(t, nil, dir)
+	s.deps.Media = &networkMedia{}
+	token := pair(t, s, "continuous-device")
+	sources, _ := providers.Local(dir)
+	body, _ := json.Marshal(map[string]any{"itemId": sources[0].Item.ID, "mode": "AUTO", "networkAdaptation": true})
+	w := call(s, "POST", "/v1/playback", string(body), "continuous-device", token, "")
+	var original domain.Plan
+	if w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &original) != nil {
+		t.Fatal(w.Code, w.Body)
+	}
+	now := time.Now()
+	s.networkSamples["continuous-device"] = networkSample{measured: now.Add(-time.Minute), kbps: 700}
+	route := "/v1/playback/" + original.SessionID + "/adapt"
+	w = call(s, "POST", route, `{"positionMs":20000}`, "continuous-device", token, "")
+	var result struct{ Plan *domain.Plan }
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if w.Code != 200 || result.Plan != nil {
+		t.Fatal("single sample switched", w.Body)
+	}
+	s.networkSamples["continuous-device"] = networkSample{measured: now, kbps: 700}
+	w = call(s, "POST", route, `{"positionMs":21000}`, "continuous-device", token, "")
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if w.Code != 200 || result.Plan == nil || result.Plan.TimelineOffsetMS != 21000 {
+		t.Fatal(w.Code, w.Body)
+	}
+	old := s.sessions[original.SessionID]
+	next := s.sessions[result.Plan.SessionID]
+	if old == nil || old.ctx.Err() != nil || next.selection.Quality != "LOW" || next.selection.AudioID != old.selection.AudioID {
+		t.Fatal("lost source or selection before adoption")
+	}
+	w = call(s, "POST", route, `{"positionMs":22000}`, "continuous-device", token, "")
+	result.Plan = nil
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Plan != nil {
+		t.Fatal("sample replay created replacement")
+	}
+}

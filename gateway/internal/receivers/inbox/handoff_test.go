@@ -78,3 +78,32 @@ func TestAutomaticHandoffDebouncesAndPreservesConfirmedSession(t *testing.T) {
 		}
 	}
 }
+
+func TestUniversalStandbyRetainsListeningWithoutReclaimingOldSender(t *testing.T) {
+	values := map[string]observation{"spotify": {source: &domain.Source{URL: "http://private/music", Item: domain.Item{ID: "music", Provider: "spotify"}}, status: domain.NowPlaying{State: "PLAYING"}}}
+	streams := &replaceSessions{}
+	service := New(backendFunc(func(_ context.Context, id string) (*domain.Source, domain.NowPlaying, error) {
+		v := values[id]
+		return v.source, v.status, v.err
+	}), streams)
+	service.Claim("tv", "universal")
+	first, err := service.Snapshot(t.Context(), "tv")
+	if err != nil || first.Plan == nil {
+		t.Fatal(first, err)
+	}
+	service.Standby("tv")
+	if !service.Listening("tv") {
+		t.Fatal("listener lost on handoff")
+	}
+	for range 3 {
+		next, err := service.Snapshot(t.Context(), "tv")
+		if err != nil || next.Plan != nil {
+			t.Fatal("old sender reclaimed screen", next, err)
+		}
+	}
+	values["airplay"] = observation{source: &domain.Source{URL: "http://private/airplay", Item: domain.Item{ID: "airplay", Provider: "airplay"}}, status: domain.NowPlaying{State: "PLAYING"}}
+	next, err := service.Snapshot(t.Context(), "tv")
+	if err != nil || next.Plan == nil || next.Plan.Item.Provider != "airplay" {
+		t.Fatal("new sender not received", next, err)
+	}
+}

@@ -3,7 +3,7 @@
   "repository": "zombiebox-gateway-core",
   "productRegistry": "workspace:docs/milestones.json",
   "notes": [
-    "Local component scope; product exit gates remain open. No hosted milestones exist.",
+    "Local component scope; product exit gates remain open. Hosted milestones are open; see remoteURL entries.",
     "Dev.10: shared local media tracks/text subtitles and client Home refinement. Cast consumes the protocol transport update. Product exit gates remain open.",
     "Dev.11: Hierarchical Plex/Jellyfin/Stremio browsing, progressive remote probing/conversion and paired YouTube adaptive mux; bounded injected adapters. Live/HLS adaptation and receiver completion remain open. Product exit gates remain open.",
     "Dev.12: Selected-client Spotify/AirPlay leases, fresh activity routing, owned controls and adaptive Cast encoder budgets. Account/OEM/physical gates remain open.",
@@ -25,7 +25,8 @@
     "Dev.30: Bounded companion media uploads, private temporary storage, actual stream probing/planning, consented VOD handoff and cleanup. Shared by Full and Edge; no MediaMTX dependency for files. Product and physical gates remain open.",
     "Dev.31: Bounded declarative decoder/encoder profiles and display modes, strict inventory validation and privacy-scoped diagnostic export shared by Full/Edge. Inventory does not create successful probes or select an OEM backend. Product gates remain open.",
     "Dev.32: Phone Media now admits bounded AVI, FLV and ASF/WMV containers. Real host upload/probe/transcode tests produce H.264/AAC and revoke finished streams; this is not physical Android codec acceptance. Product gates remain open.",
-    "Dev.34: Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance."
+    "Dev.34: Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance.",
+    "Dev.35: Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration."
   ],
   "milestones": [
     {
@@ -33,71 +34,82 @@
       "title": "Bootstrap / ADRs",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 1,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/1"
     },
     {
       "id": "M1",
       "title": "Handshake + Capability Scanner",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 2,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/2"
     },
     {
       "id": "M3",
       "title": "Media Capability Probes + Playback Planner",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 3,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/3"
     },
     {
       "id": "M4",
       "title": "Unified Media UI",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 4,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/4"
     },
     {
       "id": "M5",
       "title": "YouTube",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 5,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/5"
     },
     {
       "id": "M6",
       "title": "Spotify + AirPlay",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 6,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/6"
     },
     {
       "id": "M7",
       "title": "Android Mirror",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 7,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/7"
     },
     {
       "id": "M8",
       "title": "IPTV",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 8,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/8"
     },
     {
       "id": "M9",
       "title": "Rebrowser",
       "status": "in_progress",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 9,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/9"
     },
     {
       "id": "M11",
       "title": "Public beta",
       "status": "planned",
       "completedAt": null,
-      "remoteId": null
+      "remoteId": 10,
+      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/10"
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.34"
+  "developmentCheckpoint": "v0.1.0-dev.35",
+  "remote": "https://github.com/DiegoG0477/zombiebox-gateway-core"
 }

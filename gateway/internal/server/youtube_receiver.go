@@ -30,7 +30,19 @@ func (s *Server) startYouTubeReceiver(w http.ResponseWriter, r *http.Request, d 
 	}
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
-	if s.receiverBusy(d.ID, "youtube") && !request.ReplaceExisting {
+	listening := s.mediaReceiverInbox.Listening(d.ID) && d.Preferences.AllowReceiverHandoff
+	if listening {
+		if id := s.youtubeReceiver.CurrentID(d.ID); id != "" {
+			state, err := s.youtubeReceiver.Poll(r.Context(), d.ID, id)
+			if err != nil {
+				receiverError(w, err)
+				return
+			}
+			respond(w, 200, state)
+			return
+		}
+	}
+	if !listening && s.receiverBusy(d.ID, "youtube") && !request.ReplaceExisting {
 		fail(w, 409, "receiver_busy")
 		return
 	}
@@ -39,7 +51,9 @@ func (s *Server) startYouTubeReceiver(w http.ResponseWriter, r *http.Request, d 
 		receiverError(w, err)
 		return
 	}
-	s.retireReceivers(r.Context(), d.ID, "youtube")
+	if !listening {
+		s.retireReceivers(r.Context(), d.ID, "youtube")
+	}
 	s.events.publish(d.ID, "receiver.changed", map[string]string{"transport": "youtube"})
 	respond(w, 201, state)
 }

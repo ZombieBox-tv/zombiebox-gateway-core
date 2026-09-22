@@ -14,6 +14,7 @@ build:
 references:
 	python3 scripts/sync-upstreams.py
 wrappers-check:
+	npm ci --prefix wrappers/youtube-receiver --ignore-scripts --no-audit --no-fund
 	npm ci --prefix wrappers/youtube --ignore-scripts --no-audit --no-fund
 	node --test wrappers/youtube/*.test.mjs wrappers/youtube-receiver/*.test.mjs
 

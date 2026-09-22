@@ -247,6 +247,7 @@ func (s *Server) companionCastOperation(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) revokeCompanionCasts(id string) {
+	s.mediaQueue.Cancel(id)
 	if s.deps.Uploads != nil {
 		defer s.deps.Uploads.RemoveOwner(id)
 	}

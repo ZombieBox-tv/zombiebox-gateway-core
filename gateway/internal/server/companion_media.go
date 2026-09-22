@@ -69,37 +69,46 @@ func (s *Server) companionMediaPlay(w http.ResponseWriter, r *http.Request, g co
 	if title == "" {
 		title = "Shared media"
 	}
+	if s.mediaQueue.Busy() {
+		fail(w, 409, "media_queue_active")
+		return
+	}
+	status, state := s.startCompanionMedia(r.Context(), g, r.PathValue("media"), title)
+	if status != 200 {
+		fail(w, status, state)
+		return
+	}
+	respond(w, 200, map[string]string{"mediaId": r.PathValue("media"), "state": state})
+}
+
+// Serialized preparation is shared by single files and the gateway-owned URL queue.
+func (s *Server) startCompanionMedia(ctx context.Context, g companion.Grant, mediaID, title string) (int, string) {
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
 	// Idempotent start: a lost HTTP response must not allocate a second session.
 	s.mu.Lock()
 	for _, c := range s.casts {
-		if c.mediaID == r.PathValue("media") && c.sender == "companion-"+g.ID && c.plan != nil && time.Now().Before(c.expires) {
+		if c.mediaID == mediaID && c.sender == "companion-"+g.ID && c.plan != nil && time.Now().Before(c.expires) {
 			s.mu.Unlock()
-			respond(w, 200, map[string]string{"mediaId": c.mediaID, "state": "ACCEPTED"})
-			return
+			return 200, "ACCEPTED"
 		}
 	}
 	s.mu.Unlock()
-	asset, err := s.deps.Uploads.Get(g.ID, r.PathValue("media"))
+	asset, err := s.deps.Uploads.Get(g.ID, mediaID)
 	if err != nil {
-		fail(w, 404, "media_not_found")
-		return
+		return 404, "media_not_found"
 	}
-	if !s.companions.Active(r.Context(), g.ID, g.TargetID) {
-		fail(w, 403, "companion_revoked")
-		return
+	if !s.companions.Active(ctx, g.ID, g.TargetID) {
+		return 403, "companion_revoked"
 	}
 	var target domain.Device
-	if s.db.Get(r.Context(), "devices", g.TargetID, &target) != nil || !target.Preferences.AllowCasting {
-		fail(w, 409, "receiver_unavailable")
-		return
+	if s.db.Get(ctx, "devices", g.TargetID, &target) != nil || !target.Preferences.AllowCasting {
+		return 409, "receiver_unavailable"
 	}
 	source := domain.Source{Path: asset.Path, MIME: asset.MIME, Item: domain.Item{ID: "phone-" + asset.ID, Provider: "android_mirror", Kind: asset.Kind, Title: title, Playable: true}}
-	decision, err := s.playbackMode(r.Context(), source, target, "AUTO")
+	decision, err := s.playbackMode(ctx, source, target, "AUTO")
 	if err != nil || decision.metadata == nil || len(decision.metadata.Streams) == 0 {
-		fail(w, 422, "media_probe_failed")
-		return
+		return 422, "media_probe_failed"
 	}
 	audio, video := false, false
 	for _, stream := range decision.metadata.Streams {
@@ -107,8 +116,7 @@ func (s *Server) companionMediaPlay(w http.ResponseWriter, r *http.Request, g co
 		video = video || stream.Type == "video"
 	}
 	if !audio && !video || decision.mode == "EXTERNAL_PLAYER" {
-		fail(w, 422, "media_unsupported")
-		return
+		return 422, "media_unsupported"
 	}
 	if !video {
 		source.Item.Kind = "audio"
@@ -125,25 +133,22 @@ func (s *Server) companionMediaPlay(w http.ResponseWriter, r *http.Request, g co
 	}
 	busy := s.receiverBusy(target.ID, "cast")
 	// Consent/settings may change while FFprobe was running; use current values.
-	if s.db.Get(r.Context(), "devices", g.TargetID, &target) != nil || !target.Preferences.AllowCasting || (busy && !target.Preferences.AllowReceiverHandoff) || !s.companions.Active(r.Context(), g.ID, g.TargetID) || r.Context().Err() != nil {
-		fail(w, 409, "receiver_unavailable")
-		return
+	if s.db.Get(ctx, "devices", g.TargetID, &target) != nil || !target.Preferences.AllowCasting || (busy && !target.Preferences.AllowReceiverHandoff) || !s.companions.Active(ctx, g.ID, g.TargetID) || ctx.Err() != nil {
+		return 409, "receiver_unavailable"
 	}
 	s.mu.Lock()
 	if time.Since(s.seen[target.ID]) > 45*time.Second || len(s.casts) > 0 || len(s.sessions) >= 64 {
 		s.mu.Unlock()
-		fail(w, 409, "receiver_busy")
-		return
+		return 409, "receiver_busy"
 	}
 	if s.deps.Uploads.Retain(g.ID, asset.ID) != nil {
 		s.mu.Unlock()
-		fail(w, 404, "media_not_found")
-		return
+		return 404, "media_not_found"
 	}
 	id, ticket, castID := randomID(16), randomID(24), randomID(16)
 	expires := time.Now().Add(6 * time.Hour)
-	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{device: target.ID, castID: castID, ticket: ticket, source: source, mode: decision.mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: quality}, expires: expires, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	sessionCtx, cancel := context.WithDeadline(context.Background(), expires)
+	s.sessions[id] = &session{device: target.ID, castID: castID, ticket: ticket, source: source, mode: decision.mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: quality}, expires: expires, ctx: sessionCtx, cancel: cancel, resources: map[string]string{}}
 	plan := &domain.Plan{Version: 1, SessionID: id, Mode: decision.mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: source.MIME, Seekable: true, Item: source.Item, SubtitleID: decision.subtitleID}
 	if decision.mode == "REMUX" || decision.mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
@@ -152,19 +157,18 @@ func (s *Server) companionMediaPlay(w http.ResponseWriter, r *http.Request, g co
 	c := &castSession{id: castID, mediaID: asset.ID, mode: "MEDIA", sender: "companion-" + g.ID, receiver: target.ID, expires: expires}
 	s.casts[castID] = c
 	s.mu.Unlock()
-	s.retireReceivers(r.Context(), target.ID, "cast")
+	s.retireReceivers(ctx, target.ID, "cast")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.casts[castID] != c {
 		cancel()
 		delete(s.sessions, id)
-		fail(w, 409, "receiver_changed")
-		return
+		return 409, "receiver_changed"
 	}
 	c.plan = plan
 	s.events.publish(target.ID, "receiver.changed", map[string]string{"transport": "cast"})
 	s.events.publish(target.ID, "cast.started", plan)
-	respond(w, 200, map[string]string{"mediaId": asset.ID, "state": "ACCEPTED"})
+	return 200, "ACCEPTED"
 }
 func (s *Server) companionMediaDelete(w http.ResponseWriter, r *http.Request, g companion.Grant) {
 	s.receiverClaims.Lock()

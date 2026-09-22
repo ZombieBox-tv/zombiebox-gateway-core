@@ -99,3 +99,62 @@ func TestReceiverRejectsInvalidCommands(t *testing.T) {
 		}
 	}
 }
+
+type listeningReceiverFixture struct{ receiverFixture }
+
+func (f *listeningReceiverFixture) SuspendReceiver(_ context.Context, _ domain.Config, _ string, epoch string) error {
+	f.state.Epoch = epoch
+	f.state.Command = nil
+	return nil
+}
+
+func TestUniversalReceptionKeepsDiscoveryButRetiresOldPlayback(t *testing.T) {
+	s := testServer(t, nil, "")
+	defer s.Close()
+	fixture := &listeningReceiverFixture{receiverFixture{state: domain.YouTubeReceiverState{State: "READY", TVCode: "123 456 789"}}}
+	s.deps.YouTubeReceiver = fixture
+	s.youtubeReceiver = youtubereceiver.New(fixture, s.config, func() string { return randomID(16) })
+	s.deps.Resolver = receiverResolver{}
+	s.SeedProviders(t.Context(), map[string]domain.Config{
+		"youtube": {Enabled: true}, "youtube_receiver": {Enabled: true, URL: "https://worker.invalid", Token: strings.Repeat("private", 6)},
+	})
+	token := pair(t, s, "universal-tv")
+	request := func(method, path, body string, want int) string {
+		t.Helper()
+		w := call(s, method, path, body, "universal-tv", token, "")
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body)
+		}
+		return w.Body.String()
+	}
+	request("PUT", "/v1/device/preferences", `{"mode":"TV","uiLanguage":"en","subtitleMode":"auto","allowCasting":true,"allowReceiverHandoff":true}`, 200)
+	request("PUT", "/v1/media-receiver", `{"provider":"universal"}`, 200)
+	var state domain.YouTubeReceiverState
+	json.Unmarshal([]byte(request("POST", "/v1/youtube/receiver", `{}`, 201)), &state)
+	path := "/v1/youtube/receiver/" + state.ReceiverID
+	fixture.state.Command = &domain.ReceiverCommand{ID: strings.Repeat("a", 32), Action: "play", VideoID: "abcdefghijk"}
+	request("GET", path, "", 200)
+	var plan domain.Plan
+	json.Unmarshal([]byte(request("POST", "/v1/playback", `{"itemId":"youtube-abcdefghijk"}`, 201)), &plan)
+	s.receiverClaims.Lock()
+	s.retireReceivers(t.Context(), "universal-tv", "cast")
+	s.receiverClaims.Unlock()
+	if fixture.closed || !s.mediaReceiverInbox.Listening("universal-tv") || !s.youtubeReceiver.Active("universal-tv") {
+		t.Fatal("handoff stopped discovery")
+	}
+	if s.youTubeReceiverSource("universal-tv", "youtube-abcdefghijk") != nil {
+		t.Fatal("old source retained")
+	}
+	if w := call(s, "GET", plan.URL, "", "", "", ""); w.Code != 401 {
+		t.Fatal("old stream usable", w.Code)
+	}
+	request("GET", path, "", 200)
+	fixture.state.Command = &domain.ReceiverCommand{ID: strings.Repeat("b", 32), Action: "play", VideoID: "abcdefghijk"}
+	request("GET", path, "", 200)
+	request("POST", "/v1/playback", `{"itemId":"youtube-abcdefghijk"}`, 201)
+	request("PUT", "/v1/device/preferences", `{"mode":"TV","uiLanguage":"en","subtitleMode":"auto","allowCasting":false,"allowReceiverHandoff":false}`, 200)
+	request("GET", "/v1/media-receiver", "", 409)
+	if s.youtubeReceiver.Active("universal-tv") {
+		t.Fatal("disabled listener retained")
+	}
+}

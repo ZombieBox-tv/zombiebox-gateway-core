@@ -56,6 +56,7 @@ export class Receiver {
       player,
       receiver,
       touched: Date.now(),
+      epoch: "",
       tvCode: "",
       state: "STARTING",
     };
@@ -89,13 +90,31 @@ export class Receiver {
   snapshot() {
     return {
       receiverId: this.session.id,
+      epoch: this.session.epoch,
       state: this.session.state,
       tvCode: this.session.tvCode,
       command: this.session.bridge.pending?.command || null,
     };
   }
 
+  suspend(epoch) {
+    if (!/^[a-f0-9]{32}$/.test(epoch)) throw Error("invalid_epoch");
+    this.session.epoch = epoch;
+    this.session.bridge.finish(false);
+    this.acknowledge({
+      epoch,
+      commandId: "",
+      success: false,
+      state: "STOPPED",
+      positionMs: 0,
+      durationMs: 0,
+      volume: this.session.bridge.state.volume,
+      muted: this.session.bridge.state.muted,
+    });
+  }
+
   acknowledge(state) {
+    if ((state.epoch || "") !== this.session.epoch) throw Error("stale_epoch");
     this.session.bridge.acknowledge(state);
     // Command methods notify upstream after their promises resolve. Heartbeats
     // additionally propagate local remote-control changes and natural completion.

@@ -73,7 +73,7 @@ func (s *Service) Owned(owner string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.expire()
-	return s.owner == owner && (s.provider == "spotify" || (s.provider == "auto" && s.selection.current == "spotify"))
+	return s.owner == owner && (s.provider == "spotify" || ((s.provider == "auto" || s.provider == "universal") && s.selection.current == "spotify"))
 }
 
 func (s *Service) Release(owner string) {
@@ -90,7 +90,7 @@ func (s *Service) Dismiss(owner, session string) bool {
 	defer s.mu.Unlock()
 	if s.owner == owner && s.plan != nil && s.plan.SessionID == session {
 		s.blocked = s.plan.Item.ID
-		if s.provider == "auto" && s.selection.blocked != nil {
+		if (s.provider == "auto" || s.provider == "universal") && s.selection.blocked != nil {
 			s.selection.blocked[s.selection.current] = s.plan.Item.ID
 		}
 		s.stopPlan()
@@ -133,7 +133,7 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 	}
 	s.cancel = nil
 	selected := provider
-	if provider == "auto" {
+	if provider == "auto" || provider == "universal" {
 		selected = s.selection.choose(values)
 	}
 	value := values[selected]
@@ -171,7 +171,7 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 			s.sourceKey = key
 		}
 		s.plan.Item = source.Item
-		if provider == "auto" {
+		if provider == "auto" || provider == "universal" {
 			s.selection.current = selected
 		}
 	}
@@ -213,4 +213,36 @@ func (s *Service) clear() {
 	s.stopPlan()
 	s.owner, s.provider, s.blocked = "", "", ""
 	s.selection = selection{}
+}
+
+// Listening retains the explicit universal arm independently of playback ownership.
+func (s *Service) Listening(owner string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expire()
+	return s.owner == owner && s.provider == "universal"
+}
+
+func (s *Service) Standby(owner string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owner != owner || s.provider != "universal" {
+		return
+	}
+	s.generation++
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+	}
+	if s.selection.blocked == nil {
+		s.selection.blocked = map[string]string{}
+	}
+	for _, provider := range []string{"spotify", "airplay"} {
+		playing, known := s.selection.playing[provider]
+		if playing || !known {
+			s.selection.blocked[provider] = "*"
+		}
+	}
+	s.stopPlan()
+	s.selection.current, s.selection.pending = "", ""
 }

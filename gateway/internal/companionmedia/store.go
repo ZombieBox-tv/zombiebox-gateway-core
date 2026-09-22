@@ -53,7 +53,19 @@ func New(root string) (*Store, error) {
 }
 
 func (s *Store) Put(ctx context.Context, owner, id string, size int64, input io.Reader) (Asset, error) {
-	if !ID.MatchString(id) || size < 1 || size > MaxBytes {
+	if size < 1 {
+		return Asset{}, ErrInvalid
+	}
+	return s.put(ctx, owner, id, size, input)
+}
+
+// PutStream admits an unknown Content-Length only for the bounded URL downloader.
+func (s *Store) PutStream(ctx context.Context, owner, id string, input io.Reader) (Asset, error) {
+	return s.put(ctx, owner, id, -1, input)
+}
+
+func (s *Store) put(ctx context.Context, owner, id string, size int64, input io.Reader) (Asset, error) {
+	if !ID.MatchString(id) || (size < 1 && size != -1) || size > MaxBytes {
 		return Asset{}, ErrInvalid
 	}
 	s.mu.Lock()
@@ -79,8 +91,15 @@ func (s *Store) Put(ctx context.Context, owner, id string, size int64, input io.
 		return Asset{}, err
 	}
 	defer f.Close()
-	prefix := make([]byte, min(size, 512))
-	if _, err = io.ReadFull(input, prefix); err != nil {
+	limit := size
+	if size == -1 {
+		limit = MaxBytes
+	}
+	prefix := make([]byte, min(limit, 512))
+	read, readErr := io.ReadFull(input, prefix)
+	if size == -1 && (readErr == io.ErrUnexpectedEOF || readErr == io.EOF) {
+		prefix = prefix[:read]
+	} else if readErr != nil {
 		return Asset{}, ErrInvalid
 	}
 	asset.MIME, asset.Kind = identify(prefix)
@@ -90,8 +109,8 @@ func (s *Store) Put(ctx context.Context, owner, id string, size int64, input io.
 	if _, err = f.Write(prefix); err != nil {
 		return Asset{}, err
 	}
-	n, err := io.CopyBuffer(f, io.LimitReader(&contextReader{ctx, input}, size-int64(len(prefix))+1), make([]byte, 32<<10))
-	if err != nil || n != size-int64(len(prefix)) || ctx.Err() != nil {
+	n, err := io.CopyBuffer(f, io.LimitReader(&contextReader{ctx, input}, limit-int64(len(prefix))+1), make([]byte, 32<<10))
+	if err != nil || (size != -1 && n != size-int64(len(prefix))) || n > limit-int64(len(prefix)) || ctx.Err() != nil {
 		return Asset{}, ErrInvalid
 	}
 	if err = f.Close(); err != nil {

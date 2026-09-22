@@ -114,3 +114,21 @@ func TestQuotaExpiryAndStartupOnlyRemoveOwnedTemporaries(t *testing.T) {
 		t.Fatal("expired reservation leaked", err)
 	}
 }
+
+func TestUnknownLengthIsBoundedAndDoesNotAcceptDocuments(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	id := strings.Repeat("d", 32)
+	for _, body := range []string{"", "<html>not media</html>", "#EXTM3U\nhttps://example.invalid/video"} {
+		if _, err := s.PutStream(t.Context(), "owner", id, strings.NewReader(body)); err == nil {
+			t.Fatal("accepted non-media")
+		}
+	}
+	asset, err := s.PutStream(t.Context(), "owner", id, strings.NewReader("\x00\x00\x00\x18ftypisomcontents"))
+	if err != nil || asset.MIME != "video/mp4" {
+		t.Fatal(asset, err)
+	}
+}

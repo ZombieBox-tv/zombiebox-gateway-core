@@ -9,6 +9,7 @@ import (
 	"zombiebox.local/gateway/internal/catalog"
 	"zombiebox.local/gateway/internal/companion"
 	"zombiebox.local/gateway/internal/home"
+	"zombiebox.local/gateway/internal/mediaqueue"
 	"zombiebox.local/gateway/internal/receivers/inbox"
 
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
@@ -33,6 +34,7 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
+	mediaQueue         mediaqueue.Service
 	companions         *companion.Service
 	networkSamples     map[string]networkSample
 	networkJobs        chan struct{}

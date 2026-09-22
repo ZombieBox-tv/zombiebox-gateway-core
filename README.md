@@ -2,8 +2,9 @@
 
 The only Go core and provider/process adapters used by Full and Edge.
 
-This is an independent repository in the Zombie Box workspace. Remotes and hosted
-releases are not configured yet; local commits/tags and dependency pins are real.
+This is an independent repository in the Zombie Box workspace.
+[Source and milestones](https://github.com/DiegoG0477/zombiebox-gateway-core) are hosted on GitHub.
+Development checkpoints are not stable releases or physical compatibility claims.
 
 - `gateway/cmd`: executable composition roots.
 - `gateway/internal`: HTTP transport, feature policy, injected adapters and SQLite.
@@ -113,3 +114,7 @@ Product milestones, physical validation and public distribution remain open.
 ## dev.34 increment
 
 Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance.
+
+## dev.35 increment
+
+Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration.
