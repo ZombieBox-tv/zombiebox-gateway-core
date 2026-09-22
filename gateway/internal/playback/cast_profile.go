@@ -57,3 +57,20 @@ func CastProfile(device domain.Device) (CastVideo, error) {
 	}
 	return base, nil
 }
+
+// Audio sessions do not need an H.264 decoder. Unknown support is still only a
+// candidate; explicit failed AAC/transport probes must not be ignored.
+func CastProfileForMode(device domain.Device, mode string, maxHeight int, now time.Time) (CastVideo, error) {
+	if mode == "SCREEN" {
+		return CastProfileForSender(device, maxHeight, now)
+	}
+	if mode != "AUDIO" {
+		return CastVideo{}, errors.New("invalid cast mode")
+	}
+	for _, probe := range device.Capabilities.Probes {
+		if (probe.ID == "aac" || probe.ID == "hls") && probe.Status == "FAIL" {
+			return CastVideo{}, errors.New("receiver audio transport unsupported")
+		}
+	}
+	return CastVideo{}, nil
+}

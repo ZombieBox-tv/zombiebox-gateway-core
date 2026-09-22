@@ -17,15 +17,17 @@ import (
 )
 
 type castRequest struct {
-	ReceiverID      string `json:"receiverId"`
-	ReplaceExisting bool   `json:"replaceExisting"`
-	MaxVideoHeight  *int   `json:"maxVideoHeight,omitempty"`
+	Mode            *string `json:"mode,omitempty"`
+	ReceiverID      string  `json:"receiverId"`
+	ReplaceExisting bool    `json:"replaceExisting"`
+	MaxVideoHeight  *int    `json:"maxVideoHeight,omitempty"`
 }
 
 type castSession struct {
 	preparing                                                  bool
 	replaceExisting                                            bool
 	id, sender, receiver, publishToken, readToken, publisherID string
+	mode                                                       string
 	expires                                                    time.Time
 	plan                                                       *domain.Plan
 }
@@ -55,6 +57,14 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 	}
 	var request castRequest
 	if !decode(w, r, &request) {
+		return
+	}
+	mode := "SCREEN"
+	if request.Mode != nil {
+		mode = *request.Mode
+	}
+	if mode != "SCREEN" && mode != "AUDIO" {
+		fail(w, 400, "invalid_cast_mode")
 		return
 	}
 	maxHeight := 720
@@ -87,7 +97,7 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 409, "receiver_busy")
 		return
 	}
-	video, err := playback.CastProfileForSender(receiver, maxHeight, time.Now())
+	video, err := playback.CastProfileForMode(receiver, mode, maxHeight, time.Now())
 	if err != nil {
 		fail(w, 409, "receiver_media_unsupported")
 		return
@@ -96,9 +106,15 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 429, "cast_busy")
 		return
 	}
-	c := &castSession{replaceExisting: request.ReplaceExisting, id: randomID(16), sender: sender.ID, receiver: receiver.ID, publishToken: randomID(24), readToken: randomID(24), expires: time.Now().Add(90 * time.Second)}
+	c := &castSession{mode: mode, replaceExisting: request.ReplaceExisting, id: randomID(16), sender: sender.ID, receiver: receiver.ID, publishToken: randomID(24), readToken: randomID(24), expires: time.Now().Add(90 * time.Second)}
 	s.casts[c.id] = c
-	respond(w, 201, map[string]any{"castId": c.id, "publishPath": "zombie/" + c.id, "publishUser": "zombie", "publishToken": c.publishToken, "rtspPort": s.opt.RTSPPort, "leaseSeconds": 90, "video": video})
+	grant := map[string]any{"castId": c.id, "publishPath": "zombie/" + c.id, "publishUser": "zombie", "publishToken": c.publishToken, "rtspPort": s.opt.RTSPPort, "leaseSeconds": 90, "mode": mode}
+	if mode == "AUDIO" {
+		grant["audio"] = map[string]any{"codec": "aac", "sampleRate": 44100, "channels": 2, "bitrate": 128000}
+	} else {
+		grant["video"] = video
+	}
+	respond(w, 201, grant)
 }
 func (s *Server) castLease(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	s.mu.Lock()
@@ -134,6 +150,10 @@ func (s *Server) castReady(w http.ResponseWriter, r *http.Request, d domain.Devi
 	c.preparing = true
 	defer func() { s.mu.Lock(); c.preparing = false; s.mu.Unlock() }()
 	source := providers.Source{URL: strings.TrimRight(s.opt.RelayURL, "/") + "/zombie/" + c.id + "/index.m3u8", MIME: "application/vnd.apple.mpegurl", Live: true, Headers: http.Header{"Authorization": {"Basic " + base64.StdEncoding.EncodeToString([]byte("zombie:"+c.readToken))}}, Item: domain.Item{ID: "cast-" + c.id, Provider: "android_mirror", Kind: "video", Title: "Screen mirroring", Playable: true}}
+	if c.mode == "AUDIO" {
+		source.Item.Kind = "audio"
+		source.Item.Title = "Audio sharing"
+	}
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()

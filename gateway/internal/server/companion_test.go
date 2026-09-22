@@ -120,6 +120,22 @@ func TestCompanionCastCannotChooseAnotherTargetAndRevokeRetiresLease(t *testing.
 	if receiver != "paired-television" {
 		t.Fatal("cross-target Cast", receiver)
 	}
+	if stopped := call(s, "DELETE", "/v1/companion/cast/"+grant.CastID, "", request.ID, token, ""); stopped.Code != 200 {
+		t.Fatal(stopped.Body)
+	}
+	w = call(s, "POST", "/v1/companion/cast", `{"receiverId":"other-television","mode":"AUDIO"}`, request.ID, token, "")
+	if w.Code != 201 || !strings.Contains(w.Body.String(), `"mode":"AUDIO"`) {
+		t.Fatal("audio mode lost", w.Code, w.Body)
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	receiver = s.casts[grant.CastID].receiver
+	s.mu.Unlock()
+	if receiver != "paired-television" {
+		t.Fatal("audio escaped approved target")
+	}
 	w = call(s, "DELETE", "/v1/device/companions/"+request.ID, "", "other-television", other, "")
 	if w.Code != 403 {
 		t.Fatal("foreign revocation", w.Code)

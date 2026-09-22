@@ -79,3 +79,8 @@ Bounded HEVC Main and H.264 UHD30 playback planning, advertised extended probes,
 ## dev.27 increment
 
 Opt-in 1080p Cast grants require fresh advancing receiver H.264/HLS probes. Older senders retain their original ceiling; companion negotiation remains bound to the approved TV. Full and Edge share this implementation. Physical runtime and receiver/OEM gates remain open.
+
+## dev.29 increment
+
+Explicit SCREEN/AUDIO Cast negotiation, AAC/HLS receiver policy, mode-aware audio plans and unchanged consent/lease/revocation boundaries. Shared by Full and Edge.
+Product milestones and physical acceptance remain open.

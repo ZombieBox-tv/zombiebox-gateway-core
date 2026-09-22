@@ -181,3 +181,62 @@ func TestCastWireNegotiatesCeilingWithoutRaisingOldSenders(t *testing.T) {
 		}
 	}
 }
+
+func TestAudioCastNegotiatesWithoutVideoAndDeliversAudioPlan(t *testing.T) {
+	s := testServer(t, nil, "")
+	sender := pair(t, s, "audio-sender")
+	receiver := pair(t, s, "audio-receiver")
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsegment.ts\n")
+	}))
+	defer relay.Close()
+	s.opt.RelayURL = relay.URL
+	body := `{"receiverId":"audio-receiver","mode":"AUDIO"}`
+	if w := call(s, "POST", "/v1/cast", body, "audio-sender", sender, ""); w.Code != 409 {
+		t.Fatal("audio bypassed receiver consent", w.Code)
+	}
+	prefs := `{"mode":"TV","uiLanguage":"en","subtitleMode":"auto","allowCasting":true}`
+	if w := call(s, "PUT", "/v1/device/preferences", prefs, "audio-receiver", receiver, ""); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	for _, mode := range []string{"MEDIA", "", "audio"} {
+		if w := call(s, "POST", "/v1/cast", `{"receiverId":"audio-receiver","mode":"`+mode+`"}`, "audio-sender", sender, ""); w.Code != 400 {
+			t.Fatal("invalid mode accepted", mode, w.Code)
+		}
+	}
+	w := call(s, "POST", "/v1/cast", body, "audio-sender", sender, "")
+	if w.Code != 201 {
+		t.Fatal(w.Code, w.Body)
+	}
+	var grant struct {
+		CastID, Mode string
+		Audio        struct {
+			Codec                         string
+			Channels, SampleRate, Bitrate int
+		}
+		Video json.RawMessage
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
+		t.Fatal(err)
+	}
+	if grant.Mode != "AUDIO" || len(grant.Video) != 0 || grant.Audio.Codec != "aac" || grant.Audio.Channels != 2 || grant.Audio.SampleRate != 44100 || grant.Audio.Bitrate != 128000 {
+		t.Fatal("wrong audio contract", w.Body)
+	}
+	path := "/v1/cast/" + grant.CastID
+	if w := call(s, "POST", path+"/ready", "", "audio-sender", sender, ""); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	var active struct{ Plan domain.Plan }
+	if err := json.Unmarshal(call(s, "GET", "/v1/cast/active", "", "audio-receiver", receiver, "").Body.Bytes(), &active); err != nil {
+		t.Fatal(err)
+	}
+	if active.Plan.Item.Kind != "audio" || active.Plan.Item.Title != "Audio sharing" || !active.Plan.Live {
+		t.Fatal(active.Plan)
+	}
+	if w := call(s, "DELETE", path, "", "audio-sender", sender, ""); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	if w := call(s, "GET", active.Plan.URL, "", "", "", ""); w.Code != 401 {
+		t.Fatal("audio stream survived revocation", w.Code)
+	}
+}

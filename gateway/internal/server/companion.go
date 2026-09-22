@@ -212,12 +212,13 @@ func (s *Server) companionForget(w http.ResponseWriter, r *http.Request, g compa
 }
 func (s *Server) companionCast(w http.ResponseWriter, r *http.Request, g companion.Grant) {
 	var request struct {
-		MaxVideoHeight *int `json:"maxVideoHeight"`
+		Mode           *string `json:"mode,omitempty"`
+		MaxVideoHeight *int    `json:"maxVideoHeight"`
 	}
 	if r.ContentLength != 0 && !decode(w, r, &request) {
 		return
 	}
-	raw, _ := json.Marshal(castRequest{ReceiverID: g.TargetID, ReplaceExisting: true, MaxVideoHeight: request.MaxVideoHeight})
+	raw, _ := json.Marshal(castRequest{ReceiverID: g.TargetID, ReplaceExisting: true, MaxVideoHeight: request.MaxVideoHeight, Mode: request.Mode})
 	r.Body = io.NopCloser(bytes.NewReader(raw))
 	s.createCast(w, r, domain.Device{ID: "companion-" + g.ID})
 }

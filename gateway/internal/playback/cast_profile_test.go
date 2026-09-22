@@ -69,3 +69,22 @@ func TestCast1080RequiresOptInAndFreshAdvancingEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestAudioCastDoesNotRequireVideoDecoderButRespectsAudioTransportFailures(t *testing.T) {
+	device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "h264-baseline-360", Status: "FAIL"}}}}
+	if _, err := CastProfileForMode(device, "AUDIO", 720, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CastProfileForMode(device, "SCREEN", 720, time.Now()); err == nil {
+		t.Fatal("video failure ignored")
+	}
+	for _, id := range []string{"aac", "hls"} {
+		device.Capabilities.Probes = []domain.Probe{{ID: id, Status: "FAIL"}}
+		if _, err := CastProfileForMode(device, "AUDIO", 720, time.Now()); err == nil {
+			t.Fatal("failed audio transport ignored", id)
+		}
+	}
+	if _, err := CastProfileForMode(domain.Device{}, "MEDIA", 720, time.Now()); err == nil {
+		t.Fatal("unsupported mode accepted")
+	}
+}
