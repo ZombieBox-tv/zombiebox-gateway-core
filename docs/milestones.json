@@ -33,7 +33,8 @@
     "Dev.39: server-owned Stremio search catalog continuations retain query scope and reach upstream skip pages. Wider provider navigation and other V1 packages remain open.",
     "Dev.40: Explicit bounded HTTP/UDP/RTSP endpoint diagnostics with injected dialing, cancellation and credential-free reports. Reachability never grants media/account capabilities. No product or physical gate closes.",
     "Dev.41: Capability-aware explicit audio replacement: selected-stream policy, remux at zero, accurate resumed conversion, failed-output/absent-adapter rejection and preservation of the old session. See docs/audio-selection.md. No milestone closes.",
-    "Dev.42: automatic VOD planning evaluates the preferred audio before codec policy, maps incompatible alternate tracks out through remux and preserves source inventory, failures and explicit modes. Local/remote/HLS/DASH planner fixtures and real selected-output coverage; no physical or product gate closes."
+    "Dev.42: automatic VOD planning evaluates the preferred audio before codec policy, maps incompatible alternate tracks out through remux and preserves source inventory, failures and explicit modes. Local/remote/HLS/DASH planner fixtures and real selected-output coverage; no physical or product gate closes.",
+    "Dev.43: bounded local software pipeline diagnostic generates, remuxes, transcodes and decodes synthetic audio/video. Missing tools/cancellation remain distinct; no receiver/network capability is granted. Full/Edge share the same implementation."
   ],
   "milestones": [
     {
@@ -117,6 +118,6 @@
       "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/10"
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.42",
+  "developmentCheckpoint": "v0.1.0-dev.43",
   "remote": "https://github.com/ZombieBox-tv/zombiebox-gateway-core"
 }

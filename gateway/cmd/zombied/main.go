@@ -49,11 +49,21 @@ func main() {
 	discoveryListen := flag.String("discovery-listen", "", "optional trusted LAN UDP discovery address, typically :8098")
 	discoveryPort := flag.Int("discovery-http-port", 8090, "client-visible HTTP port advertised by discovery")
 	discoveryOnly := flag.Bool("discovery-only", false, "run discovery only; no database, credentials or HTTP server")
+	diagnoseMedia := flag.Bool("diagnose-media", false, "generate and decode a bounded local software media fixture without loading state, then exit")
 	diagnose := flag.String("diagnose-address", "", "probe one local IPv4 endpoint without loading state or credentials, then exit")
 	diagnoseHTTP := flag.Int("diagnose-http-port", 8090, "diagnostic HTTP health port")
 	diagnoseUDP := flag.Int("diagnose-discovery-port", 8098, "diagnostic unicast discovery port")
 	diagnoseRTSP := flag.Int("diagnose-rtsp-port", 8554, "diagnostic RTSP OPTIONS port")
 	flag.Parse()
+	if *diagnoseMedia {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		report := mediatools.New("ffmpeg", "ffprobe").DiagnosePipeline(ctx)
+		if json.NewEncoder(os.Stdout).Encode(report) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if *diagnose != "" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
