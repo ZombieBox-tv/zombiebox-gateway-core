@@ -28,7 +28,8 @@
     "Dev.34: Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance.",
     "Dev.35: Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration.",
     "Dev.36: DIAL specification license notice accompanies source and downstream distributions; runtime is unchanged.",
-    "Dev.37: Provider text subtitle attachments, bounded extraction and language planning; idempotent YouTube natural queue completion. Full/Edge share behavior; product and physical gates remain open."
+    "Dev.37: Provider text subtitle attachments, bounded extraction and language planning; idempotent YouTube natural queue completion. Full/Edge share behavior; product and physical gates remain open.",
+    "Dev.38: existing repository transferred to ZombieBox-tv with preserved identity/history/releases/milestones. No product completion or physical acceptance is implied."
   ],
   "milestones": [
     {
@@ -37,7 +38,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 1,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/1"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/1"
     },
     {
       "id": "M1",
@@ -45,7 +46,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 2,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/2"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/2"
     },
     {
       "id": "M3",
@@ -53,7 +54,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 3,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/3"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/3"
     },
     {
       "id": "M4",
@@ -61,7 +62,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 4,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/4"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/4"
     },
     {
       "id": "M5",
@@ -69,7 +70,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 5,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/5"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/5"
     },
     {
       "id": "M6",
@@ -77,7 +78,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 6,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/6"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/6"
     },
     {
       "id": "M7",
@@ -85,7 +86,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 7,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/7"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/7"
     },
     {
       "id": "M8",
@@ -93,7 +94,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 8,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/8"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/8"
     },
     {
       "id": "M9",
@@ -101,7 +102,7 @@
       "status": "in_progress",
       "completedAt": null,
       "remoteId": 9,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/9"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/9"
     },
     {
       "id": "M11",
@@ -109,9 +110,9 @@
       "status": "planned",
       "completedAt": null,
       "remoteId": 10,
-      "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/10"
+      "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/10"
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.37",
-  "remote": "https://github.com/DiegoG0477/zombiebox-gateway-core"
+  "developmentCheckpoint": "v0.1.0-dev.38",
+  "remote": "https://github.com/ZombieBox-tv/zombiebox-gateway-core"
 }

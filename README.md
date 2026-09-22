@@ -3,7 +3,7 @@
 The only Go core and provider/process adapters used by Full and Edge.
 
 This is an independent repository in the Zombie Box workspace.
-[Source and milestones](https://github.com/DiegoG0477/zombiebox-gateway-core) are hosted on GitHub.
+[Source and milestones](https://github.com/ZombieBox-tv/zombiebox-gateway-core) are hosted on GitHub.
 Development checkpoints are not stable releases or physical compatibility claims.
 
 - `gateway/cmd`: executable composition roots.
