@@ -61,3 +61,15 @@ through the real FFprobe/planner/FFmpeg path into audio-only AAC fragmented MP4;
 completion invalidates its stream. No physical or source-account evidence follows
 from this check. URL sending, playlists/queues, large/resumable uploads, artwork,
 advanced tracks and expanded codec/DRM coverage remain separate work.
+
+## dev.32 legacy file containers
+
+AVI (RIFF/AVI), FLV version 1 and ASF/WMV header candidates are accepted alongside
+MP4/MKV/WebM/audio. The actual FFprobe result, receiver capabilities and planner
+still decide output; a recognized header does not certify decodability. The same
+local demuxer/protocol allowlist excludes external playlists and concat inputs.
+Known-size 256-MiB limits, consent, cancellation and file expiry are unchanged.
+Host tests upload generated MPEG-4/MP3 AVI, FLV1/MP3 FLV and WMV2/WMA2 ASF through
+real FFprobe/FFmpeg, verify H.264/AAC output and revoke tickets after ENDED.
+Malformed files still fail probing; DRM, arbitrary codecs and physical playback
+are not promised. Full and Edge use this same implementation.

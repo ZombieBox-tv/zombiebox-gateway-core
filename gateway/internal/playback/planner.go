@@ -32,7 +32,7 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 		}
 	}
 	// Probe evidence takes precedence over a provider's generic video/mp4 label.
-	containerNeedsRemux := strings.Contains(metadata.Format.Name, "matroska") || strings.Contains(metadata.Format.Name, "webm") || metadata.Format.Name == "mpegts" || metadata.Format.Name == "hls" || metadata.Format.Name == "dash" || strings.Contains(mime, "mpegurl") || strings.Contains(mime, "dash")
+	containerNeedsRemux := needsCompatibleContainer(metadata.Format.Name, mime)
 	if native && !containerNeedsRemux && mime != "video/x-matroska" && mime != "video/webm" && status("http-progressive") != "FAIL" {
 		return "DIRECT_PLAY"
 	}
@@ -69,4 +69,19 @@ func videoCandidate(stream domain.Stream, status func(string) string) bool {
 		probe = "h264-baseline-480"
 	}
 	return probe == "" || status(probe) != "FAIL"
+}
+
+// Codec support does not imply support for the source container on the receiver.
+func needsCompatibleContainer(format, mime string) bool {
+	for _, name := range strings.Split(format, ",") {
+		switch name {
+		case "matroska", "webm", "mpegts", "mpeg", "hls", "dash", "avi", "flv", "asf":
+			return true
+		}
+	}
+	switch mime {
+	case "video/x-matroska", "video/webm", "video/x-msvideo", "video/x-flv", "video/x-ms-asf":
+		return true
+	}
+	return strings.Contains(mime, "mpegurl") || strings.Contains(mime, "dash")
 }

@@ -57,3 +57,17 @@ func TestDetectedContainerOverridesProviderMime(t *testing.T) {
 		t.Fatal("trusted generic provider MIME over probe", mode)
 	}
 }
+
+func TestLegacyContainerDoesNotPassThroughWithNativeCodec(t *testing.T) {
+	for _, format := range []string{"avi", "flv", "asf"} {
+		metadata := domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264", Width: 640, Height: 360}, {Type: "audio", Codec: "aac"}}}
+		metadata.Format.Name = format
+		if got := LocalMode(metadata, "video/mp4", domain.Capabilities{}, ""); got != "REMUX" {
+			t.Fatalf("%s: %s", format, got)
+		}
+		caps := domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}}
+		if got := LocalMode(metadata, "video/mp4", caps, ""); got != "EXTERNAL_PLAYER" {
+			t.Fatalf("%s ignored fMP4 failure: %s", format, got)
+		}
+	}
+}

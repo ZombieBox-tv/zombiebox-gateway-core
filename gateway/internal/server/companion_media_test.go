@@ -84,6 +84,21 @@ func TestCompanionMediaUploadHandoffAndRevocation(t *testing.T) {
 }
 
 func TestPhoneAudioUploadConvertsThroughOwnedStream(t *testing.T) {
+	phoneFileConversion(t, "flac", "", "flac")
+}
+
+func TestLegacyPhoneVideoContainersConvertThroughOwnedStream(t *testing.T) {
+	for _, fixture := range []struct{ format, video, audio string }{
+		{"avi", "mpeg4", "mp3"},
+		{"flv", "flv1", "mp3"},
+		{"asf", "wmv2", "wmav2"},
+	} {
+		t.Run(fixture.format, func(t *testing.T) { phoneFileConversion(t, fixture.format, fixture.video, fixture.audio) })
+	}
+}
+
+func phoneFileConversion(t *testing.T, format, video, audio string) {
+	t.Helper()
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("FFmpeg unavailable")
@@ -93,10 +108,19 @@ func TestPhoneAudioUploadConvertsThroughOwnedStream(t *testing.T) {
 		t.Skip("FFprobe unavailable")
 	}
 	dir := t.TempDir()
-	input := filepath.Join(dir, "sample.flac")
+	input := filepath.Join(dir, "sample."+format)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "0.2", "-c:a", "flac", input).CombinedOutput(); err != nil {
+	args := []string{"-v", "error"}
+	if video != "" {
+		args = append(args, "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=10")
+	}
+	args = append(args, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "0.2", "-threads", "1", "-c:a", audio)
+	if video != "" {
+		args = append(args, "-c:v", video)
+	}
+	args = append(args, input)
+	if output, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
 		t.Fatalf("fixture: %v %s", err, output)
 	}
 	file, err := os.ReadFile(input)
@@ -130,7 +154,11 @@ func TestPhoneAudioUploadConvertsThroughOwnedStream(t *testing.T) {
 	if err = json.Unmarshal(w.Body.Bytes(), &active); err != nil {
 		t.Fatal(err)
 	}
-	if active.Plan.Mode != "TRANSCODE" || active.Plan.Live || active.Plan.Seekable || active.Plan.Item.Kind != "audio" {
+	kind := "audio"
+	if video != "" {
+		kind = "video"
+	}
+	if active.Plan.Mode != "TRANSCODE" || active.Plan.Live || active.Plan.Seekable || active.Plan.Item.Kind != kind {
 		t.Fatal(active.Plan)
 	}
 	w = call(s, "GET", active.Plan.URL, "", "", "", "")
@@ -142,8 +170,24 @@ func TestPhoneAudioUploadConvertsThroughOwnedStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	metadata, err := media.New(ffmpeg, ffprobe).Probe(ctx, output)
-	if err != nil || len(metadata.Streams) != 1 || metadata.Streams[0].Codec != "aac" {
-		t.Fatal("expected AAC without video", metadata, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{"audio": "aac"}
+	if video != "" {
+		expected["video"] = "h264"
+	}
+	if len(metadata.Streams) != len(expected) {
+		t.Fatal("unexpected stream count", metadata)
+	}
+	for _, stream := range metadata.Streams {
+		if expected[stream.Type] != stream.Codec {
+			t.Fatal("unexpected output codec", metadata)
+		}
+		delete(expected, stream.Type)
+	}
+	if len(expected) != 0 {
+		t.Fatal("missing output stream", metadata)
 	}
 	if w = call(s, "PUT", "/v1/playback/"+active.Plan.SessionID+"/progress", `{"state":"ENDED","positionMs":200,"durationMs":200}`, "file-television", tv, ""); w.Code != 200 {
 		t.Fatal(w.Body)

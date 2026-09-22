@@ -94,3 +94,8 @@ Product milestones and deferred physical gates remain open.
 
 Bounded declarative decoder/encoder profiles and display modes, strict inventory validation and privacy-scoped diagnostic export shared by Full/Edge. Inventory does not create successful probes or select an OEM backend.
 Product milestone and physical/public distribution gates remain open.
+
+## dev.32 increment
+
+Phone Media now admits bounded AVI, FLV and ASF/WMV containers. Real host upload/probe/transcode tests produce H.264/AAC and revoke finished streams; this is not physical Android codec acceptance.
+Product milestones, physical validation and public distribution remain open.
