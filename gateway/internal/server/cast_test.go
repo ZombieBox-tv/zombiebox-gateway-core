@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/playback"
 )
 
 func TestCastConsentOwnershipRelayAndRevocation(t *testing.T) {
@@ -130,5 +131,53 @@ func TestCastLeaseExpiryAndClose(t *testing.T) {
 	s.Close()
 	if len(s.casts) != 0 {
 		t.Fatal("shutdown retained casts")
+	}
+}
+
+func TestCastWireNegotiatesCeilingWithoutRaisingOldSenders(t *testing.T) {
+	s := testServer(t, nil, "")
+	token := pair(t, s, "sender-ceiling")
+	receiverToken := pair(t, s, "receiver-ceiling")
+	call(s, "GET", "/v1/device", "", "receiver-ceiling", receiverToken, "")
+	s.opt.RelayURL = "http://127.0.0.1:8888"
+	var receiver domain.Device
+	if err := s.db.Get(t.Context(), "devices", "receiver-ceiling", &receiver); err != nil {
+		t.Fatal(err)
+	}
+	receiver.Preferences.AllowCasting = true
+	receiver.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: "bound", Probes: []domain.Probe{
+		{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "hls", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+	}}
+	if err := s.db.Put(t.Context(), "devices", receiver.ID, receiver); err != nil {
+		t.Fatal(err)
+	}
+	for _, example := range []struct {
+		extra          string
+		status, height int
+	}{
+		{"", 201, 360}, {`,"maxVideoHeight":720`, 201, 360},
+		{`,"maxVideoHeight":1080`, 201, 1080}, {`,"maxVideoHeight":2160`, 400, 0},
+	} {
+		w := call(s, "POST", "/v1/cast", `{"receiverId":"receiver-ceiling"`+example.extra+`}`, "sender-ceiling", token, "")
+		if w.Code != example.status {
+			t.Fatal(w.Code, w.Body)
+		}
+		if w.Code != 201 {
+			continue
+		}
+		var grant struct {
+			CastID string
+			Video  playback.CastVideo
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
+			t.Fatal(err)
+		}
+		if grant.Video.MaxHeight != example.height {
+			t.Fatal(grant)
+		}
+		if w = call(s, "DELETE", "/v1/cast/"+grant.CastID, "", "sender-ceiling", token, ""); w.Code != 200 {
+			t.Fatal(w.Body)
+		}
 	}
 }

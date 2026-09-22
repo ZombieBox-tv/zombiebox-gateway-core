@@ -75,3 +75,7 @@ Full visual/capture policy, extended Remote, HEVC/4K and other product gates rem
 ## dev.25 increment
 
 Bounded HEVC Main and H.264 UHD30 playback planning, advertised extended probes, fresh advancing evidence and synthetic SDR fixtures. Shared by Full/Edge; physical acceptance remains open.
+
+## dev.27 increment
+
+Opt-in 1080p Cast grants require fresh advancing receiver H.264/HLS probes. Older senders retain their original ceiling; companion negotiation remains bound to the approved TV. Full and Edge share this implementation. Physical runtime and receiver/OEM gates remain open.

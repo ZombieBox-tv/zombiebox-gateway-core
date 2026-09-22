@@ -2,6 +2,7 @@ package playback
 
 import (
 	"errors"
+	"time"
 
 	"zombiebox.local/gateway/internal/domain"
 )
@@ -12,6 +13,22 @@ type CastVideo struct {
 	MaxHeight int    `json:"maxHeight"`
 	FPS       int    `json:"fps"`
 	Bitrate   int    `json:"bitrate"`
+}
+
+// Larger grants require explicit sender opt-in and fresh, advancing receiver
+// evidence. Existing senders retain the original wire/encoder limits.
+func CastProfileForSender(device domain.Device, maxHeight int, now time.Time) (CastVideo, error) {
+	memory := device.Registration.Memory.PhysicalMB
+	if maxHeight == 1080 && (memory == 0 || memory > 768) && device.Capabilities.SuiteVersion == 2 && device.Capabilities.CacheKey != "" {
+		passed := map[string]bool{}
+		for _, probe := range device.Capabilities.Probes {
+			passed[probe.ID] = probe.Status == "PASS" && !probe.Stalled && probe.PositionMS >= 500 && probe.TestedAt > now.Unix()-7*24*60*60 && probe.TestedAt <= now.Unix()+300
+		}
+		if passed["h264-1080-high"] && passed["hls"] {
+			return CastVideo{"h264", 1920, 1080, 30, 4000000}, nil
+		}
+	}
+	return CastProfile(device)
 }
 
 // Unknown receivers get a conservative candidate; measured evidence may raise it.

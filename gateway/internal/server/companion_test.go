@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"zombiebox.local/gateway/internal/companion"
+	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/playback"
 )
 
 func TestCompanionQRConsentAndCredentialSeparation(t *testing.T) {
@@ -86,13 +89,30 @@ func TestCompanionCastCannotChooseAnotherTargetAndRevokeRetiresLease(t *testing.
 	if err = s.companions.Decide(context.Background(), "paired-television", "TV", request.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	w := call(s, "POST", "/v1/companion/cast", `{"receiverId":"other-television"}`, request.ID, token, "")
+	var target domain.Device
+	if err = s.db.Get(t.Context(), "devices", "paired-television", &target); err != nil {
+		t.Fatal(err)
+	}
+	target.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: "bound", Probes: []domain.Probe{
+		{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "hls", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+	}}
+	if err = s.db.Put(t.Context(), "devices", target.ID, target); err != nil {
+		t.Fatal(err)
+	}
+	w := call(s, "POST", "/v1/companion/cast", `{"receiverId":"other-television","maxVideoHeight":1080}`, request.ID, token, "")
 	if w.Code != 201 {
 		t.Fatal(w.Code, w.Body)
 	}
-	var grant struct{ CastID string }
+	var grant struct {
+		CastID string
+		Video  playback.CastVideo
+	}
 	if err = json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
 		t.Fatal(err)
+	}
+	if grant.Video.MaxHeight != 1080 {
+		t.Fatal("companion video limit lost", grant)
 	}
 	s.mu.Lock()
 	receiver := s.casts[grant.CastID].receiver

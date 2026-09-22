@@ -19,7 +19,8 @@
     "Dev.22: Device-scoped receiver replacement, readiness-gated Cast handoff with target consent, revoked YouTube command/source fencing and receiver-bound playback resolution. Product and physical exit gates remain open.",
     "Dev.23: Bounded credential-free UDP discovery, discovery-only CLI and pinned capture research references. Product and physical gates remain open.",
     "Dev.24: Target-scoped QR/code consent, durable grants, proof-before-token reconnection, bounded remote commands/receipts and scoped Cast authorization/revocation. QR rendering uses pinned MIT Go code; optional services remain independent. Product and physical gates remain open.",
-    "Dev.25: Bounded HEVC Main and H.264 UHD30 playback planning, advertised extended probes, fresh advancing evidence and synthetic SDR fixtures. Shared by Full/Edge; physical acceptance remains open."
+    "Dev.25: Bounded HEVC Main and H.264 UHD30 playback planning, advertised extended probes, fresh advancing evidence and synthetic SDR fixtures. Shared by Full/Edge; physical acceptance remains open.",
+    "Dev.27: Opt-in 1080p Cast grants require fresh advancing receiver H.264/HLS probes. Older senders retain their original ceiling; companion negotiation remains bound to the approved TV. Full and Edge share this implementation. Physical runtime and receiver/OEM gates remain open."
   ],
   "milestones": [
     {
@@ -93,5 +94,5 @@
       "remoteId": null
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.24"
+  "developmentCheckpoint": "v0.1.0-dev.27"
 }

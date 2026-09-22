@@ -211,7 +211,13 @@ func (s *Server) companionForget(w http.ResponseWriter, r *http.Request, g compa
 	respond(w, 200, map[string]string{"state": "REVOKED"})
 }
 func (s *Server) companionCast(w http.ResponseWriter, r *http.Request, g companion.Grant) {
-	raw, _ := json.Marshal(map[string]any{"receiverId": g.TargetID, "replaceExisting": true})
+	var request struct {
+		MaxVideoHeight int `json:"maxVideoHeight"`
+	}
+	if r.ContentLength != 0 && !decode(w, r, &request) {
+		return
+	}
+	raw, _ := json.Marshal(map[string]any{"receiverId": g.TargetID, "replaceExisting": true, "maxVideoHeight": request.MaxVideoHeight})
 	r.Body = io.NopCloser(bytes.NewReader(raw))
 	s.createCast(w, r, domain.Device{ID: "companion-" + g.ID})
 }

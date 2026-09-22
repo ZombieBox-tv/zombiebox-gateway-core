@@ -50,8 +50,13 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 	var request struct {
 		ReceiverID      string `json:"receiverId"`
 		ReplaceExisting bool   `json:"replaceExisting"`
+		MaxVideoHeight  int    `json:"maxVideoHeight"`
 	}
 	if !decode(w, r, &request) {
+		return
+	}
+	if request.MaxVideoHeight != 0 && request.MaxVideoHeight != 720 && request.MaxVideoHeight != 1080 {
+		fail(w, 400, "invalid_cast_video_limit")
 		return
 	}
 	s.receiverClaims.Lock()
@@ -76,7 +81,7 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 409, "receiver_busy")
 		return
 	}
-	video, err := playback.CastProfile(receiver)
+	video, err := playback.CastProfileForSender(receiver, request.MaxVideoHeight, time.Now())
 	if err != nil {
 		fail(w, 409, "receiver_media_unsupported")
 		return
