@@ -29,7 +29,8 @@
     "Dev.35: Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration.",
     "Dev.36: DIAL specification license notice accompanies source and downstream distributions; runtime is unchanged.",
     "Dev.37: Provider text subtitle attachments, bounded extraction and language planning; idempotent YouTube natural queue completion. Full/Edge share behavior; product and physical gates remain open.",
-    "Dev.38: existing repository transferred to ZombieBox-tv with preserved identity/history/releases/milestones. No product completion or physical acceptance is implied."
+    "Dev.38: existing repository transferred to ZombieBox-tv with preserved identity/history/releases/milestones. No product completion or physical acceptance is implied.",
+    "Dev.39: server-owned Stremio search catalog continuations retain query scope and reach upstream skip pages. Wider provider navigation and other V1 packages remain open."
   ],
   "milestones": [
     {

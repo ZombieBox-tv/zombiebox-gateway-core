@@ -123,3 +123,7 @@ Bounded public URL queues, continuous measured downgrade planning, universal rec
 ## dev.37 increment
 
 [Provider subtitle attachments](docs/provider-subtitles.md) use owned semantic tracks and bounded plain-text extraction. The YouTube worker advances natural queue completion once, with receiver-epoch fencing. Product milestones and physical acceptance remain open.
+
+## dev.39 navigation increment
+
+Dev.39: server-owned Stremio search catalog continuations retain query scope and reach upstream skip pages. Wider provider navigation and other V1 packages remain open.

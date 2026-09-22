@@ -50,3 +50,18 @@ Existing Home summaries are not replaced by the browse hierarchy in this increme
 Reference protocols: [Plex PMS](https://developer.plex.tv/pms/),
 [Stremio addon protocol](https://stremio.github.io/stremio-addon-sdk/protocol.html).
 Pinned local upstream SDKs remain references, not product runtime dependencies.
+
+## dev.39 Stremio search continuation
+
+A searched addon catalog with additional results contributes a folder to the
+aggregate search preview. Opening it begins that catalog's matching results at
+page zero and follows the existing forty-item pages / upstream `skip` boundary.
+The original query is stored in the server-owned opaque browse locator; the client
+still receives semantic IDs, never addon paths or query syntax. A nonempty explicit
+search in that folder overrides the original query. Exhausted catalogs do not
+advertise a continuation. Search fan-out remains capped at four advertised search
+catalogs, and the existing six-second federated-search timeout still applies.
+
+Provider fixtures verify special-character queries, page offsets 0/40/80/100,
+termination, explicit scope replacement and exhausted catalogs. This does not add
+unlimited addon aggregation or claim real-account/device acceptance.

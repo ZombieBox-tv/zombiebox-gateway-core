@@ -114,3 +114,7 @@ Product milestone completion still requires its recorded acceptance gates.
 ## dev.37 implementation checkpoint
 
 Provider text subtitle attachments, bounded extraction and language planning; idempotent YouTube natural queue completion. Full/Edge share behavior; product and physical gates remain open.
+
+## dev.39 navigation increment
+
+Dev.39: server-owned Stremio search catalog continuations retain query scope and reach upstream skip pages. Wider provider navigation and other V1 packages remain open.

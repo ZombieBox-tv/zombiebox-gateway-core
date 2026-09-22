@@ -20,6 +20,7 @@ type addonNode struct {
 	Season   int
 	Skip     bool
 	Search   bool
+	Query    string `json:",omitempty"`
 }
 
 func addonPath(node addonNode) string {
@@ -48,6 +49,11 @@ func (a *Adapters) browseStremio(ctx context.Context, c Config, parent, query st
 		return domain.BrowseResult{}, errors.New("invalid addon node")
 	}
 	if node.Resource == "catalog" {
+		// Search continuations keep their scope in the server-owned locator. The
+		// client does not need upstream catalog IDs or addon query syntax.
+		if query == "" {
+			query = node.Query
+		}
 		return a.addonPage(ctx, base, node, query, offset)
 	}
 	body, err := a.request(ctx, base+"/meta/"+url.PathEscape(node.Type)+"/"+url.PathEscape(node.ID)+".json", nil)
@@ -144,6 +150,21 @@ func (a *Adapters) addonCatalogs(ctx context.Context, base, query string, offset
 				continue
 			}
 			succeeded++
+			if page.NextOffset >= 0 {
+				node.Query = query
+				title := catalog.Name
+				if title == "" {
+					title = catalog.ID
+				}
+				sources = append(sources, Source{
+					BrowsePath: addonPath(node),
+					Item: domain.Item{
+						ID:       "stremio-search-catalog-" + catalog.Type + "-" + catalog.ID,
+						Provider: "stremio", Kind: "library", Title: title,
+						Subtitle: query,
+					},
+				})
+			}
 			for _, source := range page.Sources {
 				if !seen[source.Item.ID] {
 					seen[source.Item.ID] = true
