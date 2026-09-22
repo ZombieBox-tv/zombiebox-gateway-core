@@ -26,7 +26,8 @@
     "Dev.31: Bounded declarative decoder/encoder profiles and display modes, strict inventory validation and privacy-scoped diagnostic export shared by Full/Edge. Inventory does not create successful probes or select an OEM backend. Product gates remain open.",
     "Dev.32: Phone Media now admits bounded AVI, FLV and ASF/WMV containers. Real host upload/probe/transcode tests produce H.264/AAC and revoke finished streams; this is not physical Android codec acceptance. Product gates remain open.",
     "Dev.34: Five-minute single-use QR consent, online target selection with local six-digit approval, opt-in 24-hour request suppression and focus-scoped remote text. Shared by Full/Edge; no deployment or physical acceptance.",
-    "Dev.35: Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration."
+    "Dev.35: Bounded public URL queues, continuous measured downgrade planning, universal receiver listening with private-worker epoch fencing, and first hosted source configuration.",
+    "Dev.36: DIAL specification license notice accompanies source and downstream distributions; runtime is unchanged."
   ],
   "milestones": [
     {
@@ -110,6 +111,6 @@
       "remoteURL": "https://github.com/DiegoG0477/zombiebox-gateway-core/milestone/10"
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.35",
+  "developmentCheckpoint": "v0.1.0-dev.36",
   "remote": "https://github.com/DiegoG0477/zombiebox-gateway-core"
 }
