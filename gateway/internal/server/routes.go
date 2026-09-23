@@ -34,6 +34,11 @@ func (s *Server) routes() {
 	}
 
 	s.mux.HandleFunc("GET /v1/search", s.auth(s.globalSearch))
+	s.mux.HandleFunc("GET /v1/youtube/account", s.auth(s.youtubeAccountStatus))
+	s.mux.HandleFunc("POST /v1/youtube/account/authorization", s.auth(s.youtubeAccountStart))
+	s.mux.HandleFunc("POST /v1/youtube/account/authorization/poll", s.auth(s.youtubeAccountPoll))
+	s.mux.HandleFunc("DELETE /v1/youtube/account", s.auth(s.youtubeAccountDisconnect))
+	s.mux.HandleFunc("GET /v1/youtube/account/{list}", s.auth(s.youtubeAccountList))
 	s.mux.HandleFunc("GET /v1/network/sample", s.auth(s.networkDownload))
 	s.mux.HandleFunc("POST /v1/device/network", s.auth(s.networkReport))
 	for _, method := range []string{"GET", "PUT", "DELETE"} {

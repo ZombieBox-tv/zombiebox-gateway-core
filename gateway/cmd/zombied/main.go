@@ -200,14 +200,16 @@ func main() {
 		StreamHTTP:      httpclient.Streaming(),
 	}
 	app := server.New(db, server.Options{
-		ProbeDir:        *probes,
-		ThreadfinURL:    *threadfin,
-		PairingCode:     pairing,
-		MediaDir:        *media,
-		RelayURL:        *relay,
-		RelayControlURL: *relayControl,
-		RelayAdminToken: os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"),
-		RTSPPort:        *rtspPort,
+		ProbeDir:                 *probes,
+		ThreadfinURL:             *threadfin,
+		PairingCode:              pairing,
+		YouTubeOAuthClientID:     os.Getenv("ZOMBIE_YOUTUBE_OAUTH_CLIENT_ID"),
+		YouTubeOAuthClientSecret: os.Getenv("ZOMBIE_YOUTUBE_OAUTH_CLIENT_SECRET"),
+		MediaDir:                 *media,
+		RelayURL:                 *relay,
+		RelayControlURL:          *relayControl,
+		RelayAdminToken:          os.Getenv("ZOMBIE_RELAY_ADMIN_TOKEN"),
+		RTSPPort:                 *rtspPort,
 	}, deps)
 	if *config != "" {
 		configs, e := providerconfig.Load(*config, os.LookupEnv)

@@ -11,6 +11,7 @@ import (
 	"zombiebox.local/gateway/internal/home"
 	"zombiebox.local/gateway/internal/mediaqueue"
 	"zombiebox.local/gateway/internal/receivers/inbox"
+	"zombiebox.local/gateway/internal/youtubeaccount"
 
 	youtubereceiver "zombiebox.local/gateway/internal/receivers/youtube"
 )
@@ -20,14 +21,15 @@ type Health struct {
 	APIVersion int    `json:"apiVersion"`
 }
 type Options struct {
-	ProbeDir                                   string
-	ThreadfinURL                               string
-	RelayURL, RelayControlURL, RelayAdminToken string
-	RTSPPort                                   int
-	PairingCode                                string
-	MediaDir                                   string
-	PollWait                                   time.Duration
-	CatalogWait                                time.Duration
+	ProbeDir                                       string
+	ThreadfinURL                                   string
+	RelayURL, RelayControlURL, RelayAdminToken     string
+	RTSPPort                                       int
+	PairingCode                                    string
+	YouTubeOAuthClientID, YouTubeOAuthClientSecret string
+	MediaDir                                       string
+	PollWait                                       time.Duration
+	CatalogWait                                    time.Duration
 }
 type attempt struct {
 	count int
@@ -44,6 +46,7 @@ type Server struct {
 	mediaReceiverInbox *inbox.Service
 	browse             *catalog.Browser
 	youtubeReceiver    *youtubereceiver.Service
+	youtubeAccount     *youtubeaccount.Service
 	probeKey           string
 	browser            *browserSession
 	integrationChecks  chan struct{}
@@ -88,6 +91,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 		catalogCache: map[string]catalogEntry{},
 	}
 	s.youtubeReceiver = youtubereceiver.New(deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
+	s.youtubeAccount = youtubeaccount.New(db, deps.ControlHTTP, opt.YouTubeOAuthClientID, opt.YouTubeOAuthClientSecret, youtubeaccount.GoogleEndpoints(), time.Now)
 	s.browse = catalog.NewPersistentBrowser(deps.Browse, db)
 	s.heroes = home.New(db, time.Now)
 	s.probeKey = randomID(32)

@@ -65,6 +65,12 @@ func (b *Browser) Page(ctx context.Context, device, provider, title string, revi
 	if err != nil {
 		return domain.BrowsePage{}, err
 	}
+	return b.Present(ctx, device, provider, title, revision, config, path, query, offset, result), nil
+}
+
+// Present retains semantic sources obtained outside the normal browse backend,
+// such as account-owned channel and playlist roots, behind the same opaque IDs.
+func (b *Browser) Present(ctx context.Context, device, provider, title string, revision uint64, config domain.Config, path, query string, offset int, result domain.BrowseResult) domain.BrowsePage {
 	page := domain.BrowsePage{Title: title, Items: []domain.Item{}, NextOffset: result.NextOffset}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -105,5 +111,5 @@ func (b *Browser) Page(ctx context.Context, device, provider, title string, revi
 		b.saveLocator(ctx, Locator{Instance: b.instance, Revision: revision, Key: device + ":" + id, Provider: provider, ConfigKey: configKey(config), ID: originalID, Title: source.Item.Title, Path: source.BrowsePath, Parent: path, Query: query, Offset: offset, Expires: now.Add(7 * 24 * time.Hour)})
 		page.Items = append(page.Items, source.Item)
 	}
-	return page, nil
+	return page
 }

@@ -152,3 +152,68 @@ func TestAirPlayVideoToAudioReplacesOwnedStreamAndRetiresOldTicket(t *testing.T)
 		t.Fatal("ended audio ticket survived", w.Code)
 	}
 }
+
+func TestSpotifyMetadataPauseAndNaturalEndKeepThenRevokeStream(t *testing.T) {
+	var phase atomic.Int32
+	phase.Store(1)
+	privateToken := strings.Repeat("s", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+privateToken {
+			t.Error("Spotify worker token missing")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/status":
+			switch phase.Load() {
+			case 1:
+				fmt.Fprint(w, `{"stopped":false,"track":{"name":"First","artist_names":["Artist"]}}`)
+			case 2:
+				fmt.Fprint(w, `{"stopped":false,"paused":true,"track":{"name":"Second","artist_names":["Artist"]}}`)
+			default:
+				fmt.Fprint(w, `{"stopped":true}`)
+			}
+		case "/audio":
+			fmt.Fprint(w, "audio-fixture")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"spotify": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "spotify-lifecycle")
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"spotify"}`, "spotify-lifecycle", token, ""); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	read := func() inbox.Snapshot {
+		w := call(s, "GET", "/v1/media-receiver", "", "spotify-lifecycle", token, "")
+		var snapshot inbox.Snapshot
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &snapshot) != nil {
+			t.Fatal(w.Code, w.Body)
+		}
+		return snapshot
+	}
+	first := read()
+	if first.Plan == nil || first.Plan.Item.Title != "First" {
+		t.Fatal("missing first track", first)
+	}
+	phase.Store(2)
+	paused := read()
+	if paused.Plan == nil || paused.Plan.SessionID != first.Plan.SessionID || paused.Plan.Item.Title != "Second" || paused.NowPlaying == nil || paused.NowPlaying.State != "PAUSED" {
+		t.Fatal("metadata/pause restarted or lost stream", paused)
+	}
+	if w := call(s, "GET", first.Plan.URL, "", "", "", ""); w.Code != 200 || w.Body.String() != "audio-fixture" {
+		t.Fatal("paused ticket broke", w.Code, w.Body)
+	}
+	phase.Store(3)
+	ended := read()
+	if ended.Plan != nil || ended.NowPlaying == nil || ended.NowPlaying.State != "STOPPED" {
+		t.Fatal("natural end remained live", ended)
+	}
+	if w := call(s, "GET", first.Plan.URL, "", "", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatal("ended Spotify ticket survived", w.Code)
+	}
+}

@@ -187,3 +187,13 @@ and all 14 wrapper tests pass under Node 24.18.0 on Linux. The Full dev.46 image
 continues to use its frozen Node 22.22.2 digest. This expands the candidate for
 Termux's official prebuilt Node LTS; actual Android execution and the Edge module
 bundle remain separate gates.
+## dev.51 YouTube account implementation
+
+The shared Core adds a gateway-owned Google device authorization and read-only
+subscriptions/playlists route, private refresh/revoke state, bounded device-scoped
+browse roots and host tests. TV Code remains independent. Real Google credentials,
+account consent, quotas and Android/TV acceptance are not verified; no product
+milestone closes. See [account boundary](youtube-account.md).
+The same checkpoint adds a Spotify metadata/pause/natural-end receiver fixture:
+its active stream survives a paused track change, then revokes the ticket on
+natural completion. Real Spotify Connect and output remain device/account gates.
