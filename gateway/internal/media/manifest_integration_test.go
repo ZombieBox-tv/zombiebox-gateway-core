@@ -252,3 +252,104 @@ video.m3u8
 		})
 	}
 }
+
+func TestAuthenticatedDASHAlternateAudioSelection(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg required")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe required")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	fixture := []string{
+		"-y", "-nostdin", "-v", "error",
+		"-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
+		"-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100",
+		"-t", "2", "-map", "0:v", "-map", "1:a", "-map", "2:a",
+		"-c:v", "libx264", "-threads", "1", "-g", "10", "-c:a", "aac",
+		"-metadata:s:a:0", "language=en", "-metadata:s:a:1", "language=es",
+		"-f", "dash", "-adaptation_sets", "id=0,streams=v id=1,streams=1 id=2,streams=2",
+		filepath.Join(dir, "index.mpd"),
+	}
+	if output, err := exec.CommandContext(ctx, ffmpeg, fixture...).CombinedOutput(); err != nil {
+		t.Fatalf("DASH fixture: %v %s", err, output)
+	}
+	files := http.FileServer(http.Dir(dir))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer dash-audio" {
+			t.Error("DASH resource lacked provider authorization")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		files.ServeHTTP(w, r)
+	}))
+	defer upstream.Close()
+	tools := NewWithRunner(ffmpeg, ffprobe, runFunc(func(ctx context.Context, name string, args []string, output io.Writer) error {
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.Stdout = output
+		return cmd.Run()
+	}))
+	remote := NewRemote(tools, upstream.Client())
+	source := domain.Source{
+		URL: upstream.URL + "/index.mpd", MIME: "application/dash+xml",
+		Headers: http.Header{"Authorization": {"Bearer dash-audio"}},
+	}
+	metadata, err := remote.ProbeRemote(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spanish *int
+	for _, stream := range metadata.Streams {
+		if stream.Type == "audio" && stream.Tags.Language == "es" {
+			index := stream.Index
+			spanish = &index
+		}
+	}
+	if spanish == nil {
+		t.Fatalf("Spanish DASH rendition unavailable: %+v", metadata.Streams)
+	}
+	for _, mode := range []string{"REMUX", "TRANSCODE"} {
+		t.Run(mode, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := remote.ConvertRemote(ctx, source, mode, domain.MediaSelection{AudioID: spanish}, &output); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, mode+"-spanish.mp4")
+			if err := os.WriteFile(path, output.Bytes(), 0600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := tools.Probe(ctx, path)
+			if err != nil || len(result.Streams) != 2 || result.Streams[0].Codec != "h264" || result.Streams[1].Codec != "aac" {
+				t.Fatalf("DASH conversion lost audio/video: %+v, %v", result, err)
+			}
+			pcm, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", path, "-map", "0:a:0", "-f", "s16le", "-ac", "1", "-ar", "44100", "pipe:1").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			crossings, sign := 0, 0
+			for i := 0; i+1 < len(pcm); i += 2 {
+				sample := int16(binary.LittleEndian.Uint16(pcm[i:]))
+				current := 0
+				if sample > 1000 {
+					current = 1
+				} else if sample < -1000 {
+					current = -1
+				}
+				if current != 0 {
+					if sign != 0 && current != sign {
+						crossings++
+					}
+					sign = current
+				}
+			}
+			if crossings < 2800 || crossings > 5000 {
+				t.Fatalf("wrong DASH audio rendition: %d zero crossings", crossings)
+			}
+		})
+	}
+}
