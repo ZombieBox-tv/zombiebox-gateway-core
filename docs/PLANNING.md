@@ -134,3 +134,11 @@ Dev.42: automatic VOD planning evaluates the preferred audio before codec policy
 ## dev.43 navigation and functional media increment
 
 Dev.43: bounded local software pipeline diagnostic generates, remuxes, transcodes and decodes synthetic audio/video. Missing tools/cancellation remain distinct; no receiver/network capability is granted. Full/Edge share the same implementation.
+
+## dev.44 authenticated HLS audio coverage
+
+A real FFmpeg fixture covers an authenticated HLS master playlist with English and
+Spanish audio renditions. It verifies default English playback and explicit Spanish
+selection through both remux and transcode by decoding the resulting audio. This
+adds host media evidence without changing runtime policy or claiming device playback.
+The remaining media/receiver combinations and physical gates stay open.
