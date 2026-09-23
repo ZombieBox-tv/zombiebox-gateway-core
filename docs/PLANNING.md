@@ -142,3 +142,12 @@ Spanish audio renditions. It verifies default English playback and explicit Span
 selection through both remux and transcode by decoding the resulting audio. This
 adds host media evidence without changing runtime policy or claiming device playback.
 The remaining media/receiver combinations and physical gates stay open.
+
+## dev.45 — Edge Node runtime compatibility
+
+The YouTube catalog and TV receiver wrappers now admit Node 24.18+ LTS in addition
+to secure Node 22.22.2+. Both locked npm installs contain only portable JS/WASM,
+and all 14 wrapper tests pass under Node 24.18.0 on Linux. The Full dev.46 image
+continues to use its frozen Node 22.22.2 digest. This expands the candidate for
+Termux's official prebuilt Node LTS; actual Android execution and the Edge module
+bundle remain separate gates.
