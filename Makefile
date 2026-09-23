@@ -5,7 +5,7 @@ format:
 format-check:
 	python3 scripts/format.py --check
 
-.PHONY: check build references wrappers-check
+.PHONY: check build references wrappers-check spotify-patch-check
 check:
 	cd gateway && GOMAXPROCS=2 go vet -p 2 ./... && GOMAXPROCS=2 go test -race -p 2 ./...
 build:
@@ -17,6 +17,8 @@ wrappers-check:
 	npm ci --prefix wrappers/youtube-receiver --ignore-scripts --no-audit --no-fund
 	npm ci --prefix wrappers/youtube --ignore-scripts --no-audit --no-fund
 	node --test wrappers/youtube/*.test.mjs wrappers/youtube-receiver/*.test.mjs
+spotify-patch-check:
+	python3 scripts/test-spotify-patch.py
 
 .PHONY: architecture-check
 architecture-check:

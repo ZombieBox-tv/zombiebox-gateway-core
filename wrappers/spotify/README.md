@@ -6,6 +6,14 @@ PCM FIFO stay inside the worker. One cancellable FFmpeg reader converts fixed
 The gateway translates track metadata and a finite command set into semantic
 models. Provider tokens and raw upstream identities never reach Android.
 
+The staged source applies [licensed-vorbis.patch](patches/licensed-vorbis.patch)
+to the exact upstream commit. It replaces the unlicensed `xlab/vorbis-go` binding
+with MIT-licensed `jfreymuth/oggvorbis` v1.0.5 and `jfreymuth/vorbis` v1.0.2.
+This uses a pure-Go Vorbis decoder, reducing native library requirements; CPU and
+memory behavior on the actual Android sender/receiver are still unmeasured. Run
+`make spotify-patch-check` for synthetic metadata, decoded samples, gain and seek
+checks. Corresponding-source packages must carry this patch and both MIT licenses.
+
 Run `make services-build`, then `make spotify-up`. In client Settings → Gateway
 services, enter the operator code and choose **Show Spotify pairing code**. Finish
 the pairing on your phone. On the client select Settings → Receive Spotify / AirPlay
@@ -26,9 +34,9 @@ require the operator. Seamless music across separate Android Activities remains 
 Closing a media stream releases its FIFO reader; it does not disconnect the
 Spotify account. The next listening session reopens the bridge.
 
-Native Edge: `gateway-edge/install-services.sh spotify`, inside Termux with native
-decode libraries. No Linux binary is reused. Physical Android/Bionic execution
-and package availability are unverified.
+Native Edge: the licensed patch can be staged for an Android/Bionic build. The
+legacy source installer still needs to consume that staging path; prebuilt Edge
+distribution and physical execution are separate gates. No Linux binary is reused.
 
 Upstream: https://github.com/devgianlu/go-librespot,
 commit `57d7278d94a9233060c2a6238f5926ffd1e72de4` (GPL-3.0).

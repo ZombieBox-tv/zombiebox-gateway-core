@@ -13,6 +13,7 @@ No upstream installers, builds or npm install commands are run. The restore scri
 | jellyfin.org | official API docs; generated Go OpenAPI client pending |
 | stremio-addon-sdk | addon protocol reference |
 | go-librespot | Spotify Connect process |
+| oggvorbis / vorbis-go-decoder | Pinned MIT source for the licensed Spotify Vorbis replacement |
 | UxPlay | AirPlay process |
 | MediaMTX | live/mirroring relay |
 | Threadfin | Full IPTV/EPG |

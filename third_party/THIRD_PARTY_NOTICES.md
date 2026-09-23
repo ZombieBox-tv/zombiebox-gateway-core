@@ -7,11 +7,12 @@ Local sources/ clones preserve their upstream licenses and are excluded from the
 - Android SDK/build tools: Google licenses accepted outside the repository; not redistributed.
 - FFmpeg: license combination depends on build/components. Read COPYING*, LICENSE.md and build configuration before packaging.
 - go-librespot and UxPlay: upstream GPL licenses. External process boundaries do not remove distribution obligations.
+- Future Spotify builds stage go-librespot with a patch replacing the unlicensed `xlab/vorbis-go` binding with `jfreymuth/oggvorbis` v1.0.5 and `jfreymuth/vorbis` v1.0.2 (MIT). The already-published Full dev.46 Spotify image predates this patch and is under license review. New binaries must include both MIT licenses, patch and matching module source archives.
 - Serenity: MIT reference. Future code copies must retain copyright and license.
 - yt-cast-receiver 2.1.0: optional Node runtime dependency, exact npm lock and source commit bec77aceb537aa63a7bd67cb2fb3b4ad1139e9e8. package.json declares MIT, but the pinned checkout and published package contain no standalone license text. Retain package metadata and obtain the missing copyright/license notice before distribution; do not fabricate an attribution. Transitive npm licenses remain in the image and require the release inventory.
 - resources/ui-concepto.png: user-provided reference including third-party brands/artwork; not included in the APK.
 
-The author has not selected a license for first-party project code. Decide before publication.
+The author selected GPL-3.0-only for first-party project code; preserve its LICENSE and NOTICE in published artifacts.
 
 - modernc.org/sqlite v1.38.2: BSD-3-Clause; Linux gateway dependency. See modernc-sqlite-LICENSE.txt and the locked source reference. SQLite itself is public-domain upstream code.
 - github.com/mattn/go-sqlite3 v1.14.32: MIT; Android/Termux gateway driver (CGO), not an APK dependency. See go-sqlite3-LICENSE.txt.

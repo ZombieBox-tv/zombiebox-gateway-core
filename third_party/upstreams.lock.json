@@ -61,6 +61,24 @@
       "status": "Full wrapper integrated; real account and native Edge validation pending"
     },
     {
+      "name": "oggvorbis",
+      "url": "https://github.com/jfreymuth/oggvorbis.git",
+      "commit": "c02fb2ffd89cdcc258af6e4b518f45a485a396d2",
+      "referenceBranch": "master",
+      "purpose": "MIT-licensed pure-Go Vorbis decoder used by patched Spotify worker",
+      "licenseHint": "MIT",
+      "status": "integrated as pinned Go module v1.0.5"
+    },
+    {
+      "name": "vorbis-go-decoder",
+      "url": "https://github.com/jfreymuth/vorbis.git",
+      "commit": "008ec6649ae4e5b42f565f0e0f8cf6b4c593f31c",
+      "referenceBranch": "master",
+      "purpose": "MIT-licensed decoder dependency of oggvorbis",
+      "licenseHint": "MIT",
+      "status": "integrated as pinned Go module v1.0.2"
+    },
+    {
       "name": "uxplay",
       "url": "https://github.com/FDH2/UxPlay.git",
       "commit": "57ea83411d5f7e0b38c5841987439340543f025c",

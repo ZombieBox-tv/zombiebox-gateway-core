@@ -15,6 +15,19 @@ Keep a separate validation track for hardware/account/latency/memory evidence.
 Use development checkpoint tags until complete exit gates are evidenced. Hosted
 issues/milestones can be attached to the shared GitHub Project once remotes exist.
 
+## dev.47 — licensed Spotify decoder staging
+
+The exact go-librespot source now has a first-party, reproducible patch replacing
+the unlicensed `xlab/vorbis-go` binding with pinned MIT `oggvorbis` and `vorbis`
+modules. The source preparation refuses changed upstream checkouts, and the
+Spotify Docker recipe requires the patch marker, includes both MIT license files
+and omits the old binding. A stereo synthetic fixture checks Ogg metadata CRC,
+gain, decoded samples, seek and closed-state behavior; the modified Full image
+builds and its CLI starts on the host. Real Spotify account playback, Android/
+Bionic performance and new binary/source publication remain open. The frozen Full
+dev.46 optional Spotify image is not relabeled by this source change. No product
+or physical gate closes.
+
 ## dev.11 increment
 
 Hierarchical Plex/Jellyfin/Stremio browsing, progressive remote probing/conversion and paired YouTube adaptive mux; bounded injected adapters. Live/HLS adaptation and receiver completion remain open.
