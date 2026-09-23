@@ -15,6 +15,16 @@ Keep a separate validation track for hardware/account/latency/memory evidence.
 Use development checkpoint tags until complete exit gates are evidenced. Hosted
 issues/milestones can be attached to the shared GitHub Project once remotes exist.
 
+## dev.48 — AirPlay A/V receiver transition host coverage
+
+A simulated authenticated AirPlay worker alternates video, audio-only metadata and
+idle. The server must proxy each HLS manifest/segment through the gateway, replace
+the owned plan when media kind changes, revoke the old stream ticket, and release
+the audio ticket when the sender stops. This is host behavioral evidence only;
+iOS/UxPlay, device playback and real-account validation remain open. The licensed
+Full/Edge artifacts consume earlier Core source identities and are not relabeled
+by this test-only checkpoint.
+
 ## dev.47 — licensed Spotify decoder staging
 
 The exact go-librespot source now has a first-party, reproducible patch replacing

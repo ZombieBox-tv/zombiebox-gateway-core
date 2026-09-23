@@ -37,7 +37,8 @@
     "Dev.43: bounded local software pipeline diagnostic generates, remuxes, transcodes and decodes synthetic audio/video. Missing tools/cancellation remain distinct; no receiver/network capability is granted. Full/Edge share the same implementation.",
     "Dev.44: authenticated HLS alternate-audio host integration covers default and selected renditions through remux/transcode. Runtime policy and physical acceptance are unchanged.",
     "Dev.45: YouTube catalog and TV receiver wrappers admit tested Node24.18+ LTS while retaining secure Node22.22.2+. Fresh locked npm installs and all 14 host tests passed on Node24.18; no Android/Bionic runtime claim.",
-    "Dev.47: reproducible go-librespot patch replaces unlicensed Vorbis binding with pinned MIT pure-Go modules; synthetic stereo metadata/decode/seek and candidate Full Docker build pass. New image/source publication, Android/account performance and physical gates remain open."
+    "Dev.47: reproducible go-librespot patch replaces unlicensed Vorbis binding with pinned MIT pure-Go modules; synthetic stereo metadata/decode/seek and candidate Full Docker build pass. New image/source publication, Android/account performance and physical gates remain open.",
+    "Dev.48: authenticated AirPlay video-to-audio-to-idle host integration verifies local HLS manifest/segment proxying, semantic metadata, owned-session replacement and stale ticket revocation. iOS/UxPlay, Android and physical A/V remain unverified."
   ],
   "milestones": [
     {
@@ -121,6 +122,6 @@
       "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/10"
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.47",
+  "developmentCheckpoint": "v0.1.0-dev.48",
   "remote": "https://github.com/ZombieBox-tv/zombiebox-gateway-core"
 }

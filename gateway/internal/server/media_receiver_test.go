@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"zombiebox.local/gateway/internal/domain"
@@ -68,5 +69,86 @@ func TestMediaReceiverRoutesOwnedSourceAndAuthorizesSpotifyControls(t *testing.T
 	json.Unmarshal(blocked.Body.Bytes(), &result)
 	if result.Plan != nil {
 		t.Fatal("dismissed source reopened")
+	}
+}
+
+func TestAirPlayVideoToAudioReplacesOwnedStreamAndRetiresOldTicket(t *testing.T) {
+	var mode atomic.Int32
+	mode.Store(1)
+	privateToken := strings.Repeat("a", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+privateToken {
+			t.Error("AirPlay worker request lost its private token")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/status":
+			fmt.Fprintf(w, `{"active":%t,"audioActive":%t,"metadata":{"title":"Track","artist":"Artist","album":"Album"}}`, mode.Load() == 1, mode.Load() == 2)
+		case "/stream/index.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nvideo.ts\n")
+		case "/stream/audio.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\naudio.ts\n")
+		case "/stream/video.ts":
+			fmt.Fprint(w, "video-fixture")
+		case "/stream/audio.ts":
+			fmt.Fprint(w, "audio-fixture")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "airplay-switch")
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "airplay-switch", token, ""); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+	read := func() inbox.Snapshot {
+		w := call(s, "GET", "/v1/media-receiver", "", "airplay-switch", token, "")
+		var snapshot inbox.Snapshot
+		if err := json.Unmarshal(w.Body.Bytes(), &snapshot); err != nil || w.Code != 200 {
+			t.Fatal(w.Code, w.Body, err)
+		}
+		return snapshot
+	}
+	video := read()
+	if video.Plan == nil || video.Plan.Item.Kind != "video" || video.Plan.Item.Provider != "airplay" || strings.Contains(video.Plan.URL, privateToken) {
+		t.Fatal("video session or semantic boundary missing", video)
+	}
+	assertStream := func(plan *domain.Plan, expected string) {
+		w := call(s, "GET", plan.URL, "", "", "", "")
+		if w.Code != 200 || !strings.HasPrefix(w.Body.String(), "#EXTM3U") || strings.Contains(w.Body.String(), upstream.URL) {
+			t.Fatal("manifest unavailable or upstream leaked", w.Code, w.Body)
+		}
+		lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+		segment := lines[len(lines)-1]
+		if !strings.HasPrefix(segment, "/v1/streams/") {
+			t.Fatal("segment was not rewritten to the local gateway", segment)
+		}
+		w = call(s, "GET", segment, "", "", "", "")
+		if w.Code != 200 || w.Body.String() != expected {
+			t.Fatal("receiver segment unavailable", w.Code, w.Body)
+		}
+	}
+	assertStream(video.Plan, "video-fixture")
+	mode.Store(2)
+	audio := read()
+	if audio.Plan == nil || audio.Plan.Item.Kind != "audio" || audio.Plan.Item.Title != "Track" || audio.Plan.Item.Subtitle != "Artist" || audio.Plan.SessionID == video.Plan.SessionID {
+		t.Fatal("audio did not replace video", audio)
+	}
+	if w := call(s, "GET", video.Plan.URL, "", "", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatal("old video ticket survived", w.Code)
+	}
+	assertStream(audio.Plan, "audio-fixture")
+	mode.Store(0)
+	ended := read()
+	if ended.Plan != nil || ended.NowPlaying == nil || ended.NowPlaying.State != "STOPPED" {
+		t.Fatal("ended AirPlay stream stayed active", ended)
+	}
+	if w := call(s, "GET", audio.Plan.URL, "", "", "", ""); w.Code != http.StatusUnauthorized {
+		t.Fatal("ended audio ticket survived", w.Code)
 	}
 }
