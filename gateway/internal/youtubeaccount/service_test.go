@@ -140,3 +140,45 @@ func TestUnavailableAndInvalidPage(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestListRefreshesRejectedAccessOnce(t *testing.T) {
+	for _, retryAccepted := range []bool{true, false} {
+		t.Run(map[bool]string{true: "recovered", false: "bounded"}[retryAccepted], func(t *testing.T) {
+			store := &memoryStore{records: map[string]json.RawMessage{}}
+			ctx := t.Context()
+			if err := store.Put(ctx, "youtube_account", "household", tokenState{Access: "rejected", Refresh: "refresh", ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+				t.Fatal(err)
+			}
+			lists, refreshes := 0, 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/token":
+					refreshes++
+					io.WriteString(w, `{"access_token":"renewed","expires_in":3600}`)
+				case "/v3/playlists":
+					lists++
+					if r.Header.Get("Authorization") == "Bearer rejected" || !retryAccepted {
+						w.WriteHeader(http.StatusUnauthorized)
+						io.WriteString(w, `{"error":"invalid_token"}`)
+						return
+					}
+					io.WriteString(w, `{"items":[{"id":"PLabcdefghijkl","snippet":{"title":"Recovered"}}]}`)
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+				}
+			}))
+			defer upstream.Close()
+			svc := New(store, upstream.Client(), "client-id", "", Endpoints{Token: upstream.URL + "/token", Data: upstream.URL + "/v3"}, time.Now)
+			page, err := svc.List(ctx, "playlists", "")
+			if lists != 2 || refreshes != 1 {
+				t.Fatalf("unbounded or missing retry: lists=%d refreshes=%d", lists, refreshes)
+			}
+			if retryAccepted && (err != nil || len(page.Items) != 1) {
+				t.Fatalf("recovery failed: %+v %v", page, err)
+			}
+			if !retryAccepted && err != ErrUpstream {
+				t.Fatalf("repeated rejection must fail closed: %v", err)
+			}
+		})
+	}
+}

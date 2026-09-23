@@ -24,6 +24,7 @@ var ErrExpired = errors.New("authorization expired")
 var ErrTooSoon = errors.New("authorization poll too soon")
 var ErrUpstream = errors.New("YouTube account service unavailable")
 var ErrNotConnected = errors.New("YouTube account is not connected")
+var errUnauthorized = errors.New("YouTube access token rejected")
 
 type Transport interface {
 	Do(*http.Request) (*http.Response, error)
@@ -249,8 +250,16 @@ func (s *Service) List(ctx context.Context, kind, pageToken string) (Page, error
 			} `json:"snippet"`
 		} `json:"items"`
 	}
-	if err = s.request(request, &response, false); err != nil {
-		return Page{}, err
+	if err = s.request(request, &response, false); err == errUnauthorized {
+		access, err = s.refresh(ctx)
+		if err != nil {
+			return Page{}, err
+		}
+		request.Header.Set("Authorization", "Bearer "+access)
+		err = s.request(request, &response, false)
+	}
+	if err != nil {
+		return Page{}, ErrUpstream
 	}
 	page := Page{Items: []Entry{}}
 	if len(response.NextPageToken) <= 200 {
@@ -280,6 +289,18 @@ func (s *Service) access(ctx context.Context) (string, error) {
 	if state.Access != "" && s.now().Unix()+60 < state.ExpiresAt {
 		return state.Access, nil
 	}
+	return s.refreshWithState(ctx, state)
+}
+
+func (s *Service) refresh(ctx context.Context) (string, error) {
+	var state tokenState
+	if s.store.Get(ctx, "youtube_account", "household", &state) != nil || state.Refresh == "" {
+		return "", ErrNotConnected
+	}
+	return s.refreshWithState(ctx, state)
+}
+
+func (s *Service) refreshWithState(ctx context.Context, state tokenState) (string, error) {
 	values := url.Values{"client_id": {s.clientID}, "refresh_token": {state.Refresh}, "grant_type": {"refresh_token"}}
 	if s.clientSecret != "" {
 		values.Set("client_secret", s.clientSecret)
@@ -321,6 +342,9 @@ func (s *Service) request(request *http.Request, out any, allowClientError bool)
 		return ErrUpstream
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized && !allowClientError {
+		return errUnauthorized
+	}
 	if response.StatusCode >= 500 || response.StatusCode < 200 || (response.StatusCode >= 300 && response.StatusCode < 400) || (response.StatusCode >= 400 && !allowClientError) {
 		return ErrUpstream
 	}

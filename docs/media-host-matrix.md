@@ -14,6 +14,7 @@ account compatibility.
 | Spotify reception | Authenticated audio proxy, owned controls, paused metadata update, natural-end ticket revocation. | Real Connect account, device audio output and long-running recovery. |
 | AirPlay reception | Authenticated HLS video→audio→idle replacement, segment proxy and stale-ticket revocation. | Real iOS discovery, audio/video, sync and handoff. |
 | YouTube receiver and adaptive media | Leased TV Code command ownership and host mux/selection fixtures. | Real phone discovery, account restrictions, stream availability and TV playback. |
+| YouTube account lists | Device-flow fixtures cover private refresh-token storage, expiry refresh, early HTTP 401 refresh with one retry, revoked grants and scoped subscriptions/playlists. | Real Google consent, quotas, account catalog contents and TV navigation. |
 | RTSP | Bounded protocol OPTIONS endpoint diagnostic and Cast relay configuration. | Actual RTSP media exchange and target decoder; no full RTSP golden stream is claimed. |
 
 The required physical test stage should collect provider/source, actual codec,
