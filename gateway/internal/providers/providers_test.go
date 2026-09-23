@@ -16,6 +16,16 @@ func TestPlaylistMetadataAndSchemes(t *testing.T) {
 		t.Fatalf("%+v %v", sources, err)
 	}
 }
+func TestPlaylistCategoriesAndStableChannelIdentity(t *testing.T) {
+	first, err := ParseM3U([]byte("#EXTM3U\n#EXTINF:-1 tvg-id=\"news\" group-title=\" News \" ,News\nhttps://example.test/news.ts\n#EXTINF:-1,Sport\n#EXTGRP:Sports\nhttps://example.test/sport.ts\n"), "")
+	if err != nil || len(first) != 2 || first[0].Item.Category != "News" || first[1].Item.Category != "Sports" {
+		t.Fatalf("categories: %+v %v", first, err)
+	}
+	second, err := ParseM3U([]byte("#EXTM3U\n#EXTINF:-1 tvg-id=\"news\" group-title=\"World\",News\nhttps://example.test/news.ts\n"), "")
+	if err != nil || len(second) != 1 || first[0].Item.ID != second[0].Item.ID {
+		t.Fatal("category edit changed stable channel ID", err)
+	}
+}
 func TestXMLTVTimeZonesAndExpiredPrograms(t *testing.T) {
 	now := time.Date(2026, 9, 20, 18, 0, 0, 0, time.UTC)
 	guide, err := ParseXMLTV([]byte(`<tv><programme channel="bbc" start="20260920113000 -0600" stop="20260920123000 -0600"><title>News &amp; weather</title></programme><programme channel="bbc" start="20260919000000 +0000" stop="20260919010000 +0000"><title>Old</title></programme></tv>`), now)

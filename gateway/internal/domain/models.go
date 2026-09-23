@@ -78,6 +78,7 @@ type Item struct {
 	ID          string      `json:"id"`
 	Provider    string      `json:"provider"`
 	Kind        string      `json:"kind"`
+	Category    string      `json:"category,omitempty"`
 	Title       string      `json:"title"`
 	Subtitle    string      `json:"subtitle,omitempty"`
 	Description string      `json:"description,omitempty"`

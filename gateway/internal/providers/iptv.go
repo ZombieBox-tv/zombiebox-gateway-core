@@ -81,12 +81,28 @@ func (a *Adapters) IPTV(ctx context.Context, c Config) ([]Source, error) {
 }
 
 var tvgID = regexp.MustCompile(`tvg-id="([^"]*)"`)
+var groupTitle = regexp.MustCompile(`group-title="([^"]*)"`)
+
+func iptvCategory(raw string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(raw))
+	runes := []rune(clean)
+	if len(runes) > 80 {
+		return string(runes[:80])
+	}
+	return clean
+}
 
 func ParseM3U(body []byte, base string) ([]Source, error) {
 	scan := bufio.NewScanner(strings.NewReader(string(body)))
 	scan.Buffer(make([]byte, 4096), 65536)
 	title := ""
 	epgID := ""
+	group := ""
 	out := []Source{}
 	seen := map[string]bool{}
 	for scan.Scan() {
@@ -94,8 +110,12 @@ func ParseM3U(body []byte, base string) ([]Source, error) {
 		if strings.HasPrefix(line, "#EXTINF:") {
 			title = ""
 			epgID = ""
+			group = ""
 			if match := tvgID.FindStringSubmatch(line); len(match) == 2 {
 				epgID = match[1]
+			}
+			if match := groupTitle.FindStringSubmatch(line); len(match) == 2 {
+				group = iptvCategory(match[1])
 			}
 			quoted := false
 			for n, ch := range line {
@@ -107,6 +127,10 @@ func ParseM3U(body []byte, base string) ([]Source, error) {
 					break
 				}
 			}
+			continue
+		}
+		if strings.HasPrefix(line, "#EXTGRP:") {
+			group = iptvCategory(strings.TrimPrefix(line, "#EXTGRP:"))
 			continue
 		}
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -138,6 +162,7 @@ func ParseM3U(body []byte, base string) ([]Source, error) {
 		if seen[id] {
 			title = ""
 			epgID = ""
+			group = ""
 			continue
 		}
 		seen[id] = true
@@ -145,9 +170,10 @@ func ParseM3U(body []byte, base string) ([]Source, error) {
 		if strings.Contains(strings.ToLower(u.Path), "m3u8") {
 			mime = "application/vnd.apple.mpegurl"
 		}
-		out = append(out, Source{EPGID: epgID, Item: domain.Item{ID: id, Provider: "iptv", Kind: "channel", Title: title, Playable: true}, URL: u.String(), MIME: mime, Live: true})
+		out = append(out, Source{EPGID: epgID, Item: domain.Item{ID: id, Provider: "iptv", Kind: "channel", Category: group, Title: title, Playable: true}, URL: u.String(), MIME: mime, Live: true})
 		title = ""
 		epgID = ""
+		group = ""
 		if len(out) >= 5000 {
 			break
 		}

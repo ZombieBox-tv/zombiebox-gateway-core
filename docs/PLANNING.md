@@ -1,5 +1,11 @@
 # zombiebox-gateway-core: component work
 
+## dev.50 IPTV categories
+
+Normalize bounded M3U `group-title` and `EXTGRP` labels without changing channel
+IDs. Catalog pages expose sorted categories and combinable category/favorite/search
+filters. Host parser and catalog tests pass; user-playlist/EPG acceptance remains.
+
 ## dev.49 IPTV favorites
 
 Persist up to 256 stable channel IDs in SQLite; only current-playlist channels

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestIPTVFavoritesPersistAndResolveCurrentChannels(t *testing.T) {
 	playlist := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "#EXTM3U\n")
 		if !removed.Load() {
-			io.WriteString(w, "#EXTINF:-1,News\nhttps://media.example.test/live.m3u8?secret=one\n")
+			io.WriteString(w, "#EXTINF:-1 group-title=\"News\",News\nhttps://media.example.test/live.m3u8?secret=one\n")
 		}
 	}))
 	defer playlist.Close()
@@ -42,6 +43,20 @@ func TestIPTVFavoritesPersistAndResolveCurrentChannels(t *testing.T) {
 		t.Fatalf("catalog: %d %s", page.Code, page.Body)
 	}
 	id := catalog.Items[0].ID
+	if catalog.Items[0].Category != "News" {
+		t.Fatal("playlist category was not normalized")
+	}
+	var grouped struct {
+		Items      []domain.Item
+		Categories []string
+	}
+	byCategory := call(s, "GET", "/v1/catalog?provider=iptv&category=News", "", "favorite-tv", token, "")
+	if byCategory.Code != 200 || json.Unmarshal(byCategory.Body.Bytes(), &grouped) != nil || len(grouped.Items) != 1 || len(grouped.Categories) != 1 || grouped.Categories[0] != "News" {
+		t.Fatalf("category list: %d %s", byCategory.Code, byCategory.Body)
+	}
+	if w := call(s, "GET", "/v1/catalog?provider=iptv&category=Sports", "", "favorite-tv", token, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"items":[]`) {
+		t.Fatal("unrelated category returned channels", w.Code, w.Body)
+	}
 	if catalog.Items[0].Favorite {
 		t.Fatal("new channel is already favorite")
 	}

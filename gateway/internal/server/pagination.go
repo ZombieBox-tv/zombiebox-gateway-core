@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,11 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 		offset = n
 	}
 	provider := r.URL.Query().Get("provider")
+	category := r.URL.Query().Get("category")
+	if category != "" && (provider != "iptv" || len([]rune(category)) > 80 || strings.ContainsAny(category, "\x00\r\n")) {
+		fail(w, 400, "invalid_category_filter")
+		return
+	}
 	favoritesOnly := r.URL.Query().Get("favorites") == "1"
 	if favoritesOnly && provider != "iptv" {
 		fail(w, 400, "invalid_favorites_filter")
@@ -33,6 +39,7 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 	}
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	matches := []domain.Item{}
+	categorySet := map[string]bool{}
 	sources, err := s.screenSources(r.Context(), d.ID, provider, r.URL.Query().Get("q"))
 	if err != nil {
 		fail(w, 502, "search_unavailable")
@@ -41,6 +48,12 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 	for _, source := range sources {
 		if source.Item.Provider == "iptv" {
 			source.Item.Favorite = favorites[source.Item.ID]
+			if source.Item.Category != "" {
+				categorySet[source.Item.Category] = true
+			}
+		}
+		if category != "" && source.Item.Category != category {
+			continue
 		}
 		if favoritesOnly && !source.Item.Favorite {
 			continue
@@ -50,6 +63,14 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 		}
 	}
 	items := []domain.Item{}
+	categories := make([]string, 0, len(categorySet))
+	for name := range categorySet {
+		categories = append(categories, name)
+	}
+	sort.Strings(categories)
+	if len(categories) > 128 {
+		categories = categories[:128]
+	}
 	next := -1
 	if offset < len(matches) {
 		end := offset + 40
@@ -60,5 +81,5 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 		}
 		items = matches[offset:end]
 	}
-	respond(w, 200, map[string]any{"apiVersion": 1, "items": items, "nextOffset": next, "total": len(matches)})
+	respond(w, 200, map[string]any{"apiVersion": 1, "items": items, "nextOffset": next, "total": len(matches), "categories": categories})
 }
