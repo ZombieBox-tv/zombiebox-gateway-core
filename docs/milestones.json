@@ -3,6 +3,7 @@
   "repository": "zombiebox-gateway-core",
   "productRegistry": "workspace:docs/milestones.json",
   "notes": [
+    "Dev.52: Generated/probed local 480p MP4/AAC, 720p MKV/AC3 and 1080p MPEG-TS/AAC golden samples; media-host-matrix records exact coverage and RTSP/device/account limits. No product exit gate closes.",
     "Dev.51: Gateway-owned YouTube TV OAuth device flow, private SQLite refresh/revoke and bounded subscriptions/playlists roots; Spotify metadata/pause/natural-end stream lifecycle host-tested. Real accounts and physical acceptance remain open.",
     "Dev.50: Normalize bounded IPTV M3U categories and expose a combinable catalog filter; channel identity is unchanged. Physical playlist/playback gates remain open.",
     "Dev.49: Bounded household IPTV favorites persist stable current-playlist channel IDs in SQLite; catalog flag/filter and paired actions are additive. Other media/receiver cases, YouTube OAuth and physical gates remain open.",

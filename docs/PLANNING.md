@@ -197,3 +197,10 @@ milestone closes. See [account boundary](youtube-account.md).
 The same checkpoint adds a Spotify metadata/pause/natural-end receiver fixture:
 its active stream survives a paused track change, then revokes the ticket on
 natural completion. Real Spotify Connect and output remain device/account gates.
+## dev.52 local golden media profiles
+
+Generate/probe representative 480p H.264/AAC MP4, 720p H.264/AC3 MKV and
+1080p H.264/AAC MPEG-TS host fixtures. The existing HLS/DASH, live conversion,
+subtitle, Spotify, AirPlay and YouTube host cases are catalogued in
+[the media matrix](media-host-matrix.md). Real RTSP media, account/sender/device
+behavior and product exit gates remain open.
