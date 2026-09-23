@@ -1,5 +1,12 @@
 # zombiebox-gateway-core: component work
 
+## dev.49 IPTV favorites
+
+Persist up to 256 stable channel IDs in SQLite; only current-playlist channels
+appear in favorite pages. Add a semantic item flag and authenticated actions
+without copying stream URLs/credentials. Host tests cover filtering, restart and
+removal. Other media/receiver cases and YouTube OAuth remain open.
+
 The product milestones relevant to this repository are M0, M1, M3, M4, M5, M6, M7, M8, M9, M11.
 The local registry is a component projection of the workspace plan. Closing a
 component task does not close a product-wide milestone or a physical validation gate.

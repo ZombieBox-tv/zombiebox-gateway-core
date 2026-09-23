@@ -21,6 +21,16 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 		offset = n
 	}
 	provider := r.URL.Query().Get("provider")
+	favoritesOnly := r.URL.Query().Get("favorites") == "1"
+	if favoritesOnly && provider != "iptv" {
+		fail(w, 400, "invalid_favorites_filter")
+		return
+	}
+	favorites, err := s.iptvFavoriteIDs(r.Context())
+	if err != nil {
+		fail(w, 500, "storage_error")
+		return
+	}
 	query := strings.ToLower(r.URL.Query().Get("q"))
 	matches := []domain.Item{}
 	sources, err := s.screenSources(r.Context(), d.ID, provider, r.URL.Query().Get("q"))
@@ -29,6 +39,12 @@ func (s *Server) catalogPage(w http.ResponseWriter, r *http.Request, d domain.De
 		return
 	}
 	for _, source := range sources {
+		if source.Item.Provider == "iptv" {
+			source.Item.Favorite = favorites[source.Item.ID]
+		}
+		if favoritesOnly && !source.Item.Favorite {
+			continue
+		}
 		if (provider == "" || source.Item.Provider == provider) && (query == "" || provider == "youtube" || strings.Contains(strings.ToLower(source.Item.Title), query)) {
 			matches = append(matches, source.Item)
 		}

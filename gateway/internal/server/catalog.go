@@ -235,12 +235,20 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		fail(w, 502, "search_unavailable")
 		return
 	}
+	favorites, err := s.iptvFavoriteIDs(r.Context())
+	if err != nil {
+		fail(w, 500, "storage_error")
+		return
+	}
 	screen := domain.Screen{APIVersion: 1, UIVersion: 1, Screen: "home", Sections: []domain.Section{}}
 	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	scope := r.URL.Query().Get("provider")
 	rows := map[string][]domain.Item{}
 	available := map[string]domain.Item{}
 	for _, src := range sources {
+		if src.Item.Provider == "iptv" {
+			src.Item.Favorite = favorites[src.Item.ID]
+		}
 		available[src.Item.ID] = src.Item
 		if scope != "" && scope != src.Item.Provider {
 			continue

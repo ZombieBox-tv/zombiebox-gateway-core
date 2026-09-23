@@ -85,6 +85,7 @@ type Item struct {
 	DurationMS  int64       `json:"durationMs,omitempty"`
 	PositionMS  int64       `json:"positionMs,omitempty"`
 	Playable    bool        `json:"playable"`
+	Favorite    bool        `json:"favorite,omitempty"`
 }
 type Section struct {
 	ID    string `json:"id"`
