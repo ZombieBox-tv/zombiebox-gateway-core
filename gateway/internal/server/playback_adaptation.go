@@ -57,6 +57,7 @@ func (s *Server) adaptPlayback(w http.ResponseWriter, r *http.Request, d domain.
 		return
 	}
 	if len(s.sessions) >= 64 {
+		_ = s.revertQualityPreference(r.Context(), d.ID, old.source.Item.Kind)
 		fail(w, 429, "session_limit")
 		return
 	}

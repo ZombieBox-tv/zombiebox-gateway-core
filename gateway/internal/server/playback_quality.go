@@ -1,0 +1,244 @@
+package server
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/media"
+	"zombiebox.local/gateway/internal/playback"
+)
+
+const qualityPrefBucket = "quality_preferences"
+
+type qualityPreference struct {
+	QualityID string `json:"qualityId"`
+	Kind      string `json:"kind"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+func (s *Server) getQualityPreference(ctx context.Context, deviceID, kind string) string {
+	if deviceID == "" || kind == "" {
+		return ""
+	}
+	var pref qualityPreference
+	if err := s.db.Get(ctx, qualityPrefBucket+":"+deviceID, kind, &pref); err == nil {
+		return pref.QualityID
+	}
+	return ""
+}
+
+func (s *Server) setQualityPreference(ctx context.Context, deviceID, kind, qualityID string) error {
+	if deviceID == "" || kind == "" {
+		return nil
+	}
+	return s.db.Put(ctx, qualityPrefBucket+":"+deviceID, kind, qualityPreference{
+		QualityID: qualityID,
+		Kind:      kind,
+		UpdatedAt: time.Now().Unix(),
+	})
+}
+
+func (s *Server) revertQualityPreference(ctx context.Context, deviceID, kind string) error {
+	if deviceID == "" || kind == "" {
+		return nil
+	}
+	return s.db.Put(ctx, qualityPrefBucket+":"+deviceID, kind, qualityPreference{
+		QualityID: "auto",
+		Kind:      kind,
+		UpdatedAt: time.Now().Unix(),
+	})
+}
+
+func (s *Server) cleanupSupersededSessionsLocked(deviceID, activeOldID string) {
+	for sid, sess := range s.sessions {
+		if sess.device != deviceID || sid == activeOldID {
+			continue
+		}
+		if sess.supersededBy != "" || sess.ctx.Err() != nil {
+			sess.cancel()
+			delete(s.sessions, sid)
+			s.events.publish(deviceID, "playback.stopped", map[string]string{"sessionId": sid})
+		}
+	}
+}
+
+func (s *Server) playbackQualities(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	sess := s.ownedMediaSession(r, d.ID)
+	if sess == nil {
+		fail(w, 404, "session_not_found")
+		return
+	}
+	metadata := sess.metadata
+	if metadata == nil {
+		var value domain.Metadata
+		var err error
+		if sess.source.Path != "" && s.deps.Media != nil {
+			value, err = s.deps.Media.Probe(r.Context(), sess.source.Path)
+		} else if s.deps.RemoteMedia != nil && media.RemoteCandidate(sess.source) {
+			value, err = s.deps.RemoteMedia.ProbeRemote(r.Context(), sess.source)
+		}
+		if err != nil {
+			respond(w, 200, domain.QualityInventory{
+				SelectedID: "auto",
+				Options:    []domain.QualityOption{{ID: "auto", Label: "Auto"}},
+			})
+			return
+		}
+		metadata = &value
+		sess.metadata = metadata
+	}
+
+	inventory := playback.Qualities(*metadata, sess.source, d, sess.selection.Quality)
+	respond(w, 200, inventory)
+}
+
+func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	var request struct {
+		QualityID  string `json:"qualityId"`
+		Quality    string `json:"quality"`
+		PositionMS int64  `json:"positionMs"`
+	}
+	if !decode(w, r, &request) {
+		return
+	}
+	if request.QualityID == "" && request.Quality != "" {
+		request.QualityID = request.Quality
+	}
+	if request.QualityID == "" {
+		request.QualityID = "auto"
+	}
+	if request.PositionMS < 0 || request.PositionMS > 7*24*60*60*1000 {
+		fail(w, 400, "invalid_position")
+		return
+	}
+
+	sess := s.ownedMediaSession(r, d.ID)
+	if sess == nil {
+		fail(w, 404, "session_not_found")
+		return
+	}
+
+	metadata := sess.metadata
+	if metadata == nil {
+		var value domain.Metadata
+		var err error
+		if sess.source.Path != "" && s.deps.Media != nil {
+			value, err = s.deps.Media.Probe(r.Context(), sess.source.Path)
+		} else if s.deps.RemoteMedia != nil && media.RemoteCandidate(sess.source) {
+			value, err = s.deps.RemoteMedia.ProbeRemote(r.Context(), sess.source)
+		}
+		if err != nil {
+			fail(w, 502, "media_probe_failed")
+			return
+		}
+		metadata = &value
+		sess.metadata = metadata
+	}
+
+	inventory := playback.Qualities(*metadata, sess.source, d, sess.selection.Quality)
+	if !playback.HasQuality(inventory, request.QualityID) {
+		fail(w, 409, "quality_unavailable")
+		return
+	}
+
+	mode, chosenQuality := playback.SelectedQualityMode(*metadata, sess.source, d, request.QualityID, request.PositionMS, sess.mode)
+	if mode == "EXTERNAL_PLAYER" {
+		fail(w, 409, "quality_unavailable")
+		return
+	}
+
+	oldID := r.PathValue("session")
+	s.mu.Lock()
+	oldSess := s.sessions[oldID]
+	if oldSess == nil || oldSess.device != d.ID || oldSess.ctx.Err() != nil {
+		s.mu.Unlock()
+		fail(w, 404, "session_not_found")
+		return
+	}
+
+	// Bounds and cleans earlier superseded sessions for this device to prevent unbounded growth:
+	s.cleanupSupersededSessionsLocked(d.ID, oldID)
+
+	if len(s.sessions) >= 64 {
+		s.mu.Unlock()
+		fail(w, 429, "session_limit")
+		return
+	}
+
+	id, ticket := randomID(16), randomID(24)
+	ctx, cancel := context.WithDeadline(context.Background(), oldSess.expires)
+	selection := oldSess.selection
+	selection.Quality = chosenQuality
+	selection.PositionMS = request.PositionMS
+	if oldSess.source.Live {
+		selection.PositionMS = 0
+	}
+
+	newSess := &session{
+		networkAdaptation: oldSess.networkAdaptation,
+		adaptation:        oldSess.adaptation,
+		mode:              mode,
+		device:            d.ID,
+		ticket:            ticket,
+		expires:           oldSess.expires,
+		source:            oldSess.source,
+		metadata:          oldSess.metadata,
+		subtitleID:        oldSess.subtitleID,
+		ctx:               ctx,
+		cancel:            cancel,
+		selection:         selection,
+		resources:         map[string]string{},
+		supersedes:        oldID,
+	}
+	oldSess.supersededBy = id
+	s.sessions[id] = newSess
+
+	plan := domain.Plan{
+		Version:    1,
+		SubtitleID: oldSess.subtitleID,
+		SessionID:  id,
+		Mode:       mode,
+		URL:        "/v1/streams/" + id + "?ticket=" + ticket,
+		MIME:       oldSess.source.MIME,
+		Live:       oldSess.source.Live,
+		Item:       oldSess.source.Item,
+	}
+	if mode == "TRANSCODE" || mode == "REMUX" {
+		plan.MIME = "video/mp4"
+		plan.Seekable = false
+		plan.ResumeMS = 0
+		if mode == "TRANSCODE" {
+			plan.TimelineOffsetMS = request.PositionMS
+		}
+	} else {
+		plan.Seekable = !oldSess.source.Live
+		plan.ResumeMS = request.PositionMS
+	}
+
+	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
+	s.mu.Unlock()
+
+	// Persist preference to SQLite outside s.mu to avoid blocking global server state on DB I/O.
+	// Make failure semantics explicit: roll back created session if preference write fails.
+	kind := oldSess.source.Item.Kind
+	if kind == "" {
+		kind = "video"
+	}
+	if err := s.setQualityPreference(r.Context(), d.ID, kind, request.QualityID); err != nil {
+		s.mu.Lock()
+		if created := s.sessions[id]; created != nil {
+			created.cancel()
+			delete(s.sessions, id)
+		}
+		if s.sessions[oldID] != nil && s.sessions[oldID].supersededBy == id {
+			s.sessions[oldID].supersededBy = ""
+		}
+		s.mu.Unlock()
+		fail(w, 500, "storage_error")
+		return
+	}
+
+	respond(w, 201, plan)
+}

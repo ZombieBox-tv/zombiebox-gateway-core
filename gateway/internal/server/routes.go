@@ -39,6 +39,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/youtube/account/authorization/poll", s.auth(s.youtubeAccountPoll))
 	s.mux.HandleFunc("DELETE /v1/youtube/account", s.auth(s.youtubeAccountDisconnect))
 	s.mux.HandleFunc("GET /v1/youtube/account/{list}", s.auth(s.youtubeAccountList))
+	s.mux.HandleFunc("GET /v1/youtube/related", s.auth(s.youtubeRelated))
+	s.mux.HandleFunc("GET /v1/youtube/related/{video}", s.auth(s.youtubeRelated))
 	s.mux.HandleFunc("GET /v1/network/sample", s.auth(s.networkDownload))
 	s.mux.HandleFunc("POST /v1/device/network", s.auth(s.networkReport))
 	for _, method := range []string{"GET", "PUT", "DELETE"} {
@@ -91,6 +93,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/playback/{session}", s.auth(s.stop))
 	s.mux.HandleFunc("GET /v1/playback/{session}/tracks", s.auth(s.playbackTracks))
 	s.mux.HandleFunc("POST /v1/playback/{session}/audio", s.auth(s.selectAudio))
+	s.mux.HandleFunc("GET /v1/playback/{session}/qualities", s.auth(s.playbackQualities))
+	s.mux.HandleFunc("POST /v1/playback/{session}/quality", s.auth(s.selectQuality))
 	s.mux.HandleFunc("GET /v1/playback/{session}/subtitles/{track}", s.auth(s.playbackSubtitles))
 	s.mux.HandleFunc("GET /v1/streams/{session}", s.stream)
 	s.mux.HandleFunc("GET /v1/streams/{session}/{resource}", s.stream)

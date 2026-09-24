@@ -67,6 +67,8 @@ type Server struct {
 	catalogCache       map[string]catalogEntry
 	searchResults      map[string]searchResult
 	youtubeHomeFeeds   map[string]searchResult
+	youtubeContexts    map[string]recentYouTubeContext
+	relatedCache       map[string]relatedCacheEntry
 	configRevision     map[string]uint64
 	managed            map[string]bool
 	streams            chan struct{}
@@ -112,6 +114,8 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	s.managed = map[string]bool{}
 	s.searchResults = map[string]searchResult{}
 	s.youtubeHomeFeeds = map[string]searchResult{}
+	s.youtubeContexts = map[string]recentYouTubeContext{}
+	s.relatedCache = map[string]relatedCacheEntry{}
 	s.streams = make(chan struct{}, 4)
 	s.mediaReceiverInbox = inbox.New(receiverAdapter{s}, receiverAdapter{s})
 	go s.reapMediaReceiver()

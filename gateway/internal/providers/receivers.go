@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -65,26 +66,59 @@ func wrapperHeaders(c Config) (http.Header, error) {
 }
 
 func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, error) {
-	out := NowPlaying{Provider: "spotify", State: "STOPPED"}
+	out := NowPlaying{
+		Provider: "spotify",
+		State:    "STOPPED",
+		Item: &domain.Item{
+			ID:       "spotify-connect",
+			Provider: "spotify",
+			Kind:     "audio",
+			Title:    "Spotify Connect",
+			Subtitle: "Select Zombie Box in Spotify, then listen here",
+			Playable: true,
+		},
+	}
 	headers, err := wrapperHeaders(c)
 	if err != nil {
 		return out, err
 	}
-	body, err := a.request(ctx, strings.TrimRight(c.URL, "/")+"/status", headers)
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/status", nil)
 	if err != nil {
 		return out, err
+	}
+	req.Header = headers
+	res, err := a.http.Do(req)
+	if err != nil {
+		return out, errors.New("provider unavailable")
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNoContent {
+		return out, nil
+	}
+	if res.StatusCode == http.StatusServiceUnavailable {
+		return out, errProviderBusy
+	}
+	if res.StatusCode != http.StatusOK {
+		return out, fmt.Errorf("provider HTTP %d", res.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20+1))
+	if err != nil {
+		return out, err
+	}
+	if len(body) > 8<<20 {
+		return out, errors.New("provider response too large")
 	}
 	var status struct {
 		Stopped, Paused, Buffering bool
 		Volume                     int
 		VolumeSteps                int `json:"volume_steps"`
 		Track                      *struct {
-			Name     string
-			Cover    string   `json:"album_cover_url"`
+			Name     string   `json:"name"`
+			Cover    *string  `json:"album_cover_url"`
 			Artists  []string `json:"artist_names"`
-			Duration int64
-			Position int64
-		}
+			Duration int64    `json:"duration"`
+			Position int64    `json:"position"`
+		} `json:"track"`
 	}
 	if json.Unmarshal(body, &status) != nil {
 		return out, errors.New("invalid player status")
@@ -101,15 +135,67 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 			out.State = "BUFFERING"
 		}
 	}
-	if status.Track != nil {
-		cover, err := url.Parse(status.Track.Cover)
-		if err == nil && cover.Scheme == "https" && cover.Host == "i.scdn.co" && cover.User == nil && len(status.Track.Cover) <= 2048 {
-			out.ArtworkURL = status.Track.Cover
-		}
+	if status.Track != nil && status.Track.Name != "" {
 		out.PositionMS = max(0, status.Track.Position)
-		out.Item = &domain.Item{ID: "spotify-connect", Provider: "spotify", Kind: "audio", Title: truncate(status.Track.Name, 500), Subtitle: truncate(strings.Join(status.Track.Artists, ", "), 1000), DurationMS: max(0, status.Track.Duration), Playable: !status.Stopped}
+		if status.Track.Cover != nil && *status.Track.Cover != "" {
+			coverURL := sanitizeSpotifyCoverURL(*status.Track.Cover)
+			if coverURL != "" {
+				out.ArtworkURL = coverURL
+			}
+		}
+		item := &domain.Item{
+			ID:         "spotify-connect",
+			Provider:   "spotify",
+			Kind:       "audio",
+			Title:      truncate(status.Track.Name, 500),
+			Subtitle:   truncate(strings.Join(status.Track.Artists, ", "), 1000),
+			DurationMS: max(0, status.Track.Duration),
+			Playable:   !status.Stopped,
+		}
+		if out.ArtworkURL != "" {
+			item.ImageURL = spotifyArtworkPath(out.ArtworkURL, item.Title)
+		}
+		out.Item = item
 	}
 	return out, nil
+}
+
+func sanitizeSpotifyCoverURL(raw string) string {
+	if len(raw) > 2048 {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil {
+		return ""
+	}
+	if u.Scheme == "http" {
+		u.Scheme = "https"
+	}
+	if u.Scheme != "https" {
+		return ""
+	}
+	if u.Port() != "" && u.Port() != "443" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "i.scdn.co" && host != "scdn.co" && !strings.HasSuffix(host, ".scdn.co") &&
+		host != "spotifycdn.com" && !strings.HasSuffix(host, ".spotifycdn.com") {
+		return ""
+	}
+	return u.String()
+}
+
+func spotifyArtworkPath(artworkURL, title string) string {
+	if artworkURL == "" {
+		return ""
+	}
+	identity, _ := json.Marshal(struct {
+		URL     string
+		Title   string
+		Headers http.Header
+	}{artworkURL, title, nil})
+	sum := sha256.Sum256(identity)
+	return "/v1/artwork/spotify-connect?rev=" + hex.EncodeToString(sum[:8])
 }
 
 func truncate(s string, limit int) string {

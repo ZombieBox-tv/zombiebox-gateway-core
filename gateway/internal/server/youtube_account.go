@@ -27,6 +27,11 @@ func (s *Server) youtubeAccountPoll(w http.ResponseWriter, r *http.Request, _ do
 		youtubeAccountError(w, err)
 		return
 	}
+	if status.Connected {
+		s.mu.Lock()
+		s.youtubeHomeFeeds = map[string]searchResult{}
+		s.mu.Unlock()
+	}
 	respond(w, 200, status)
 }
 
@@ -38,6 +43,9 @@ func (s *Server) youtubeAccountDisconnect(w http.ResponseWriter, r *http.Request
 		fail(w, 500, "storage_error")
 		return
 	}
+	s.mu.Lock()
+	s.youtubeHomeFeeds = map[string]searchResult{}
+	s.mu.Unlock()
 	respond(w, 200, map[string]any{"connected": false})
 }
 

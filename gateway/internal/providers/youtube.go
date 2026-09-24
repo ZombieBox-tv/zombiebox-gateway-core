@@ -26,8 +26,8 @@ func (a *Adapters) YouTube(ctx context.Context, c Config) ([]Source, error) {
 	}
 	var result struct {
 		Items []struct {
-			ID, Title, Subtitle string
-			DurationMS          int64 `json:"durationMs"`
+			ID, Title, Subtitle, Description string
+			DurationMS                       int64 `json:"durationMs"`
 		}
 	}
 	if err = json.Unmarshal(body, &result); err != nil {
@@ -40,7 +40,7 @@ func (a *Adapters) YouTube(ctx context.Context, c Config) ([]Source, error) {
 			continue
 		}
 		seen[item.ID] = true
-		out = append(out, Source{ArtworkURL: "https://i.ytimg.com/vi/" + item.ID + "/hqdefault.jpg", Item: domain.Item{ID: "youtube-" + item.ID, Provider: "youtube", Kind: "video", Title: item.Title, Subtitle: item.Subtitle, DurationMS: item.DurationMS, Playable: true},
+		out = append(out, Source{ArtworkURL: "https://i.ytimg.com/vi/" + item.ID + "/hqdefault.jpg", Item: domain.Item{ID: "youtube-" + item.ID, Provider: "youtube", Kind: "video", Title: item.Title, Subtitle: item.Subtitle, Description: truncate(item.Description, 2000), DurationMS: item.DurationMS, Playable: true},
 			URL: strings.TrimRight(c.URL, "/") + "/resolve/" + item.ID, Headers: headers, MIME: "application/x-zombie-youtube"})
 		if len(out) == 40 {
 			break

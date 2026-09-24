@@ -3,6 +3,7 @@
   "repository": "zombiebox-gateway-core",
   "productRegistry": "workspace:docs/milestones.json",
   "notes": [
+    "Dev.58: YouTube home/feed fallback and video-related pagination, quality inventory and position-preserving switches bounded by fresh device probe evidence, and non-blocking Spotify PCM-to-MP3 bridge with track metadata. Race-enabled Go checks pass; physical quality switching, Spotify audio and AirPlay playback remain unverified. No product milestone closes.",
     "Dev.57: Anonymous YouTube exploration and bounded worker resolution; transient busy retry and finite head/middle/tail validation allow a seekable progressive relay. QA7 Vizio API13 Client dev.50 opened one hero video; timeline advanced 0:06 to 2:28 with plan 201, stream 206 and progress update. Spotify reports selected authorization mode and account readiness separately from process health; a local host-network mDNS probe passed. Decoded frames/audio, phone Spotify playback and real DIAL/TV-code handoff remain unverified; no product gate closes.",
     "Dev.55: Token-protected private AirPlay receiver PIN retrieval and paired, no-store gateway route; independent of the operator code. Host access tests pass. Updated worker image and physical iPad authentication/playback remain open; no product gate closes.",
     "Dev.53: YouTube account lists recover once from an early rejected access token by refreshing the gateway-held grant; repeated rejection fails closed. Host tests pass; real Google account and physical acceptance remain open.",

@@ -25,6 +25,7 @@ func (s *Server) globalSearch(w http.ResponseWriter, r *http.Request, d domain.D
 		fail(w, 400, "invalid_search_query")
 		return
 	}
+	s.recordRecentYouTubeContext(d.ID, "", query, "")
 	select {
 	case s.searchJobs <- struct{}{}:
 		defer func() { <-s.searchJobs }()

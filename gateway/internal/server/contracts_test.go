@@ -81,6 +81,12 @@ func TestWireContracts(t *testing.T) {
 		t.Fatal(selected.Body)
 	}
 	samples["PlaybackPlan"] = selected.Body.Bytes()
+	samples["QualityInventory"] = call(s, "GET", "/v1/playback/"+localPlan.SessionID+"/qualities", "", "contract-device", token, "").Body.Bytes()
+	samples["QualitySelection"] = json.RawMessage(`{"qualityId":"auto","positionMs":1250}`)
+	qPlan := call(s, "POST", "/v1/playback/"+localPlan.SessionID+"/quality", string(samples["QualitySelection"]), "contract-device", token, "")
+	if qPlan.Code != 201 {
+		t.Fatal(qPlan.Body)
+	}
 
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("#EXTM3U\n#EXTINF:1,\nsegment.ts\n")) }))
 	defer relay.Close()

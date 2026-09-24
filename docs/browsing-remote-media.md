@@ -65,3 +65,48 @@ catalogs, and the existing six-second federated-search timeout still applies.
 Provider fixtures verify special-character queries, page offsets 0/40/80/100,
 termination, explicit scope replacement and exhausted catalogs. This does not add
 unlimited addon aggregation or claim real-account/device acceptance.
+
+## dev.40 Relevant YouTube feed and related pagination
+
+The YouTube fullscreen player rail requests bounded, semantic related items keyed
+to the currently playing video via:
+
+`GET /v1/youtube/related?video=<videoId>&cursor=<cursor>&offset=<offset>&limit=<limit>`
+(or path format `GET /v1/youtube/related/{video}`).
+
+The response follows the `RelatedPage` domain model:
+- `apiVersion`: Integer protocol version (currently `1`).
+- `videoId`: The 11-character seed video ID.
+- `currentVideo`: Metadata of the playing video (`id`, `title`, `subtitle`, `description`,
+  `durationMs`, `playable`, `artworkUrl`) if resolved, omitted if unavailable.
+- `items`: Bounded array of semantic related video items (max 40 items per page;
+  default page size is 20).
+- `nextCursor`: Opaque base64url token for retrieving subsequent pages.
+- `hasMore`: Boolean indicating if further pages are available.
+- `total`: Total count of related items returned in the current response.
+
+The seed video is explicitly excluded from `items`, and duplicate items are deduplicated
+by stable `youtube-<id>` identifier across pages.
+
+Related query cursors encode the target video ID, offset, and query context. Cursors are
+length-bounded (<= 512 bytes), verified against the query video ID, and offsets are clamped
+between 0 and 360 to prevent worker memory exhaustion. Bad or mismatched cursors return
+HTTP 400. Inactive or unconfigured YouTube returns HTTP 409. An empty response is returned
+with `items: []`, `nextCursor: ""`, and `hasMore: false`.
+
+Repeated requests are cached in memory for up to 2 minutes, bounded to 64 active entries.
+All upstream requests carry an 8-second timeout and observe client request cancellation.
+
+### Home YouTube Feed Hierarchy
+
+The Home YouTube section selects content following a strict 3-tier hierarchy:
+1. **Signed-in profile feed**: Subscriptions and playlists retrieved via OAuth Data API
+   when an account is connected.
+2. **Recent search/view context**: Device-scoped recent search query or viewed video
+   context (preserved in memory, bounded to 64 devices with 15-minute TTL).
+3. **Generic anonymous popular fallback**: Only queried if the prior sources are empty,
+   unconfigured, or unavailable. Retries once if the initial upstream fetch is empty.
+
+Privacy is preserved: when disconnected or unauthenticated, no user identity or account
+presence is implied or manufactured. Feed caches are immediately invalidated upon
+account connection or disconnection.

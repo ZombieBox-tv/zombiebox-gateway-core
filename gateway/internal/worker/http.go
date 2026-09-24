@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -37,6 +36,7 @@ func (c Config) Validate() error {
 
 func Handler(ctx context.Context, c Config) http.Handler {
 	mux := http.NewServeMux()
+	var bridge *spotifyBridge
 	client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	proxy := func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
@@ -61,11 +61,40 @@ func Handler(ctx context.Context, c Config) http.Handler {
 			http.Error(w, "invalid response", 502)
 			return
 		}
+		if bridge != nil && (res.StatusCode == 200 || res.StatusCode == 204) {
+			if r.URL.Path == "/status" {
+				if res.StatusCode == 204 {
+					bridge.OnStopped()
+				} else {
+					var st struct {
+						Stopped bool `json:"stopped"`
+						Track   *struct {
+							URI string `json:"uri"`
+						} `json:"track"`
+					}
+					if json.Unmarshal(data, &st) == nil {
+						if st.Stopped {
+							bridge.OnStopped()
+						} else if st.Track != nil && st.Track.URI != "" {
+							bridge.OnTrack(st.Track.URI)
+						}
+					}
+				}
+			} else if r.URL.Path == "/player/stop" {
+				bridge.OnStopped()
+			} else if r.URL.Path == "/player/next" || r.URL.Path == "/player/prev" || r.URL.Path == "/player/seek" {
+				bridge.ResetBuffer()
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(res.StatusCode)
 		_, _ = w.Write(data)
 	}
 	if c.Mode == "spotify" {
+		bridge = newSpotifyBridge(ctx, filepath.Join(c.StateDir, "audio.pcm"))
+		if bridge != nil {
+			context.AfterFunc(ctx, bridge.Close)
+		}
 		mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 			health, err := spotifyHealth(r.Context(), client, "http://127.0.0.1:3678", c.StateDir)
 			if err != nil {
@@ -80,44 +109,12 @@ func Handler(ctx context.Context, c Config) http.Handler {
 		for _, command := range []string{"pause", "resume", "next", "prev", "stop", "seek", "volume"} {
 			mux.HandleFunc("POST /player/"+command, proxy)
 		}
-		streams := make(chan struct{}, 1)
 		mux.HandleFunc("GET /audio", func(w http.ResponseWriter, r *http.Request) {
-			select {
-			case streams <- struct{}{}:
-				defer func() { <-streams }()
-			default:
-				http.Error(w, "audio receiver busy", 409)
-				return
-			}
-			streamContext, cancel := context.WithTimeout(r.Context(), 6*time.Hour)
-			defer cancel()
-			stop := context.AfterFunc(ctx, cancel)
-			defer stop()
-			cmd := exec.CommandContext(streamContext, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", filepath.Join(c.StateDir, "audio.pcm"), "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "-flush_packets", "1", "pipe:1")
-			cmd.WaitDelay = time.Second
-			stdout, err := cmd.StdoutPipe()
-			if err != nil || cmd.Start() != nil {
+			if bridge == nil {
 				http.Error(w, "audio unavailable", 503)
 				return
 			}
-			defer stdout.Close()
-			w.Header().Set("Content-Type", "audio/mpeg")
-			buffer := make([]byte, 8192)
-			for {
-				n, readErr := stdout.Read(buffer)
-				if n > 0 {
-					if _, err = w.Write(buffer[:n]); err != nil {
-						cancel()
-						break
-					}
-					_ = http.NewResponseController(w).Flush()
-				}
-				if readErr != nil {
-					break
-				}
-			}
-			cancel()
-			_ = cmd.Wait()
+			bridge.ServeHTTP(w, r)
 		})
 	} else {
 		mux.HandleFunc("GET /pairing", func(w http.ResponseWriter, r *http.Request) {

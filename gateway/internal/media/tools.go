@@ -104,7 +104,7 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 }
 
 func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, adtsAAC bool, mode string, selection domain.MediaSelection, output io.Writer, manifestKind ...string) error {
-	if selection.Quality != "" && selection.Quality != "STANDARD" && selection.Quality != "LOW" {
+	if !ValidQuality(selection.Quality) {
 		return errors.New("invalid media quality")
 	}
 	if selection.PositionMS < 0 || selection.PositionMS > 7*24*60*60*1000 || (selection.AudioID != nil && *selection.AudioID < 0) {

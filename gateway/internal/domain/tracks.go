@@ -32,3 +32,20 @@ type MediaSelection struct {
 	AudioID    *int
 	PositionMS int64
 }
+
+type QualityOption struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Width  int    `json:"width,omitempty"`
+	Height int    `json:"height,omitempty"`
+}
+
+type QualityInventory struct {
+	SelectedID string          `json:"selectedId"`
+	Options    []QualityOption `json:"options"`
+}
+
+type QualitySelection struct {
+	QualityID  string `json:"qualityId"`
+	PositionMS int64  `json:"positionMs"`
+}

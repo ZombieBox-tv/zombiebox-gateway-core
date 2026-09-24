@@ -34,6 +34,8 @@ type session struct {
 	cancel            context.CancelFunc
 	resources         map[string]string
 	resourceOrder     []string
+	supersedes        string
+	supersededBy      string
 }
 
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
@@ -48,7 +50,11 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	if !decode(w, r, &req) {
 		return
 	}
-	if (req.Quality != "" && req.Quality != "STANDARD" && req.Quality != "LOW") || (req.Quality == "LOW" && req.Mode != "TRANSCODE") {
+	if req.Quality != "" && !playback.ValidQuality(req.Quality) {
+		fail(w, 400, "invalid_playback_quality")
+		return
+	}
+	if req.Quality == "LOW" && req.Mode != "TRANSCODE" && req.Mode != "" && req.Mode != "AUTO" {
 		fail(w, 400, "invalid_playback_quality")
 		return
 	}
@@ -112,6 +118,29 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	if (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation) {
 		if quality := s.networkQuality(d, decision); quality != "" {
 			mode, req.Quality = "TRANSCODE", quality
+		}
+	}
+	if (req.Mode == "" || req.Mode == "AUTO") && (req.Quality == "" || req.Quality == "auto") {
+		kind := resolved.Item.Kind
+		if kind == "" {
+			kind = "video"
+		}
+		preferred := s.getQualityPreference(r.Context(), d.ID, kind)
+		if preferred != "" && preferred != "auto" && decision.metadata != nil {
+			inv := playback.Qualities(*decision.metadata, resolved, d, "")
+			if playback.HasQuality(inv, preferred) {
+				newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, preferred, 0, mode)
+				if newMode != "EXTERNAL_PLAYER" {
+					mode, req.Quality = newMode, newQuality
+				}
+			}
+		}
+	} else if (req.Mode == "" || req.Mode == "AUTO") && req.Quality != "" && req.Quality != "LOW" && req.Quality != "STANDARD" {
+		if decision.metadata != nil {
+			newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, req.Quality, 0, mode)
+			if newMode != "EXTERNAL_PLAYER" {
+				mode, req.Quality = newMode, newQuality
+			}
 		}
 	}
 
@@ -202,6 +231,21 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Devic
 		fail(w, 404, "session_not_found")
 		return
 	}
+	if supersededID := sess.supersedes; supersededID != "" && (p.State == "PLAYING" || p.State == "BUFFERING") {
+		sess.supersedes = ""
+		if supersededSess := s.sessions[supersededID]; supersededSess != nil {
+			supersededSess.cancel()
+			delete(s.sessions, supersededID)
+			s.events.publish(supersededSess.device, "playback.stopped", map[string]string{"sessionId": supersededID})
+		}
+	}
+	if p.State == "FAILED" {
+		kind := sess.source.Item.Kind
+		if kind == "" {
+			kind = "video"
+		}
+		_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+	}
 	if sess.castID != "" {
 		if c := s.casts[sess.castID]; c != nil && c.mediaID != "" && (p.State == "ENDED" || p.State == "STOPPED" || p.State == "FAILED") {
 			if p.State == "ENDED" {
@@ -252,6 +296,18 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	if c := s.casts[sess.castID]; c != nil {
 		s.endCastLocked(c)
 	}
+	if supersededID := sess.supersedes; supersededID != "" {
+		sess.supersedes = ""
+		if supersededSess := s.sessions[supersededID]; supersededSess != nil {
+			supersededSess.cancel()
+			delete(s.sessions, supersededID)
+		}
+	}
+	if sess.supersededBy != "" {
+		if nextSess := s.sessions[sess.supersededBy]; nextSess != nil {
+			nextSess.supersedes = ""
+		}
+	}
 	sess.cancel()
 	delete(s.sessions, id)
 	s.events.publish(d.ID, "playback.stopped", map[string]string{"sessionId": id})
@@ -264,6 +320,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		fail(w, 401, "invalid_stream_ticket")
 		return
+	}
+	if supersededID := sess.supersedes; supersededID != "" {
+		sess.supersedes = ""
+		if supersededSess := s.sessions[supersededID]; supersededSess != nil {
+			supersededSess.cancel()
+			delete(s.sessions, supersededID)
+			s.events.publish(supersededSess.device, "playback.stopped", map[string]string{"sessionId": supersededID})
+		}
 	}
 	src := sess.source
 	if resource := r.PathValue("resource"); resource != "" {
@@ -322,9 +386,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 				if errors.Is(err, media.ErrBusy) {
 					fail(w, 429, "media_busy")
 				} else {
+					_ = s.revertQualityPreference(r.Context(), sess.device, sess.source.Item.Kind)
 					fail(w, 502, "conversion_failed")
 				}
 			} else {
+				_ = s.revertQualityPreference(r.Context(), sess.device, sess.source.Item.Kind)
 				panic(http.ErrAbortHandler)
 			}
 		}
