@@ -8,4 +8,4 @@ COPY docs/licenses/DIAL-LICENSE /usr/share/doc/zombiebox/DIAL-LICENSE
 USER node
 ENV HOST=0.0.0.0 PORT=8091 ZOMBIE_YOUTUBE_CONFIG=/config/youtube.json
 EXPOSE 8091
-CMD ["node", "--max-old-space-size=128", "server.mjs"]
+CMD ["node", "--max-old-space-size=192", "server.mjs"]

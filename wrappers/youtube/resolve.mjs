@@ -1,13 +1,20 @@
 import { resolveFormats } from "./formats.mjs";
+import { validateMediaRanges } from "./media-ranges.mjs";
 
 // The anonymous WEB client can return format shells without decipherable URLs.
 // Try clients with playable MP4 origins, while preserving the existing format gate.
-export async function resolveVideo(yt, id) {
+export async function resolveVideo(yt, id, validate = validateMediaRanges) {
   let lastError;
-  for (const client of ["IOS", "ANDROID", "WEB"]) {
+  let checked = 0;
+  // Android often offers a combined H.264/AAC stream. It avoids a gateway mux
+  // and can remain playable when an iOS adaptive track only serves its head.
+  for (const client of ["ANDROID", "IOS", "WEB"]) {
     try {
       const info = await yt.getBasicInfo(id, { client });
-      return await resolveFormats(info, yt.session.player);
+      return await resolveFormats(info, yt.session.player, (url, format) => {
+        if (++checked > 8) return false;
+        return validate(url, format);
+      });
     } catch (error) {
       lastError = error;
     }

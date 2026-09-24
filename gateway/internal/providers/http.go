@@ -9,6 +9,8 @@ import (
 	"net/http"
 )
 
+var errProviderBusy = errors.New("provider HTTP 503")
+
 func (a *Adapters) request(ctx context.Context, raw string, headers http.Header) ([]byte, error) {
 	return requestWithClient(ctx, a.http, raw, headers)
 }
@@ -24,6 +26,9 @@ func requestWithClient(ctx context.Context, client HTTPClient, raw string, heade
 		return nil, errors.New("provider unavailable")
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusServiceUnavailable {
+		return nil, errProviderBusy
+	}
 	if res.StatusCode != 200 {
 		return nil, fmt.Errorf("provider HTTP %d", res.StatusCode)
 	}

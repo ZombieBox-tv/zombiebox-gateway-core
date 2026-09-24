@@ -39,6 +39,14 @@ func run(path string) error {
 	if decoder.Decode(&c) != nil || c.Validate() != nil {
 		return fmt.Errorf("invalid worker configuration")
 	}
+	if bind := os.Getenv("ZOMBIE_SPOTIFY_API_BIND"); bind != "" {
+		// Full's host-network Spotify receiver keeps this bearer-only API on
+		// Docker's host-gateway interface, never on the physical LAN.
+		if c.Mode != "spotify" || bind != "host.docker.internal:8092" {
+			return fmt.Errorf("invalid Spotify API bind override")
+		}
+		c.Listen = bind
+	}
 	if err = os.MkdirAll(c.StateDir, 0700); err != nil {
 		return err
 	}

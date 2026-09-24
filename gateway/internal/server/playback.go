@@ -348,6 +348,16 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "HEAD" && src.Live {
 		return
 	}
+	if src.Item.Provider == "youtube" && src.AudioURL == "" && media.YouTubeRangeOrigin(src.URL) && (r.Header.Get("Range") == "" || strings.HasSuffix(r.Header.Get("Range"), "-")) {
+		started, err := media.RelayYouTubeProgressive(w, r, s.deps.StreamHTTP, src)
+		if err != nil && ctx.Err() == nil {
+			if started {
+				panic(http.ErrAbortHandler)
+			}
+			fail(w, 502, "stream_unavailable")
+		}
+		return
+	}
 	req, err := http.NewRequestWithContext(r.Context(), "GET", src.URL, nil)
 	if err != nil {
 		fail(w, 502, "stream_unavailable")

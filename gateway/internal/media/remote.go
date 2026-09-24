@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
@@ -44,10 +45,16 @@ func (t *RemoteTools) ProbeRemote(ctx context.Context, source domain.Source) (do
 	if err != nil {
 		return metadata, err
 	}
+	if bridge.failedUpstream() {
+		return metadata, errors.New("remote input failed")
+	}
 	if bridge.audio != "" {
 		audio, err := t.tools.probe(ctx, bridge.audio, true)
 		if err != nil {
 			return metadata, err
+		}
+		if bridge.failedUpstream() {
+			return metadata, errors.New("remote input failed")
 		}
 		for _, stream := range audio.Streams {
 			if stream.Type == "audio" {
@@ -82,13 +89,22 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 			}
 		}
 	}
-	return t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, mode, selection, output, bridge.kind)
+	err = t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, mode, selection, output, bridge.kind)
+	if err == nil && bridge.failedUpstream() {
+		return errors.New("remote input failed")
+	}
+	return err
 }
 
 type inputBridge struct {
 	video, audio string
 	kind         string
 	close        func()
+	failed       *atomic.Bool
+}
+
+func (b inputBridge) failedUpstream() bool {
+	return b.failed != nil && b.failed.Load()
 }
 
 func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBridge, error) {
@@ -114,6 +130,7 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 	ticket := hex.EncodeToString(bytes)
 	endpoint := "http://" + listener.Addr().String() + "/" + ticket
 	lifetime, cancel := context.WithCancel(ctx)
+	failed := &atomic.Bool{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		if len(parts) != 2 || subtle.ConstantTimeCompare([]byte(parts[0]), []byte(ticket)) != 1 || (r.Method != "GET" && r.Method != "HEAD") {
@@ -131,6 +148,21 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 		defer stop()
 		unlink := context.AfterFunc(lifetime, stop)
 		defer unlink()
+		if source.Item.Provider == "youtube" && YouTubeRangeOrigin(target) {
+			if _, ok := openRangeStart(r.Header.Get("Range")); ok {
+				started, err := relayYouTubeOpenRange(w, r.WithContext(requestContext), t.http, target, headers)
+				if err != nil {
+					if requestContext.Err() == nil {
+						failed.Store(true)
+					}
+					if started {
+						panic(http.ErrAbortHandler)
+					}
+					http.Error(w, "unavailable", 502)
+				}
+				return
+			}
+		}
 		request, err := http.NewRequestWithContext(requestContext, r.Method, target, nil)
 		if err != nil {
 			http.Error(w, "unavailable", 502)
@@ -151,6 +183,9 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 		}
 		defer response.Body.Close()
 		if response.StatusCode != 200 && response.StatusCode != 206 && response.StatusCode != 416 {
+			if source.Item.Provider == "youtube" && requestContext.Err() == nil {
+				failed.Store(true)
+			}
 			http.Error(w, "unavailable", 502)
 			return
 		}
@@ -170,7 +205,7 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 		cancel()
 		_ = server.Close()
 	}
-	bridge := inputBridge{video: endpoint + "/video", close: close}
+	bridge := inputBridge{video: endpoint + "/video", close: close, failed: failed}
 	if source.AudioURL != "" {
 		bridge.audio = endpoint + "/audio"
 	}

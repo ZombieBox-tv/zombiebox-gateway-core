@@ -22,7 +22,8 @@ type playbackDecision struct {
 }
 
 func (s *Server) playbackMode(ctx context.Context, source providers.Source, device domain.Device, requested string) (playbackDecision, error) {
-	if source.AudioURL != "" && (requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER") {
+	youtube := source.Item.Provider == "youtube" && media.YouTubeRangeOrigin(source.URL)
+	if (source.AudioURL != "" || youtube) && (requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER") {
 		return playbackDecision{}, errors.New("adaptive stream requires mux")
 	}
 	if requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER" {
@@ -34,7 +35,7 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 	}
 	if source.Path == "" {
 		if s.deps.RemoteMedia == nil || !media.RemoteCandidate(source) {
-			if source.AudioURL != "" {
+			if source.AudioURL != "" || youtube {
 				return playbackDecision{}, errors.New("remote media unavailable")
 			}
 			return playbackDecision{mode: "DIRECT_PLAY"}, nil
@@ -42,7 +43,7 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 		metadata, err := s.deps.RemoteMedia.ProbeRemote(ctx, source)
 		if err != nil {
 			if requested == "" || requested == "AUTO" {
-				if source.AudioURL == "" {
+				if source.AudioURL == "" && !youtube {
 					return playbackDecision{mode: "DIRECT_PLAY"}, nil
 				}
 			}

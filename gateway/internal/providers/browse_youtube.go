@@ -25,6 +25,9 @@ func (a *Adapters) browseYouTube(ctx context.Context, config Config, parent, que
 	}
 	if query == "" && parent == "" {
 		query = config.CatalogID
+		if query == "" {
+			query = "popular"
+		}
 	}
 	values := url.Values{"parent": {parent}, "q": {query}, "offset": {strconv.Itoa(offset)}}
 	data, err := a.request(ctx, strings.TrimRight(config.URL, "/")+"/browse?"+values.Encode(), headers)

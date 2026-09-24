@@ -39,6 +39,48 @@ func TestYouTubeResolutionUsesPrivateTransport(t *testing.T) {
 	}
 }
 
+func TestYouTubeResolutionRetriesOnlyTransientBusy(t *testing.T) {
+	source := Source{URL: "http://wrapper.local/resolve/aqz-KE-bpKQ", MIME: "application/x-zombie-youtube"}
+	requests := 0
+	private := youtubeHTTPClient(func(*http.Request) (*http.Response, error) {
+		requests++
+		status, body := http.StatusServiceUnavailable, `{"error":"busy"}`
+		if requests == 3 {
+			status, body = http.StatusOK, `{"url":"https://r1.googlevideo.com/video","mimeType":"video/mp4"}`
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	adapter := New(private, private)
+	resolved, err := adapter.Resolve(context.Background(), source)
+	if err != nil || requests != 3 || resolved.URL != "https://r1.googlevideo.com/video" {
+		t.Fatalf("busy retry: requests=%d url=%q err=%v", requests, resolved.URL, err)
+	}
+	requests = 0
+	private = youtubeHTTPClient(func(*http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusBadGateway, Body: io.NopCloser(strings.NewReader(`{"error":"provider_unavailable"}`))}, nil
+	})
+	adapter = New(private, private)
+	if _, err := adapter.Resolve(context.Background(), source); err == nil || requests != 1 {
+		t.Fatalf("non-busy failure was retried: requests=%d err=%v", requests, err)
+	}
+}
+
+func TestYouTubeResolutionBusyRetryHonorsCancellation(t *testing.T) {
+	requests := 0
+	private := youtubeHTTPClient(func(*http.Request) (*http.Response, error) {
+		requests++
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(`{"error":"busy"}`))}, nil
+	})
+	adapter := New(private, private)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := adapter.Resolve(ctx, Source{URL: "http://wrapper.local/resolve/aqz-KE-bpKQ", MIME: "application/x-zombie-youtube"})
+	if !errors.Is(err, context.Canceled) || requests > 1 {
+		t.Fatalf("cancelled busy retry: requests=%d err=%v", requests, err)
+	}
+}
+
 func TestYouTubeWrapperBoundary(t *testing.T) {
 	secret := strings.Repeat("s", 32)
 	origin := "https://r1.googlevideo.com/videoplayback?signature=private"

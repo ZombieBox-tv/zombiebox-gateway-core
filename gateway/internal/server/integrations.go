@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,7 +16,8 @@ import (
 
 type integrationStatus struct {
 	integrations.Definition
-	State string `json:"state"`
+	State    string `json:"state"`
+	AuthMode string `json:"authMode,omitempty"`
 }
 
 // Availability is a bounded, on-demand process check. READY does not mean a
@@ -108,7 +111,26 @@ func (s *Server) integrationList(w http.ResponseWriter, r *http.Request, d domai
 			}
 			defer res.Body.Close()
 			if res.StatusCode >= 200 && res.StatusCode < 300 {
-				out[i].State = "READY"
+				if out[i].ID == "spotify" {
+					var health struct {
+						Ready                 bool   `json:"ready"`
+						AuthorizationRequired bool   `json:"authorizationRequired"`
+						AuthMode              string `json:"authMode"`
+					}
+					if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&health) != nil {
+						return
+					}
+					if health.AuthMode == "zeroconf" || health.AuthMode == "device_auth" {
+						out[i].AuthMode = health.AuthMode
+					}
+					if health.AuthorizationRequired {
+						out[i].State = "AUTH_REQUIRED"
+					} else if health.Ready {
+						out[i].State = "READY"
+					}
+				} else {
+					out[i].State = "READY"
+				}
 			} else if res.StatusCode == 401 || res.StatusCode == 403 {
 				out[i].State = "AUTH_REQUIRED"
 			}

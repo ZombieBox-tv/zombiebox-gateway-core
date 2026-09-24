@@ -1,5 +1,35 @@
 # zombiebox-gateway-core: component work
 
+## dev.57 YouTube physical-QA and Spotify readiness corrections
+
+The anonymous YouTube tab and browse root request a bounded real exploration
+shelf directly, avoiding an empty home call before the fallback. The resolver's
+parent and worker memory budgets agree, and private video/audio resolution has
+a longer bounded deadline. YouTube resolution retries only the single-flight
+worker's transient 503 busy response within three seconds. For progressive MP4
+without a declared byte length, the worker derives a bounded total from a finite
+206 response and verifies head, middle and tail; the gateway then relays finite
+ranges as a seekable direct stream with Content-Length and Content-Range. Signed
+media origins remain private.
+
+In the September 24 QA7 trial, the paired Vizio API 13 Client dev.50 opened the
+YouTube hero video in its fullscreen player. The on-screen timeline advanced
+from 0:06 to 2:28 of 3:35. A sanitized gateway capture recorded playback plan
+HTTP 201, two stream GETs with HTTP 206, and a progress update; there was no
+playback 502 in that attempt. ADB screenshots show a black SurfaceView area, so
+visible decoded frames and audible sound have not been independently confirmed.
+This one video and device do not establish general YouTube playback compatibility.
+Real DIAL/TV-code handoff still needs a separate physical retest. No product
+milestone closes.
+
+The Spotify worker now reports its selected Zeroconf or device-authorization
+mode and checks account session state before the gateway marks it ready. Its
+bearer-only API may bind to the Docker host-gateway interface for host-network
+mDNS discovery; the local source-built worker was probed there without exposing
+that API on the physical LAN. The Full package owns mode selection and preserved
+credentials. A phone selecting the receiver and producing audible playback still
+need physical verification.
+
 ## dev.50 IPTV categories
 
 Normalize bounded M3U `group-title` and `EXTGRP` labels without changing channel

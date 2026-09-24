@@ -11,17 +11,22 @@ const equal = (a, b) => {
   return left.length === right.length && timingSafeEqual(left, right);
 };
 
+// Resolving YouTube.js player scripts exceeded the former 96 MiB worker heap
+// during physical evaluation. Keep one worker at a time and bound its lifetime.
+export const WORKER_LIMITS = Object.freeze({ maxOldGenerationSizeMb: 192, stackSizeMb: 4 });
+
 export function createWrapper({
   token,
   cookie = "",
   poToken = "",
   visitorData = "",
   timeoutMs = 7000,
+  resolveTimeoutMs = 15000,
   workerFactory = (data) =>
     new Worker(new URL("./worker.mjs", import.meta.url), {
       workerData: data,
       execArgv: [],
-      resourceLimits: { maxOldGenerationSizeMb: 96, stackSizeMb: 4 },
+      resourceLimits: WORKER_LIMITS,
     }),
 }) {
   if (!token || token.length < 32) throw new Error("worker_token_required");
@@ -77,7 +82,11 @@ export function createWrapper({
           if (active === worker) active = null;
         });
     };
-    const timer = setTimeout(() => finish(504, { error: "provider_timeout" }), timeoutMs);
+    // A video requires player retrieval and format deciphering; catalog requests
+    // retain their shorter deadline. Both stay below the gateway's 20s private
+    // HTTP client deadline, even when private configuration overrides defaults.
+    const deadlineMs = Math.min(18000, Math.max(100, id ? resolveTimeoutMs : timeoutMs));
+    const timer = setTimeout(() => finish(504, { error: "provider_timeout" }), deadlineMs);
     worker.once("message", (message) =>
       finish(
         message.ok ? 200 : 502,

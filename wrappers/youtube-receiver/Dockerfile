@@ -8,4 +8,4 @@ COPY docs/licenses/DIAL-LICENSE /usr/share/doc/zombiebox/DIAL-LICENSE
 USER node
 ENV ZOMBIE_YOUTUBE_RECEIVER_CONFIG=/config/receiver.json
 EXPOSE 8095 8096
-CMD ["node", "--max-old-space-size=192", "server.mjs"]
+CMD ["node", "--max-old-space-size=256", "server.mjs"]

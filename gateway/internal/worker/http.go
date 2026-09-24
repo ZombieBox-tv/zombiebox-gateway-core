@@ -67,19 +67,13 @@ func Handler(ctx context.Context, c Config) http.Handler {
 	}
 	if c.Mode == "spotify" {
 		mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-			req, _ := http.NewRequestWithContext(r.Context(), "GET", "http://127.0.0.1:3678/auth/code", nil)
-			res, err := client.Do(req)
+			health, err := spotifyHealth(r.Context(), client, "http://127.0.0.1:3678", c.StateDir)
 			if err != nil {
 				http.Error(w, "daemon unavailable", 503)
 				return
 			}
-			defer res.Body.Close()
-			if res.StatusCode != 200 && res.StatusCode != 204 {
-				http.Error(w, "daemon unavailable", 503)
-				return
-			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]bool{"ready": true, "authorizationRequired": res.StatusCode == 200})
+			_ = json.NewEncoder(w).Encode(health)
 		})
 		mux.HandleFunc("GET /status", proxy)
 		mux.HandleFunc("GET /auth/code", proxy)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"zombiebox.local/gateway/internal/providers"
@@ -17,6 +18,10 @@ func TestIntegrationAvailabilityAndControlAuthorization(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			commands++
+			return
+		}
+		if r.URL.Path == "/health" {
+			io.WriteString(w, `{"ready":true,"authorizationRequired":false,"authMode":"device_auth"}`)
 			return
 		}
 		io.WriteString(w, `{"stopped":true,"volume_steps":100}`)
@@ -56,5 +61,55 @@ func TestIntegrationAvailabilityAndControlAuthorization(t *testing.T) {
 	}
 	if call(s, "GET", "/v1/home", "", "service-client", token, "").Code != 200 {
 		t.Fatal("optional failure blocked Home")
+	}
+}
+
+func TestSpotifyIntegrationRequiresAccountAuthorization(t *testing.T) {
+	var health atomic.Value
+	health.Store(`{"ready":true,"authorizationRequired":true,"authMode":"device_auth"}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_, _ = io.WriteString(w, health.Load().(string))
+		}
+	}))
+	defer upstream.Close()
+	s := testServer(t, nil, "")
+	if err := s.SeedProviders(context.Background(), map[string]providers.Config{
+		"spotify": {Enabled: true, URL: upstream.URL, Token: strings.Repeat("s", 32)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "spotify-health-client")
+	state := func() integrationStatus {
+		w := call(s, "GET", "/v1/integrations", "", "spotify-health-client", token, "")
+		if w.Code != 200 {
+			t.Fatalf("inventory: %s", w.Body)
+		}
+		var response struct{ Integrations []integrationStatus }
+		if json.Unmarshal(w.Body.Bytes(), &response) != nil {
+			t.Fatal("invalid inventory")
+		}
+		for _, item := range response.Integrations {
+			if item.ID == "spotify" {
+				return item
+			}
+		}
+		t.Fatal("Spotify missing from inventory")
+		return integrationStatus{}
+	}
+	if got := state(); got.State != "AUTH_REQUIRED" || got.AuthMode != "device_auth" {
+		t.Fatalf("pairing state = %+v", got)
+	}
+	health.Store(`{"ready":true,"authorizationRequired":false,"authMode":"device_auth"}`)
+	if got := state(); got.State != "READY" {
+		t.Fatalf("authorized state = %+v", got)
+	}
+	health.Store(`{"ready":false,"authorizationRequired":false,"authMode":"device_auth"}`)
+	if got := state(); got.State != "UNAVAILABLE" {
+		t.Fatalf("no-session state = %+v", got)
+	}
+	health.Store(`{"ready":false,"authorizationRequired":true,"authMode":"zeroconf"}`)
+	if got := state(); got.State != "AUTH_REQUIRED" || got.AuthMode != "zeroconf" {
+		t.Fatalf("local pairing state = %+v", got)
 	}
 }

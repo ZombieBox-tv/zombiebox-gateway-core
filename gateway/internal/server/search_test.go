@@ -28,6 +28,7 @@ func TestYouTubeSearchToPrivatePlaybackPlan(t *testing.T) {
 	}))
 	defer wrapper.Close()
 	s := testServer(t, nil, "")
+	s.deps.RemoteMedia = remoteMediaStub{}
 	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: wrapper.URL, Token: strings.Repeat("s", 32)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -71,11 +72,14 @@ func TestYouTubeHomeFallsBackToRealExploreResultsAndCachesPerDevice(t *testing.T
 		case "/catalog":
 			_, _ = w.Write([]byte(`{"items":[]}`))
 		case "/browse":
-			browses.Add(1)
-			if r.URL.Query().Get("q") == "popular" {
-				_, _ = w.Write([]byte(`{"items":[{"id":"aqz-KE-bpKQ","kind":"video","title":"Explore video"}],"nextOffset":-1}`))
-			} else {
+			attempt := browses.Add(1)
+			if r.URL.Query().Get("q") != "popular" {
+				t.Errorf("unexpected anonymous browse query: %s", r.URL.Query().Get("q"))
+			}
+			if attempt == 1 {
 				_, _ = w.Write([]byte(`{"items":[],"nextOffset":-1}`))
+			} else {
+				_, _ = w.Write([]byte(`{"items":[{"id":"aqz-KE-bpKQ","kind":"video","title":"Explore video"}],"nextOffset":-1}`))
 			}
 		default:
 			_, _ = w.Write([]byte(`{"url":"https://r1.googlevideo.com/videoplayback?signature=private","mimeType":"video/mp4"}`))
@@ -83,6 +87,7 @@ func TestYouTubeHomeFallsBackToRealExploreResultsAndCachesPerDevice(t *testing.T
 	}))
 	defer wrapper.Close()
 	s := testServer(t, nil, "")
+	s.deps.RemoteMedia = remoteMediaStub{}
 	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: wrapper.URL, Token: strings.Repeat("s", 32)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +100,7 @@ func TestYouTubeHomeFallsBackToRealExploreResultsAndCachesPerDevice(t *testing.T
 		}
 	}
 	if browses.Load() != 2 {
-		t.Fatalf("home feed was fetched %d times, want anonymous and fallback once each", browses.Load())
+		t.Fatalf("home feed was fetched %d times, want one retry after an empty exploration result", browses.Load())
 	}
 	if result := call(s, "POST", "/v1/playback", `{"itemId":"youtube-aqz-KE-bpKQ"}`, "other-device", other, ""); result.Code != 404 {
 		t.Fatalf("explore source leaked to another device: %d", result.Code)

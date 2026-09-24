@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"zombiebox.local/gateway/internal/domain"
 )
@@ -52,7 +53,22 @@ func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, e
 	// The bounded worker may need more than the metadata client's five seconds
 	// to resolve both H.264 video and AAC audio. The private client retains the
 	// wrapper's longer timeout and redirect restrictions.
-	body, err := requestWithClient(ctx, a.privateHTTP, source.URL, source.Headers)
+	var body []byte
+	var err error
+	// The single-flight worker can report busy briefly while a completed worker
+	// releases its resources. Retry that one transient status within the caller's
+	// deadline; provider failures and invalid streams remain terminal.
+	for attempt := 0; attempt < 6; attempt++ {
+		body, err = requestWithClient(ctx, a.privateHTTP, source.URL, source.Headers)
+		if !errors.Is(err, errProviderBusy) || attempt == 5 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return source, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return source, err
 	}

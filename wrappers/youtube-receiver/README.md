@@ -39,8 +39,11 @@ be validated on the intended network. The gateway reaches the private API using
 `host.docker.internal`; no token belongs in client configuration.
 
 One pending command, a 35-second command timeout, 20-second initialization watchdog,
-8 private HTTP connections, 192 MiB Node heap and 320 MiB container limit bound
-work. The gateway and client also have finite HTTP deadlines. A play acknowledgement
+8 private HTTP connections, 256 MiB Node heap and 512 MiB container limit bound
+work. The previous 192 MiB heap exhausted repeatedly during the first physical
+evaluation; this larger bounded allocation requires a sustained receiver retest
+and does not rule out an upstream memory leak. The gateway and client also have
+finite HTTP deadlines. A play acknowledgement
 requires the new player to buffer and enter PLAYING. Repeated acknowledgements
 are idempotent, stale/preempted commands cannot block subsequent polling, and a
 local volume error cannot be reported as a successful change. The worker may

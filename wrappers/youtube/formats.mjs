@@ -1,38 +1,54 @@
 // Prefer a combined progressive stream. If unavailable, the gateway muxes an
 // explicitly paired H.264/AAC selection; video-only is never a playable result.
-export async function resolveFormats(info, player) {
-  try {
-    const combined = info.chooseFormat({
-      type: "video+audio",
-      format: "mp4",
-      codec: "avc1",
-      quality: "360p",
-    });
-    if (combined.has_audio && combined.has_video) {
-      const url = await combined.decipher(player);
-      if (url) return { url, mimeType: "video/mp4" };
+export async function resolveFormats(info, player, validate = async () => true) {
+  const checked = new Set();
+  const playable = async (format) => {
+    if (!format) return "";
+    const identity = Number.isInteger(format.itag) ? format.itag : format;
+    if (checked.has(identity)) return "";
+    checked.add(identity);
+    const url = await format.decipher(player);
+    return url && (await validate(url, format)) ? url : "";
+  };
+  for (const quality of ["360p", "480p"]) {
+    try {
+      const combined = info.chooseFormat({
+        type: "video+audio",
+        format: "mp4",
+        codec: "avc1",
+        quality,
+      });
+      if (combined.has_audio && combined.has_video) {
+        const url = await playable(combined);
+        if (url) return { url, mimeType: "video/mp4" };
+      }
+    } catch {
+      /* A different bounded format or client may still work. */
     }
-  } catch {
-    /* Adaptive streams below still need both tracks. */
   }
-  let video;
+  let audioUrl = "";
+  for (const quality of ["bestefficiency", "best"]) {
+    try {
+      const audio = info.chooseFormat({ type: "audio", format: "mp4", codec: "mp4a", quality });
+      if (audio.has_audio && !audio.has_video) {
+        audioUrl = await playable(audio);
+        if (audioUrl) break;
+      }
+    } catch {
+      /* Try another AAC format before changing clients. */
+    }
+  }
+  if (!audioUrl) throw new Error("audio_unavailable");
   for (const quality of ["360p", "480p", "720p"]) {
     try {
-      video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
-      if (video.has_video) break;
+      const video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
+      if (video.has_video && !video.has_audio) {
+        const url = await playable(video);
+        if (url) return { url, audioUrl, mimeType: "video/mp4" };
+      }
     } catch {
-      /* Try the next bounded resolution. */
+      /* Keep resolution bounded and try the next known H.264 tier. */
     }
   }
-  if (!video?.has_video) throw new Error("video_unavailable");
-  const audio = info.chooseFormat({
-    type: "audio",
-    format: "mp4",
-    codec: "mp4a",
-    quality: "bestefficiency",
-  });
-  if (!audio.has_audio || audio.has_video) throw new Error("audio_unavailable");
-  const [url, audioUrl] = await Promise.all([video.decipher(player), audio.decipher(player)]);
-  if (!url || !audioUrl) throw new Error("stream_unavailable");
-  return { url, audioUrl, mimeType: "video/mp4" };
+  throw new Error("video_unavailable");
 }

@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { once } from "node:events";
-import { createWrapper } from "./server.mjs";
+import { readFileSync } from "node:fs";
+import { createWrapper, WORKER_LIMITS } from "./server.mjs";
 import { evaluate } from "./interpreter.mjs";
 
 const token = "synthetic-worker-token-32-characters";
@@ -22,6 +23,29 @@ class FakeWorker extends EventEmitter {
     this.terminated = true;
   }
 }
+test("image parent heap does not undercut the bounded worker heap", () => {
+  const dockerfile = readFileSync(new URL("./Dockerfile", import.meta.url), "utf8");
+  const parentHeap = Number(dockerfile.match(/--max-old-space-size=(\d+)/)?.[1]);
+  assert.ok(parentHeap >= WORKER_LIMITS.maxOldGenerationSizeMb);
+});
+test("player resolution has a bounded worker heap and longer deadline than browse", async (t) => {
+  assert.deepEqual(WORKER_LIMITS, { maxOldGenerationSizeMb: 192, stackSizeMb: 4 });
+  const { url } = await fixture(t, {
+    timeoutMs: 100,
+    resolveTimeoutMs: 500,
+    workerFactory: () => {
+      const worker = new FakeWorker();
+      setTimeout(() => worker.emit("message", { ok: true, value: { mimeType: "video/mp4" } }), 220);
+      return worker;
+    },
+  });
+  const headers = { authorization: `Bearer ${token}` };
+  const catalog = await fetch(url + "/catalog", { headers });
+  assert.equal(catalog.status, 504);
+  const resolved = await fetch(url + "/resolve/dQw4w9WgXcQ", { headers });
+  assert.equal(resolved.status, 200);
+  assert.deepEqual(await resolved.json(), { mimeType: "video/mp4" });
+});
 test("interpreter evaluates without host access and stops infinite code", async () => {
   assert.deepEqual(await evaluate({ output: 'return {sig:"abc",n:"def"}' }), {
     sig: "abc",

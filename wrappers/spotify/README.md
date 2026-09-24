@@ -1,8 +1,9 @@
 # Spotify Connect worker
 
-Pinned go-librespot runs as a supervised external process. Its loopback API and
-PCM FIFO stay inside the worker. One cancellable FFmpeg reader converts fixed
-44.1 kHz stereo s16le into MP3 for the gateway's live, non-seekable playback plan.
+Pinned go-librespot runs as a supervised external process. Its HTTP API and
+PCM FIFO stay inside the worker's protected state/network boundary. One
+cancellable FFmpeg reader converts fixed 44.1 kHz stereo s16le into MP3 for
+the gateway's live, non-seekable playback plan.
 The gateway translates track metadata and a finite command set into semantic
 models. Provider tokens and raw upstream identities never reach Android.
 
@@ -14,18 +15,25 @@ memory behavior on the actual Android sender/receiver are still unmeasured. Run
 `make spotify-patch-check` for synthetic metadata, decoded samples, gain and seek
 checks. Corresponding-source packages must carry this patch and both MIT licenses.
 
-Run `make services-build`, then `make spotify-up`. In client Settings → Gateway
-services, enter the operator code and choose **Show Spotify pairing code**. Finish
-the pairing on your phone. On the client select Settings → Receive Spotify / AirPlay
-→ Spotify, then select Zombie Box in Spotify; active audio is routed automatically. `go-librespot` requires an eligible Spotify account; real
-account playback remains unverified until credentials are supplied.
+The Full package defaults new installations to Spotify Connect Zeroconf. With
+the optional Spotify profile running, choose Zombie Box from Spotify's device
+picker on a phone on the same LAN. The phone's signed-in account pairs the
+receiver; the separate device-authorization URL/code flow remains available by
+selecting `device_auth` mode in Full's configuration helper. Existing
+`device_auth` configuration and stored account credentials are preserved during
+upgrade. The mode change takes effect after restarting the worker and does not
+delete stored account state. The sender account must be eligible for Spotify
+Connect; physical phone discovery and playback are not yet verified.
 
 Private configuration: `.local/spotify/worker.json` and
 `.local/spotify/state/config.yml`; credentials persist in the worker's state
-directory. The default device-auth flow does not require multicast networking.
-Custom Spotify Connect discovery/zeroconf is an operator configuration, not
-advertised by the default bridged container. `volume_steps` must remain 100 for
-the current semantic percentage command mapping.
+directory. Full's source-built candidate runs this worker in host-network mode
+for mDNS discovery and the built-in Zeroconf TCP pairing listener (default port
+3679). Its bearer-protected HTTP API binds only to Docker's host-gateway bridge
+address on port 8092, not the LAN address; do not use an older Spotify worker
+image with this host-network configuration. The client reports account readiness
+separately from worker availability. `volume_steps` must remain 100 for the
+current semantic percentage command mapping.
 
 Read status at `GET /v1/player/spotify`. Shared player writes and authorization
 codes require a paired device plus `X-Zombie-Admin-Code`, except that dev.12 permits
