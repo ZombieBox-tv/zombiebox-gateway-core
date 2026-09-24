@@ -204,3 +204,14 @@ Generate/probe representative 480p H.264/AAC MP4, 720p H.264/AC3 MKV and
 subtitle, Spotify, AirPlay and YouTube host cases are catalogued in
 [the media matrix](media-host-matrix.md). Real RTSP media, account/sender/device
 behavior and product exit gates remain open.
+
+## dev.55 paired AirPlay PIN retrieval
+
+The private AirPlay worker exposes its configured four-digit receiver PIN only
+through its token-protected `/pairing` route. Core validates that response and
+serves it to an authenticated, paired Client through `/v1/airplay/pairing` with
+`Cache-Control: no-store`; it never appears in generic status or provider
+configuration. The operator code is separate. Host tests cover anonymous
+denial, disabled service, private worker authentication and paired retrieval.
+An updated Full/Edge worker and a physical iPad PIN/playback trial are still
+required; this does not close M6 or any product/physical gate.

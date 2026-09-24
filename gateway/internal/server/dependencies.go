@@ -37,6 +37,9 @@ type Resolver interface {
 type Reception interface {
 	Reception(context.Context, string, domain.Config) (*domain.Source, domain.NowPlaying, error)
 }
+type AirPlayPairing interface {
+	AirPlayPIN(context.Context, domain.Config) (string, error)
+}
 type Player interface {
 	SpotifyStatus(context.Context, domain.Config) (domain.NowPlaying, error)
 	SpotifyAuthorization(context.Context, domain.Config) (domain.AuthorizationPrompt, error)
@@ -84,6 +87,7 @@ type Dependencies struct {
 	Uploads         MediaUploads
 	RemoteSubtitles RemoteSubtitles
 	Reception       Reception
+	AirPlayPairing  AirPlayPairing
 	RemoteMedia     RemoteMedia
 	Browse          catalog.Backend
 	YouTubeReceiver YouTubeReceiver

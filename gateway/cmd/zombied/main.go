@@ -185,6 +185,7 @@ func main() {
 		PublicMediaHTTP: httpclient.PublicDownloads(),
 		Uploads:         uploads,
 		Reception:       adapters,
+		AirPlayPairing:  adapters,
 		Browse:          adapters,
 		YouTubeReceiver: adapters,
 		Artwork:         artwork.New(httpclient.Metadata(), artworkCache),

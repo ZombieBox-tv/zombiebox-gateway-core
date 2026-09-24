@@ -30,7 +30,7 @@ func (c Config) Validate() error {
 		return errors.New("invalid worker configuration")
 	}
 	if c.Mode == "airplay" && !regexp.MustCompile(`^[0-9]{4}$`).MatchString(c.Pin) {
-		return errors.New("AirPlay requires a four-digit operator PIN")
+		return errors.New("AirPlay requires a four-digit receiver PIN")
 	}
 	return nil
 }
@@ -126,6 +126,12 @@ func Handler(ctx context.Context, c Config) http.Handler {
 			_ = cmd.Wait()
 		})
 	} else {
+		mux.HandleFunc("GET /pairing", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(struct {
+				PIN string `json:"pin"`
+			}{PIN: c.Pin})
+		})
 		mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 			info, err := os.Stat(filepath.Join(c.StateDir, "hls", "index.m3u8"))
 			active := err == nil && time.Since(info.ModTime()) < 15*time.Second

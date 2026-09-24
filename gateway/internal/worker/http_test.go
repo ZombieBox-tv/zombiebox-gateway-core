@@ -17,12 +17,12 @@ func TestReceiverFilesAndPrivateBoundary(t *testing.T) {
 	os.Mkdir(filepath.Join(dir, "hls"), 0700)
 	os.WriteFile(filepath.Join(dir, "hls", "index.m3u8"), []byte("#EXTM3U\n"), 0600)
 	os.WriteFile(filepath.Join(dir, "secret.json"), []byte("credentials"), 0600)
-	c := Config{Mode: "airplay", Token: strings.Repeat("t", 32), StateDir: dir}
+	c := Config{Mode: "airplay", Token: strings.Repeat("t", 32), StateDir: dir, Pin: "0427"}
 	h := Handler(context.Background(), c)
 	for _, tc := range []struct {
 		path, token string
 		code        int
-	}{{"/status", "", 401}, {"/status", c.Token, 200}, {"/stream/index.m3u8", c.Token, 200}, {"/stream/secret.json", c.Token, 404}, {"/token", c.Token, 404}} {
+	}{{"/status", "", 401}, {"/status", c.Token, 200}, {"/pairing", "", 401}, {"/pairing", c.Token, 200}, {"/stream/index.m3u8", c.Token, 200}, {"/stream/secret.json", c.Token, 404}, {"/token", c.Token, 404}} {
 		r := httptest.NewRequest("GET", tc.path, nil)
 		r.Header.Set("Authorization", "Bearer "+tc.token)
 		w := httptest.NewRecorder()
@@ -32,6 +32,9 @@ func TestReceiverFilesAndPrivateBoundary(t *testing.T) {
 		}
 		if strings.Contains(w.Body.String(), "credentials") {
 			t.Fatal("secret file exposed")
+		}
+		if strings.Contains(w.Body.String(), c.Pin) != (tc.path == "/pairing" && tc.token == c.Token) {
+			t.Fatal("AirPlay PIN exposed outside authenticated pairing route")
 		}
 	}
 }

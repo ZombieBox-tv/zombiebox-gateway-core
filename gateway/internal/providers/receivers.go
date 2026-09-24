@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -205,4 +206,23 @@ func (a *Adapters) AirPlay(ctx context.Context, c Config) ([]Source, error) {
 		artwork = strings.TrimRight(c.URL, "/") + "/artwork?rev=" + hex.EncodeToString(sum[:8])
 	}
 	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/stream/index.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}, {Item: audio, ArtworkURL: artwork, ArtworkHeaders: headers, URL: strings.TrimRight(c.URL, "/") + "/stream/audio.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}}, nil
+}
+
+// AirPlayPIN reads only the private worker's pairing route, never its config file.
+func (a *Adapters) AirPlayPIN(ctx context.Context, c Config) (string, error) {
+	headers, err := wrapperHeaders(c)
+	if err != nil {
+		return "", err
+	}
+	body, err := a.request(ctx, strings.TrimRight(c.URL, "/")+"/pairing", headers)
+	if err != nil {
+		return "", err
+	}
+	var pairing struct {
+		PIN string `json:"pin"`
+	}
+	if json.Unmarshal(body, &pairing) != nil || !regexp.MustCompile(`^[0-9]{4}$`).MatchString(pairing.PIN) {
+		return "", errors.New("invalid AirPlay pairing response")
+	}
+	return pairing.PIN, nil
 }
