@@ -49,7 +49,10 @@ func (a *Adapters) YouTube(ctx context.Context, c Config) ([]Source, error) {
 }
 
 func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, error) {
-	body, err := a.request(ctx, source.URL, source.Headers)
+	// The bounded worker may need more than the metadata client's five seconds
+	// to resolve both H.264 video and AAC audio. The private client retains the
+	// wrapper's longer timeout and redirect restrictions.
+	body, err := requestWithClient(ctx, a.privateHTTP, source.URL, source.Headers)
 	if err != nil {
 		return source, err
 	}

@@ -10,12 +10,16 @@ import (
 )
 
 func (a *Adapters) request(ctx context.Context, raw string, headers http.Header) ([]byte, error) {
+	return requestWithClient(ctx, a.http, raw, headers)
+}
+
+func requestWithClient(ctx context.Context, client HTTPClient, raw string, headers http.Header) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", raw, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header = headers.Clone()
-	res, err := a.http.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
 		return nil, errors.New("provider unavailable")
 	}

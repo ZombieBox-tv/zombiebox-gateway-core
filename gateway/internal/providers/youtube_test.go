@@ -3,11 +3,41 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+type youtubeHTTPClient func(*http.Request) (*http.Response, error)
+
+func (client youtubeHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	return client(request)
+}
+
+func TestYouTubeResolutionUsesPrivateTransport(t *testing.T) {
+	metadata := youtubeHTTPClient(func(*http.Request) (*http.Response, error) {
+		t.Fatal("resolution used the short metadata transport")
+		return nil, errors.New("unexpected transport")
+	})
+	private := youtubeHTTPClient(func(request *http.Request) (*http.Response, error) {
+		if request.Header.Get("Authorization") != "Bearer private" {
+			t.Fatal("missing wrapper authorization")
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`{"url":"https://r1.googlevideo.com/video","mimeType":"video/mp4"}`)),
+		}, nil
+	})
+	adapter := New(metadata, private)
+	source := Source{URL: "http://wrapper.local/resolve/aqz-KE-bpKQ", MIME: "application/x-zombie-youtube", Headers: http.Header{"Authorization": {"Bearer private"}}}
+	resolved, err := adapter.Resolve(context.Background(), source)
+	if err != nil || resolved.MIME != "video/mp4" || resolved.Headers != nil {
+		t.Fatalf("resolution failed: %v", err)
+	}
+}
 
 func TestYouTubeWrapperBoundary(t *testing.T) {
 	secret := strings.Repeat("s", 32)

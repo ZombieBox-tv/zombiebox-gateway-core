@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { Innertube, Platform, Log } from "youtubei.js";
-import { resolveFormats } from "./formats.mjs";
+import { resolveVideo } from "./resolve.mjs";
 import { browse } from "./browse.mjs";
 import { evaluate } from "./interpreter.mjs";
 
@@ -36,8 +36,7 @@ async function run() {
     }
     return { items };
   }
-  const info = await yt.getBasicInfo(id);
-  return resolveFormats(info, yt.session.player);
+  return resolveVideo(yt, id);
 }
 
 try {
