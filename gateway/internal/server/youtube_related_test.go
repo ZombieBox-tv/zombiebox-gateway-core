@@ -17,6 +17,32 @@ import (
 	"zombiebox.local/gateway/internal/youtubeaccount"
 )
 
+func TestYouTubeRecentContextSurvivesInMemoryLossViaWatchHistory(t *testing.T) {
+	s := testServer(t, nil, "")
+	const device = "history-device"
+	const videoID = "aqz-KE-bpKQ"
+	progress := domain.Progress{
+		Item:      domain.Item{ID: "youtube-" + videoID, Provider: "youtube", Title: "YouTube"},
+		UpdatedAt: time.Now().Unix(),
+	}
+	if err := s.db.Put(t.Context(), "progress:"+device, progress.Item.ID, progress); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.getRecentYouTubeContext(t.Context(), device); got != videoID {
+		t.Fatalf("expected persisted DIAL video ID, got %q", got)
+	}
+	if got := s.getRecentYouTubeContext(t.Context(), "another-device"); got != "" {
+		t.Fatalf("another device must not receive this history, got %q", got)
+	}
+	progress.Item.Title = "Mechanical Keyboard Build"
+	if err := s.db.Put(t.Context(), "progress:"+device, progress.Item.ID, progress); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.getRecentYouTubeContext(t.Context(), device); got != progress.Item.Title {
+		t.Fatalf("expected persisted title, got %q", got)
+	}
+}
+
 func TestYouTubeRelatedRelevanceAndMetadata(t *testing.T) {
 	currentID := "aqz-KE-bpKQ"
 	rel1ID := "rel12345678"

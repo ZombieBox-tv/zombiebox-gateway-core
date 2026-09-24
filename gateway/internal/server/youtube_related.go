@@ -103,24 +103,60 @@ func (s *Server) recordRecentYouTubeContext(device, title, query, videoID string
 	delete(s.youtubeHomeFeeds, device)
 }
 
-func (s *Server) getRecentYouTubeContext(device string) string {
+func (s *Server) getRecentYouTubeContext(ctx context.Context, device string) string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.youtubeContexts != nil {
 		if ctx, ok := s.youtubeContexts[device]; ok && time.Since(ctx.UpdatedAt) < 24*time.Hour {
 			if ctx.Query != "" {
+				s.mu.Unlock()
 				return ctx.Query
 			}
 			if ctx.Title != "" {
+				s.mu.Unlock()
 				return ctx.Title
 			}
 			if ctx.VideoID != "" {
+				s.mu.Unlock()
 				return ctx.VideoID
 			}
 		}
 	}
 	if entry, ok := s.searchResults[device]; ok && entry.query != "" && time.Since(entry.fetched) < 24*time.Hour {
+		s.mu.Unlock()
 		return entry.query
+	}
+	s.mu.Unlock()
+
+	// The in-memory context disappears when Full restarts. Reuse the device's
+	// existing bounded watch history so a prior YouTube session can still seed
+	// the feed without introducing a second personal-data store.
+	stored, err := s.db.List(ctx, "progress:"+device)
+	if err != nil {
+		return ""
+	}
+	var latest domain.Progress
+	for _, raw := range stored {
+		var progress domain.Progress
+		if json.Unmarshal(raw, &progress) != nil || progress.Item.Provider != "youtube" {
+			continue
+		}
+		if progress.UpdatedAt > latest.UpdatedAt {
+			latest = progress
+		}
+	}
+	if latest.UpdatedAt <= 0 || time.Since(time.Unix(latest.UpdatedAt, 0)) > 30*24*time.Hour {
+		return ""
+	}
+	title := strings.TrimSpace(latest.Item.Title)
+	if title != "" && !strings.EqualFold(title, "YouTube") {
+		if chars := []rune(title); len(chars) > 120 {
+			title = string(chars[:120])
+		}
+		return title
+	}
+	videoID := strings.TrimPrefix(latest.Item.ID, "youtube-")
+	if youtubeVideoIDPattern.MatchString(videoID) {
+		return videoID
 	}
 	return ""
 }

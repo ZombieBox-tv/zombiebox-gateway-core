@@ -145,7 +145,7 @@ func (s *Server) youtubeHomeSources(ctx context.Context, device string) []provid
 
 	// 2. Recent search/view context (if available and richer feed not empty).
 	if len(sources) == 0 {
-		contextQuery := s.getRecentYouTubeContext(device)
+		contextQuery := s.getRecentYouTubeContext(feedCtx, device)
 		if contextQuery != "" {
 			page, err := s.browse.Page(feedCtx, device, "youtube", providers.Titles["youtube"], revision, config, "", contextQuery, 0)
 			if err == nil && len(page.Items) > 0 {
