@@ -66,6 +66,7 @@ type Server struct {
 	polls              chan struct{}
 	catalogCache       map[string]catalogEntry
 	searchResults      map[string]searchResult
+	youtubeHomeFeeds   map[string]searchResult
 	configRevision     map[string]uint64
 	managed            map[string]bool
 	streams            chan struct{}
@@ -110,6 +111,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	s.configRevision = map[string]uint64{}
 	s.managed = map[string]bool{}
 	s.searchResults = map[string]searchResult{}
+	s.youtubeHomeFeeds = map[string]searchResult{}
 	s.streams = make(chan struct{}, 4)
 	s.mediaReceiverInbox = inbox.New(receiverAdapter{s}, receiverAdapter{s})
 	go s.reapMediaReceiver()

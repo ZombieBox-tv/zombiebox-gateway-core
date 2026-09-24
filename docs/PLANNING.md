@@ -215,3 +215,12 @@ configuration. The operator code is separate. Host tests cover anonymous
 denial, disabled service, private worker authentication and paired retrieval.
 An updated Full/Edge worker and a physical iPad PIN/playback trial are still
 required; this does not close M6 or any product/physical gate.
+
+## dev.56 YouTube exploration shelf
+
+When the anonymous YouTube home feed is empty, the scoped TV Home route falls
+back to real YouTube browse results for a broad `popular` query. It retains
+device-scoped playback sources and caches the shelf for two minutes; a worker
+failure leaves Home available without invented media. The Vizio's YouTube
+tab, thumbnail art, playback and response time still need physical verification
+with an updated Full candidate.

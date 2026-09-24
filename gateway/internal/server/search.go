@@ -17,8 +17,11 @@ type searchResult struct {
 
 // At most one 40-item result per registered device (registration itself is capped at 64).
 func (s *Server) screenSources(ctx context.Context, device, provider, query string) ([]providers.Source, error) {
-	if provider != "youtube" || query == "" {
+	if provider != "youtube" {
 		return s.catalog(ctx), nil
+	}
+	if query == "" {
+		return s.youtubeHomeSources(ctx, device), nil
 	}
 	if len(query) > 200 {
 		return nil, errors.New("query too long")
@@ -46,6 +49,54 @@ func (s *Server) screenSources(ctx context.Context, device, provider, query stri
 	}
 	s.searchResults[device] = searchResult{query, revision, time.Now(), sources}
 	return sources, nil
+}
+
+// The anonymous YouTube home feed can legitimately be empty. Show real search
+// results as an exploration shelf in that case, while retaining browse sources
+// for private playback resolution. Optional worker failures leave Home usable.
+func (s *Server) youtubeHomeSources(ctx context.Context, device string) []providers.Source {
+	base := s.catalog(ctx)
+	for _, source := range base {
+		if source.Item.Provider == "youtube" && source.Item.Playable {
+			return base
+		}
+	}
+	if s.deps.Browse == nil {
+		return base
+	}
+	s.mu.Lock()
+	config, revision := s.config(ctx, "youtube"), s.configRevision["youtube"]
+	entry := s.youtubeHomeFeeds[device]
+	s.mu.Unlock()
+	if !config.Enabled {
+		return base
+	}
+	if entry.revision == revision && time.Since(entry.fetched) < 2*time.Minute {
+		return append(base, entry.sources...)
+	}
+	feedCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	page, err := s.browse.Page(feedCtx, device, "youtube", providers.Titles["youtube"], revision, config, "", "", 0)
+	if err != nil || len(page.Items) == 0 {
+		page, err = s.browse.Page(feedCtx, device, "youtube", providers.Titles["youtube"], revision, config, "", "popular", 0)
+	}
+	if err != nil {
+		return base
+	}
+	sources := make([]providers.Source, 0, len(page.Items))
+	for _, item := range page.Items {
+		if item.Kind == "video" {
+			sources = append(sources, providers.Source{Item: item})
+		}
+	}
+	s.mu.Lock()
+	if s.configRevision["youtube"] == revision {
+		s.youtubeHomeFeeds[device] = searchResult{revision: revision, fetched: time.Now(), sources: sources}
+	} else {
+		sources = nil
+	}
+	s.mu.Unlock()
+	return append(base, sources...)
 }
 
 func (s *Server) searchSource(ctx context.Context, device, id string) *providers.Source {
