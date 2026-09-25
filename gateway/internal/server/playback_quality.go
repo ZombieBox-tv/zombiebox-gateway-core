@@ -51,6 +51,31 @@ func (s *Server) revertQualityPreference(ctx context.Context, deviceID, kind str
 	})
 }
 
+// revertFailedSessionQualityLocked only forgets a manual preference when the
+// session using it actually fails. A superseded stream can report a late
+// failure while its replacement is already playing at the new quality.
+// The caller holds s.mu so session replacement and this check are ordered.
+func (s *Server) revertFailedSessionQualityLocked(ctx context.Context, id string, sess *session) error {
+	if sess == nil || s.sessions[id] != sess || sess.supersededBy != "" || sess.ctx.Err() != nil {
+		return nil
+	}
+	kind := sess.source.Item.Kind
+	if kind == "" {
+		kind = "video"
+	}
+	selected := sess.selection.Quality
+	if selected == "LOW" {
+		selected = "240p"
+	} else if selected == "STANDARD" {
+		selected = "360p"
+	}
+	preference := s.getQualityPreference(ctx, sess.device, kind)
+	if preference == "" || preference == "auto" || preference != selected {
+		return nil
+	}
+	return s.revertQualityPreference(ctx, sess.device, kind)
+}
+
 func (s *Server) cleanupSupersededSessionsLocked(deviceID, activeOldID string) {
 	for sid, sess := range s.sessions {
 		if sess.device != deviceID || sid == activeOldID {

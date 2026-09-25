@@ -19,6 +19,8 @@ import (
 	"zombiebox.local/gateway/internal/domain"
 )
 
+var ErrPlaylistUnconfigured = errors.New("playlist not configured")
+
 func (a *Adapters) IPTV(ctx context.Context, c Config) ([]Source, error) {
 	var body []byte
 	var err error
@@ -29,12 +31,14 @@ func (a *Adapters) IPTV(ctx context.Context, c Config) ([]Source, error) {
 		}
 		defer f.Close()
 		body, err = io.ReadAll(io.LimitReader(f, 8<<20+1))
-	} else {
+	} else if c.URL != "" {
 		headers := http.Header{}
 		if c.Token != "" {
 			headers.Set("Authorization", "Bearer "+c.Token)
 		}
 		body, err = a.request(ctx, c.URL, headers)
+	} else {
+		return nil, ErrPlaylistUnconfigured
 	}
 	if err != nil {
 		return nil, err

@@ -31,6 +31,21 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 			native = false
 		}
 	}
+	if isHLS(metadata.Format.Name, mime) {
+		if nativeHLSCandidate(metadata, mime, capabilities) {
+			return "DIRECT_PLAY"
+		}
+		if status("http-fmp4") == "FAIL" {
+			return "EXTERNAL_PLAYER"
+		}
+		if native {
+			return "REMUX"
+		}
+		if status("h264-baseline-360") == "FAIL" || status("aac") == "FAIL" {
+			return "EXTERNAL_PLAYER"
+		}
+		return "TRANSCODE"
+	}
 	// Probe evidence takes precedence over a provider's generic video/mp4 label.
 	containerNeedsRemux := needsCompatibleContainer(metadata.Format.Name, mime)
 	if native && !containerNeedsRemux && mime != "video/x-matroska" && mime != "video/webm" && status("http-progressive") != "FAIL" {

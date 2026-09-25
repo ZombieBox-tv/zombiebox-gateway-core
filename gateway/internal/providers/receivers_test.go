@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -145,6 +146,30 @@ func TestSpotifyStatusNoTrack(t *testing.T) {
 	}
 }
 
+func TestSpotifyReceptionWaitsForCurrentTrack(t *testing.T) {
+	var hasTrack atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hasTrack.Load() {
+			io.WriteString(w, `{"stopped":false,"buffering":true,"track":null}`)
+			return
+		}
+		io.WriteString(w, `{"stopped":false,"track":{"name":"Ready song","artist_names":["Artist"]}}`)
+	}))
+	defer upstream.Close()
+
+	config := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("t", 32)}
+	source, state, err := testAdapters.Reception(context.Background(), "spotify", config)
+	if err != nil || source != nil || state.State != "BUFFERING" || state.Item == nil || state.Item.Title != "Spotify Connect" {
+		t.Fatalf("trackless player must not open a generic media stream: source=%v state=%+v err=%v", source, state, err)
+	}
+
+	hasTrack.Store(true)
+	source, state, err = testAdapters.Reception(context.Background(), "spotify", config)
+	if err != nil || source == nil || state.State != "PLAYING" || source.Item.Title != "Ready song" || source.MIME != "audio/mpeg" {
+		t.Fatalf("loaded track must start reception: source=%v state=%+v err=%v", source, state, err)
+	}
+}
+
 func TestSpotifyStatusCoverURLSecurity(t *testing.T) {
 	var currentCover string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -228,5 +253,83 @@ func TestSpotifyStatusErrorHandling(t *testing.T) {
 	_, err = testAdapters.SpotifyStatus(context.Background(), c)
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("expected 500 error, got: %v", err)
+	}
+}
+
+func TestAirPlayMetadataOnlyAndPlayableReadiness(t *testing.T) {
+	var (
+		audioActive bool
+		metadata    map[string]string
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"active":      false,
+			"audioActive": audioActive,
+		}
+		if metadata != nil {
+			resp["metadata"] = metadata
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer upstream.Close()
+
+	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("a", 32)}
+
+	// 1. Idle state: inactive, no metadata
+	sources, err := testAdapters.AirPlay(context.Background(), c)
+	if err != nil || len(sources) != 2 {
+		t.Fatalf("expected 2 sources, got %v (err %v)", sources, err)
+	}
+	if sources[0].Item.Playable || sources[1].Item.Playable {
+		t.Fatal("sources should not be playable when idle")
+	}
+	if sources[1].Item.Title != "AirPlay audio" || sources[1].ArtworkURL != "" {
+		t.Fatalf("unexpected idle audio item: %+v", sources[1])
+	}
+
+	// 2. Metadata-only state: audioActive is false, but metadata is present (Apple Music with unplayable/stalled stream)
+	metadata = map[string]string{
+		"title":  "Sample Track",
+		"artist": "Sample Artist",
+		"album":  "Sample Album",
+	}
+	sources, err = testAdapters.AirPlay(context.Background(), c)
+	if err != nil || len(sources) != 2 {
+		t.Fatalf("expected 2 sources, got %v (err %v)", sources, err)
+	}
+	audioSource := sources[1]
+	if audioSource.Item.Playable {
+		t.Fatal("audio source must NOT be playable in metadata-only state")
+	}
+	if audioSource.Item.Title != "Sample Track" || audioSource.Item.Subtitle != "Sample Artist" || audioSource.Item.Description != "Sample Album" {
+		t.Fatalf("audio item should contain metadata even when unplayable: %+v", audioSource.Item)
+	}
+	if audioSource.ArtworkURL == "" || !strings.Contains(audioSource.ArtworkURL, "/artwork?rev=") {
+		t.Fatalf("artwork URL should be set in metadata-only state: %q", audioSource.ArtworkURL)
+	}
+
+	// Reception in metadata-only state: must not start playback!
+	source, state, err := testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || source != nil || state.State != "STOPPED" {
+		t.Fatalf("metadata-only AirPlay must not start playback: source=%v state=%+v err=%v", source, state, err)
+	}
+
+	// 3. Playable valid state: audioActive is true
+	audioActive = true
+	sources, err = testAdapters.AirPlay(context.Background(), c)
+	if err != nil || len(sources) != 2 {
+		t.Fatalf("expected 2 sources, got %v (err %v)", sources, err)
+	}
+	if !sources[1].Item.Playable {
+		t.Fatal("audio source must be playable when audioActive is true")
+	}
+	if sources[1].Item.Title != "Sample Track" || sources[1].ArtworkURL == "" {
+		t.Fatalf("playable audio source missing metadata: %+v", sources[1])
+	}
+
+	// Reception in playable state: starts playback
+	source, state, err = testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || source == nil || state.State != "PLAYING" || source.Item.Title != "Sample Track" {
+		t.Fatalf("playable AirPlay should start playback: source=%v state=%+v err=%v", source, state, err)
 	}
 }

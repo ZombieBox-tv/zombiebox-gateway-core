@@ -89,6 +89,14 @@ func TestQualitiesSourceBoundingAndDeviceCapabilities(t *testing.T) {
 		t.Fatalf("2160p/1440p must not be fabricated on 1080p source: %+v", invCapable.Options)
 	}
 
+	// A 1080p decode PASS does not override a smaller known display output.
+	outputLimitedDevice := capableDevice
+	outputLimitedDevice.Registration.Display.Height = 1026
+	invOutputLimited := qualitiesWithFreshEvidence(meta1080, srcVideo, outputLimitedDevice, "")
+	if HasQuality(invOutputLimited, "1080p") || !HasQuality(invOutputLimited, "720p") {
+		t.Fatalf("1026px output must cap choices at 720p: %+v", invOutputLimited.Options)
+	}
+
 	// 3. Source is 720p: 1080p must NOT be offered regardless of device capability.
 	meta720 := domain.Metadata{
 		Streams: []domain.Stream{

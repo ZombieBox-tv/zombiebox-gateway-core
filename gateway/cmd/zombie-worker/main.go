@@ -53,7 +53,9 @@ func run(path string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	var commands []*exec.Cmd
+	var spotifyDiagnostics *worker.SpotifyDaemonDiagnostics
 	if c.Mode == "spotify" {
+		spotifyDiagnostics = worker.NewSpotifyDaemonDiagnostics()
 		fifo := filepath.Join(c.StateDir, "audio.pcm")
 		info, statErr := os.Lstat(fifo)
 		if os.IsNotExist(statErr) {
@@ -73,7 +75,10 @@ func run(path string) error {
 		if err = os.WriteFile(audioSDP, []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Zombie AirPlay Audio\nc=IN IP4 127.0.0.1\nt=0 0\nm=audio 35014 RTP/AVP 97\na=rtpmap:97 L16/44100/2\n"), 0600); err != nil {
 			return err
 		}
-		commands = append(commands, exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,udp,rtp", "-localaddr", "127.0.0.1", "-listen_timeout", "-1", "-threads", "1", "-i", audioSDP, "-c:a", "aac", "-threads", "1", "-b:a", "128k", "-f", "hls", "-hls_time", "1", "-hls_list_size", "4", "-hls_flags", "delete_segments+omit_endlist+temp_file", "-hls_segment_filename", filepath.Join(hls, "audio%d.ts"), filepath.Join(hls, "audio.m3u8")))
+		// RTP timestamps may restart when an AirPlay sender changes tracks. Build
+		// output timestamps from decoded samples so HLS segment durations remain
+		// monotonic. Packet loss/reconnect recovery still needs physical evidence.
+		commands = append(commands, exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,udp,rtp", "-localaddr", "127.0.0.1", "-listen_timeout", "-1", "-threads", "1", "-i", audioSDP, "-af", "asetpts=N/SR/TB", "-c:a", "aac", "-threads", "1", "-b:a", "128k", "-f", "hls", "-hls_time", "1", "-hls_list_size", "4", "-hls_flags", "delete_segments+omit_endlist+temp_file", "-hls_segment_filename", filepath.Join(hls, "audio%d.ts"), filepath.Join(hls, "audio.m3u8")))
 		// RTP is loopback-only. H.265 is deliberately not advertised to senders.
 		sdp := "v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Zombie AirPlay\nc=IN IP4 127.0.0.1\nt=0 0\nm=video 35010 RTP/AVP 96\na=rtpmap:96 H264/90000\na=fmtp:96 packetization-mode=1\nm=audio 35012 RTP/AVP 97\na=rtpmap:97 L16/44100/2\n"
 		sdpPath := filepath.Join(c.StateDir, "receiver.sdp")
@@ -92,6 +97,8 @@ func run(path string) error {
 		cmd.WaitDelay = time.Second
 		if filepath.Base(cmd.Path) == "ffmpeg" {
 			cmd.Stderr = os.Stderr
+		} else if filepath.Base(cmd.Path) == "go-librespot" {
+			cmd.Stderr = spotifyDiagnostics
 		}
 		if err = cmd.Start(); err != nil {
 			return fmt.Errorf("start %s: %w", filepath.Base(cmd.Path), err)
@@ -103,7 +110,7 @@ func run(path string) error {
 			errors <- fmt.Errorf("%s exited: %v", filepath.Base(cmd.Path), err)
 		}(cmd)
 	}
-	httpServer := &http.Server{Addr: c.Listen, Handler: worker.Handler(ctx, c), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+	httpServer := &http.Server{Addr: c.Listen, Handler: worker.HandlerWithSpotifyDiagnostics(ctx, c, spotifyDiagnostics), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() { errors <- httpServer.ListenAndServe() }()
 	var result error
 	select {

@@ -144,7 +144,11 @@ func (s *Server) catalog(ctx context.Context) []providers.Source {
 			decorateArtwork(sources)
 			message := ""
 			if err != nil {
-				message = "Service unavailable. Check its configuration."
+				if errors.Is(err, providers.ErrPlaylistUnconfigured) {
+					message = "Add an M3U playlist in Services"
+				} else {
+					message = "Service unavailable. Check its configuration."
+				}
 			}
 			s.mu.Lock()
 			if s.configRevision[id] == revision {
@@ -202,6 +206,13 @@ func (s *Server) moduleList(ctx context.Context) []domain.Module {
 			continue
 		}
 		if id == "local" || c.Enabled {
+			if id == "iptv" && c.URL == "" && c.PlaylistPath == "" {
+				m.State = "NEEDS_SETUP"
+				m.Features = s.deps.Catalog.Features(id)
+				m.Message = "Add an M3U playlist in Services"
+				out = append(out, m)
+				continue
+			}
 			if s.deps.Catalog.HasCatalog(id) {
 				m.State = "HEALTHY"
 				m.Features = s.deps.Catalog.Features(id)

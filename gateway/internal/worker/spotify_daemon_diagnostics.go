@@ -1,0 +1,171 @@
+package worker
+
+import (
+	"sync"
+	"time"
+)
+
+const spotifyStallThreshold = 15 * time.Second
+
+var spotifyFailureNames = [...]string{
+	"audioKeyRefused",
+	"unsupportedMedia",
+	"networkOrCdn",
+	"decoder",
+	"audioPipe",
+	"trackLoad",
+}
+
+type spotifyFailurePattern struct {
+	category int
+	phrase   string
+	prefix   []int
+	matched  int
+}
+
+func newSpotifyFailurePattern(category int, phrase string) spotifyFailurePattern {
+	p := spotifyFailurePattern{category: category, phrase: phrase, prefix: make([]int, len(phrase))}
+	for i, matched := 1, 0; i < len(phrase); i++ {
+		for matched > 0 && phrase[i] != phrase[matched] {
+			matched = p.prefix[matched-1]
+		}
+		if phrase[i] == phrase[matched] {
+			matched++
+		}
+		p.prefix[i] = matched
+	}
+	return p
+}
+
+// SpotifyDaemonDiagnostics is the daemon's stderr sink. It holds only fixed
+// pattern progress and counters: no raw log line, track URI, account or token
+// can be retrieved from it. Unknown output is discarded.
+type SpotifyDaemonDiagnostics struct {
+	mu             sync.Mutex
+	patterns       []spotifyFailurePattern
+	lineCategories [len(spotifyFailureNames)]bool
+	counts         [len(spotifyFailureNames)]uint64
+	lineBytes      int
+	bufferingSince time.Time
+	clock          func() time.Time
+}
+
+func NewSpotifyDaemonDiagnostics() *SpotifyDaemonDiagnostics {
+	return newSpotifyDaemonDiagnostics(time.Now)
+}
+
+func newSpotifyDaemonDiagnostics(clock func() time.Time) *SpotifyDaemonDiagnostics {
+	d := &SpotifyDaemonDiagnostics{clock: clock}
+	for _, entry := range []struct {
+		category int
+		phrase   string
+	}{
+		{0, "refused the audio key"},
+		{0, "failed retrieving aes key with code"},
+		{0, "failed retrieving audio key"},
+		{0, "aeskeyerror"},
+		{0, "failed requesting playplay license"},
+		{0, "failed deobfuscating playplay key"},
+		{1, "no supported formats"},
+		{1, "media restricted"},
+		{2, "failed resolving track storage"},
+		{2, "connection refused"},
+		{2, "i/o timeout"},
+		{2, "network is unreachable"},
+		{3, "decoder"},
+		{3, "vorbis"},
+		{3, "flac"},
+		{4, "fifo"},
+		{4, "broken pipe"},
+		{4, "audio output"},
+		{5, "failed loading current track"},
+	} {
+		d.patterns = append(d.patterns, newSpotifyFailurePattern(entry.category, entry.phrase))
+	}
+	return d
+}
+
+func (d *SpotifyDaemonDiagnostics) Write(input []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, value := range input {
+		if value == '\n' {
+			d.finishLine()
+			continue
+		}
+		// Bound CPU for hostile or malformed lines while still draining stderr.
+		if d.lineBytes >= 4096 {
+			continue
+		}
+		d.lineBytes++
+		if value >= 'A' && value <= 'Z' {
+			value += 'a' - 'A'
+		}
+		for i := range d.patterns {
+			p := &d.patterns[i]
+			for p.matched > 0 && value != p.phrase[p.matched] {
+				p.matched = p.prefix[p.matched-1]
+			}
+			if value == p.phrase[p.matched] {
+				p.matched++
+			}
+			if p.matched == len(p.phrase) {
+				d.lineCategories[p.category] = true
+				p.matched = p.prefix[p.matched-1]
+			}
+		}
+	}
+	return len(input), nil
+}
+
+func (d *SpotifyDaemonDiagnostics) finishLine() {
+	for i, matched := range d.lineCategories {
+		if matched && d.counts[i] < ^uint64(0) {
+			d.counts[i]++
+		}
+		d.lineCategories[i] = false
+	}
+	for i := range d.patterns {
+		d.patterns[i].matched = 0
+	}
+	d.lineBytes = 0
+}
+
+type spotifyDaemonHealth struct {
+	FailureCounts    map[string]uint64 `json:"failureCounts"`
+	StalledBuffering bool              `json:"stalledBuffering"`
+}
+
+func (d *SpotifyDaemonDiagnostics) observe(bufferingWithoutTrack, audioActive bool) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.observeLocked(bufferingWithoutTrack, audioActive)
+}
+
+func (d *SpotifyDaemonDiagnostics) observeLocked(bufferingWithoutTrack, audioActive bool) {
+	now := d.clock()
+	if !bufferingWithoutTrack || audioActive {
+		d.bufferingSince = time.Time{}
+	} else if d.bufferingSince.IsZero() {
+		d.bufferingSince = now
+	}
+}
+
+func (d *SpotifyDaemonDiagnostics) snapshot(bufferingWithoutTrack, audioActive bool) *spotifyDaemonHealth {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.observeLocked(bufferingWithoutTrack, audioActive)
+	now := d.clock()
+	out := &spotifyDaemonHealth{FailureCounts: make(map[string]uint64, len(spotifyFailureNames))}
+	for i, name := range spotifyFailureNames {
+		out.FailureCounts[name] = d.counts[i]
+	}
+	out.StalledBuffering = !d.bufferingSince.IsZero() && now.Sub(d.bufferingSince) >= spotifyStallThreshold
+	return out
+}

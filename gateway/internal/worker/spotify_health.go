@@ -17,6 +17,7 @@ type spotifyHealthResult struct {
 	Ready                 bool   `json:"ready"`
 	AuthorizationRequired bool   `json:"authorizationRequired"`
 	AuthMode              string `json:"authMode,omitempty"`
+	BufferingWithoutTrack bool   `json:"bufferingWithoutTrack,omitempty"`
 }
 
 // Spotify's pairing code endpoint contains a secret. Health only inspects its
@@ -55,10 +56,14 @@ func spotifyHealth(ctx context.Context, client *http.Client, upstream, stateDir 
 			// The pinned daemon's status includes a username only when a real
 			// account session exists. Never expose that identity in health.
 			var status struct {
-				Username string `json:"username"`
+				Username  string    `json:"username"`
+				Stopped   bool      `json:"stopped"`
+				Buffering bool      `json:"buffering"`
+				Track     *struct{} `json:"track"`
 			}
 			if json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&status) == nil && strings.TrimSpace(status.Username) != "" {
 				health.Ready = true
+				health.BufferingWithoutTrack = !status.Stopped && status.Buffering && status.Track == nil
 				return health, nil
 			}
 		}

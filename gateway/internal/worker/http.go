@@ -3,6 +3,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,7 +30,8 @@ type Config struct {
 // The daemon's account, track URI, title and artwork never enter this payload.
 type spotifyWorkerHealth struct {
 	spotifyHealthResult
-	Audio spotifyAudioDiagnostic `json:"audio"`
+	Audio  spotifyAudioDiagnostic `json:"audio"`
+	Daemon *spotifyDaemonHealth   `json:"daemon,omitempty"`
 }
 
 func (c Config) Validate() error {
@@ -42,6 +45,12 @@ func (c Config) Validate() error {
 }
 
 func Handler(ctx context.Context, c Config) http.Handler {
+	return HandlerWithSpotifyDiagnostics(ctx, c, nil)
+}
+
+// HandlerWithSpotifyDiagnostics adds only fixed failure categories to the
+// authenticated private worker health route; raw daemon output is never served.
+func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics) http.Handler {
 	mux := http.NewServeMux()
 	var bridge *spotifyBridge
 	client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -72,10 +81,12 @@ func Handler(ctx context.Context, c Config) http.Handler {
 			if r.URL.Path == "/status" {
 				if res.StatusCode == 204 {
 					bridge.OnStopped()
+					diagnostics.observe(false, false)
 				} else {
 					var st struct {
-						Stopped bool `json:"stopped"`
-						Track   *struct {
+						Stopped   bool `json:"stopped"`
+						Buffering bool `json:"buffering"`
+						Track     *struct {
 							URI string `json:"uri"`
 						} `json:"track"`
 					}
@@ -85,6 +96,7 @@ func Handler(ctx context.Context, c Config) http.Handler {
 						} else if st.Track != nil && st.Track.URI != "" {
 							bridge.OnTrack(st.Track.URI)
 						}
+						diagnostics.observe(!st.Stopped && st.Buffering && st.Track == nil, bridge.diagnostic().Active)
 					}
 				}
 			} else if r.URL.Path == "/player/stop" {
@@ -109,7 +121,8 @@ func Handler(ctx context.Context, c Config) http.Handler {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(spotifyWorkerHealth{spotifyHealthResult: health, Audio: bridge.diagnostic()})
+			audio := bridge.diagnostic()
+			_ = json.NewEncoder(w).Encode(spotifyWorkerHealth{spotifyHealthResult: health, Audio: audio, Daemon: diagnostics.snapshot(health.BufferingWithoutTrack, audio.Active)})
 		})
 		mux.HandleFunc("GET /status", proxy)
 		mux.HandleFunc("GET /auth/code", proxy)
@@ -133,12 +146,12 @@ func Handler(ctx context.Context, c Config) http.Handler {
 		mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 			info, err := os.Stat(filepath.Join(c.StateDir, "hls", "index.m3u8"))
 			active := err == nil && time.Since(info.ModTime()) < 15*time.Second
-			audio, audioErr := os.Stat(filepath.Join(c.StateDir, "hls", "audio.m3u8"))
-			audioActive := audioErr == nil && time.Since(audio.ModTime()) < 15*time.Second
+			audioActive := airplayHLSPlayable(filepath.Join(c.StateDir, "hls"), "audio.m3u8")
 			w.Header().Set("Content-Type", "application/json")
 			status := map[string]any{"active": active, "audioActive": audioActive}
-			if audioActive {
-				status["metadata"] = airplayMetadata(c.StateDir)
+			meta := airplayMetadata(c.StateDir)
+			if len(meta) > 0 {
+				status["metadata"] = meta
 			}
 			_ = json.NewEncoder(w).Encode(status)
 		})
@@ -166,4 +179,117 @@ func Handler(ctx context.Context, c Config) http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// airplayHLSPlayable validates that an HLS manifest contains at least one
+// complete, nontrivial media segment (preferring multiple seconds of continuous media),
+// rejecting empty, stale, or tiny manifests and surviving atomic in-flight writes.
+func airplayHLSPlayable(hlsDir, manifestName string) bool {
+	manifestPath := filepath.Join(hlsDir, manifestName)
+	info, err := os.Stat(manifestPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > 64<<10 {
+		return false
+	}
+	if time.Since(info.ModTime()) > 15*time.Second {
+		return false
+	}
+	f, err := os.Open(manifestPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 64<<10+1))
+	if err != nil || len(data) == 0 || len(data) > 64<<10 {
+		return false
+	}
+	content := string(bytes.ToValidUTF8(data, nil))
+	if !strings.HasPrefix(content, "#EXTM3U") {
+		return false
+	}
+	lines := strings.Split(content, "\n")
+	targetDuration := 0
+	hasTargetDuration := false
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "#EXT-X-TARGETDURATION:") {
+			val, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "#EXT-X-TARGETDURATION:")))
+			if err == nil {
+				targetDuration = val
+				hasTargetDuration = true
+			}
+			break
+		}
+	}
+	if !hasTargetDuration || targetDuration < 1 {
+		return false
+	}
+
+	segRegex := regexp.MustCompile(`^(audio|segment)[0-9]+\.ts$`)
+	totalSegments := 0
+	validSegments := 0
+	totalDuration := 0.0
+
+	var (
+		pendingDuration    float64
+		hasPendingDuration bool
+	)
+
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#EXTINF:") {
+			durStr := strings.TrimPrefix(line, "#EXTINF:")
+			if comma := strings.Index(durStr, ","); comma >= 0 {
+				durStr = durStr[:comma]
+			}
+			dur, err := strconv.ParseFloat(strings.TrimSpace(durStr), 64)
+			if err == nil {
+				pendingDuration = dur
+				hasPendingDuration = true
+			} else {
+				hasPendingDuration = false
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		totalSegments++
+		if !hasPendingDuration {
+			continue
+		}
+		dur := pendingDuration
+		hasPendingDuration = false
+
+		if dur < 0.5 {
+			continue
+		}
+		if idx := strings.Index(line, "?"); idx >= 0 {
+			line = line[:idx]
+		}
+		segName := filepath.Base(line)
+		if segName != line || !segRegex.MatchString(segName) {
+			continue
+		}
+		segPath := filepath.Join(hlsDir, segName)
+		segInfo, err := os.Stat(segPath)
+		if err != nil || !segInfo.Mode().IsRegular() {
+			continue
+		}
+		if time.Since(segInfo.ModTime()) > 15*time.Second {
+			continue
+		}
+		if segInfo.Size() < 4096 {
+			continue
+		}
+		validSegments++
+		totalDuration += dur
+	}
+
+	if totalSegments == 0 || validSegments != totalSegments {
+		return false
+	}
+	return validSegments >= 1 && totalDuration >= 0.5
 }

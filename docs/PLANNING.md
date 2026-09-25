@@ -1,5 +1,19 @@
 # zombiebox-gateway-core: component work
 
+## dev.61 capability-aware media and receiver triage
+
+Prefer native MPEG-TS HLS only when the current device's functional HLS and
+matching codec probes passed; keep Gateway remux/transcode as the fallback.
+Preserve a verified lower YouTube rendition while checking higher H.264/AAC
+sources, and prevent a late superseded playback failure from clearing the
+current manual-quality choice. Distinguish unconfigured IPTV from an unavailable
+provider. AirPlay audio readiness now requires playable HLS segments and its
+dedicated RTP conversion normalizes timestamps from decoded samples. Private
+Spotify worker health classifies daemon errors without exposing account data;
+the missing Premium track/audio remains under investigation. Host/race tests
+pass. Native HLS, AirPlay, Spotify, IPTV and quality switching still require
+separate physical or provider evidence; no product milestone closes.
+
 ## dev.60 playback evidence and receiver diagnostics
 
 Expose the gateway's probe time and an authenticated Client version refresh so

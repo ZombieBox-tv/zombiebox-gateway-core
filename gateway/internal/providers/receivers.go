@@ -66,6 +66,14 @@ func wrapperHeaders(c Config) (http.Header, error) {
 }
 
 func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, error) {
+	status, _, err := a.spotifyStatus(ctx, c)
+	return status, err
+}
+
+// Keep track presence separate from the public Now Playing model. The daemon
+// can report an active/buffering player before it has loaded a current track;
+// that state is not yet a playable incoming source.
+func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, bool, error) {
 	out := NowPlaying{
 		Provider: "spotify",
 		State:    "STOPPED",
@@ -80,33 +88,33 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 	}
 	headers, err := wrapperHeaders(c)
 	if err != nil {
-		return out, err
+		return out, false, err
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/status", nil)
 	if err != nil {
-		return out, err
+		return out, false, err
 	}
 	req.Header = headers
 	res, err := a.http.Do(req)
 	if err != nil {
-		return out, errors.New("provider unavailable")
+		return out, false, errors.New("provider unavailable")
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNoContent {
-		return out, nil
+		return out, false, nil
 	}
 	if res.StatusCode == http.StatusServiceUnavailable {
-		return out, errProviderBusy
+		return out, false, errProviderBusy
 	}
 	if res.StatusCode != http.StatusOK {
-		return out, fmt.Errorf("provider HTTP %d", res.StatusCode)
+		return out, false, fmt.Errorf("provider HTTP %d", res.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20+1))
 	if err != nil {
-		return out, err
+		return out, false, err
 	}
 	if len(body) > 8<<20 {
-		return out, errors.New("provider response too large")
+		return out, false, errors.New("provider response too large")
 	}
 	var status struct {
 		Stopped, Paused, Buffering bool
@@ -121,7 +129,7 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 		} `json:"track"`
 	}
 	if json.Unmarshal(body, &status) != nil {
-		return out, errors.New("invalid player status")
+		return out, false, errors.New("invalid player status")
 	}
 	if status.VolumeSteps > 0 {
 		out.Volume = max(0, min(100, status.Volume*100/status.VolumeSteps))
@@ -135,7 +143,8 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 			out.State = "BUFFERING"
 		}
 	}
-	if status.Track != nil && status.Track.Name != "" {
+	hasTrack := status.Track != nil && status.Track.Name != ""
+	if hasTrack {
 		out.PositionMS = max(0, status.Track.Position)
 		if status.Track.Cover != nil && *status.Track.Cover != "" {
 			coverURL := sanitizeSpotifyCoverURL(*status.Track.Cover)
@@ -157,7 +166,7 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 		}
 		out.Item = item
 	}
-	return out, nil
+	return out, hasTrack, nil
 }
 
 func sanitizeSpotifyCoverURL(raw string) string {
@@ -284,7 +293,7 @@ func (a *Adapters) AirPlay(ctx context.Context, c Config) ([]Source, error) {
 	item := domain.Item{ID: "airplay-live", Provider: "airplay", Kind: "video", Title: "AirPlay", Subtitle: "Start Screen Mirroring on your Apple device", Playable: status.Active}
 	audio := domain.Item{ID: "airplay-audio", Provider: "airplay", Kind: "audio", Title: "AirPlay audio", Subtitle: "Select Zombie Box as the audio output on your Apple device", Playable: status.AudioActive}
 	artwork := ""
-	if status.AudioActive && status.Metadata.Title != "" {
+	if status.Metadata.Title != "" {
 		audio.Title = truncate(status.Metadata.Title, 500)
 		audio.Subtitle = truncate(status.Metadata.Artist, 500)
 		audio.Description = truncate(status.Metadata.Album, 500)

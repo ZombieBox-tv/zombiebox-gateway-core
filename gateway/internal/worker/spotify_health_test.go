@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -47,5 +48,35 @@ func TestSpotifyHealthSeparatesPairingFromAccountReadiness(t *testing.T) {
 				t.Fatalf("health = %+v, error = %v", health, err)
 			}
 		})
+	}
+}
+
+func TestSpotifyHealthReportsOnlyTracklessBuffering(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("credentials:\n  type: zeroconf\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var trackLoaded atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/code" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if trackLoaded.Load() {
+			_, _ = io.WriteString(w, `{"username":"private-account","buffering":true,"track":{"name":"private-title"}}`)
+		} else {
+			_, _ = io.WriteString(w, `{"username":"private-account","buffering":true,"track":null}`)
+		}
+	}))
+	defer upstream.Close()
+	client := &http.Client{Timeout: time.Second}
+	first, err := spotifyHealth(context.Background(), client, upstream.URL, dir)
+	if err != nil || !first.Ready || !first.BufferingWithoutTrack {
+		t.Fatalf("trackless buffering missing: %+v %v", first, err)
+	}
+	trackLoaded.Store(true)
+	second, err := spotifyHealth(context.Background(), client, upstream.URL, dir)
+	if err != nil || !second.Ready || second.BufferingWithoutTrack {
+		t.Fatalf("loaded track still marked stalled: %+v %v", second, err)
 	}
 }

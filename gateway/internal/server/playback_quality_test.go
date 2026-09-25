@@ -463,19 +463,33 @@ func TestQualityPreferenceReversionOnFailure(t *testing.T) {
 	var plan domain.Plan
 	json.Unmarshal(w.Body.Bytes(), &plan)
 
-	// Set 720p quality
-	_ = call(s, "POST", "/v1/playback/"+plan.SessionID+"/quality", `{"qualityId":"720p","positionMs":5000}`, "fail-device", token, "")
+	// Set 720p quality, creating a replacement session.
+	quality := call(s, "POST", "/v1/playback/"+plan.SessionID+"/quality", `{"qualityId":"720p","positionMs":5000}`, "fail-device", token, "")
+	if quality.Code != 201 {
+		t.Fatalf("quality selection failed: %d %s", quality.Code, quality.Body)
+	}
+	var replacement domain.Plan
+	if err := json.Unmarshal(quality.Body.Bytes(), &replacement); err != nil {
+		t.Fatal(err)
+	}
 	if s.getQualityPreference(t.Context(), "fail-device", "video") != "720p" {
 		t.Fatal("preference was not set")
 	}
 
-	// Client reports playback FAILED
+	// A late failure from the superseded session must not erase the new choice.
 	prog := call(s, "PUT", "/v1/playback/"+plan.SessionID+"/progress", `{"state":"FAILED","positionMs":5000,"durationMs":100000}`, "fail-device", token, "")
 	if prog.Code != 200 {
 		t.Fatalf("progress failed: %d %s", prog.Code, prog.Body)
 	}
+	if got := s.getQualityPreference(t.Context(), "fail-device", "video"); got != "720p" {
+		t.Fatalf("superseded session failure erased 720p preference: %q", got)
+	}
 
-	// Preference should now be reverted to auto
+	// Failure of the session using 720p must revert to Auto.
+	prog = call(s, "PUT", "/v1/playback/"+replacement.SessionID+"/progress", `{"state":"FAILED","positionMs":5000,"durationMs":100000}`, "fail-device", token, "")
+	if prog.Code != 200 {
+		t.Fatalf("replacement progress failed: %d %s", prog.Code, prog.Body)
+	}
 	reverted := s.getQualityPreference(t.Context(), "fail-device", "video")
 	if reverted != "" && reverted != "auto" {
 		t.Fatalf("expected preference reverted to auto, got %q", reverted)

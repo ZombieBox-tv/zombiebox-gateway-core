@@ -12,7 +12,7 @@ export async function resolveVideo(yt, id, validate = validateMediaRanges) {
     try {
       const info = await yt.getBasicInfo(id, { client });
       return await resolveFormats(info, yt.session.player, (url, format) => {
-        if (++checked > 8) return false;
+        if (++checked > 10) return false;
         return validate(url, format);
       });
     } catch (error) {

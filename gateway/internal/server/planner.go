@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"zombiebox.local/gateway/internal/media"
-
-	"zombiebox.local/gateway/internal/playback"
-
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/media"
+	"zombiebox.local/gateway/internal/playback"
 	"zombiebox.local/gateway/internal/providers"
 )
 
@@ -22,6 +21,7 @@ type playbackDecision struct {
 }
 
 func (s *Server) playbackMode(ctx context.Context, source providers.Source, device domain.Device, requested string) (playbackDecision, error) {
+	device.Capabilities = devices.CurrentCapabilities(device)
 	youtube := source.Item.Provider == "youtube" && media.YouTubeRangeOrigin(source.URL)
 	if (source.AudioURL != "" || youtube) && (requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER") {
 		return playbackDecision{}, errors.New("adaptive stream requires mux")
@@ -43,7 +43,7 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 		metadata, err := s.deps.RemoteMedia.ProbeRemote(ctx, source)
 		if err != nil {
 			if requested == "" || requested == "AUTO" {
-				if source.AudioURL == "" && !youtube {
+				if source.AudioURL == "" && !youtube && media.ManifestKind(source) == "" {
 					return playbackDecision{mode: "DIRECT_PLAY"}, nil
 				}
 			}

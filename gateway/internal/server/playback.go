@@ -240,11 +240,7 @@ func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 	}
 	if p.State == "FAILED" {
-		kind := sess.source.Item.Kind
-		if kind == "" {
-			kind = "video"
-		}
-		_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+		_ = s.revertFailedSessionQualityLocked(r.Context(), r.PathValue("session"), sess)
 	}
 	if sess.castID != "" {
 		if c := s.casts[sess.castID]; c != nil && c.mediaID != "" && (p.State == "ENDED" || p.State == "STOPPED" || p.State == "FAILED") {
@@ -386,11 +382,15 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 				if errors.Is(err, media.ErrBusy) {
 					fail(w, 429, "media_busy")
 				} else {
-					_ = s.revertQualityPreference(r.Context(), sess.device, sess.source.Item.Kind)
+					s.mu.Lock()
+					_ = s.revertFailedSessionQualityLocked(r.Context(), r.PathValue("session"), sess)
+					s.mu.Unlock()
 					fail(w, 502, "conversion_failed")
 				}
 			} else {
-				_ = s.revertQualityPreference(r.Context(), sess.device, sess.source.Item.Kind)
+				s.mu.Lock()
+				_ = s.revertFailedSessionQualityLocked(r.Context(), r.PathValue("session"), sess)
+				s.mu.Unlock()
 				panic(http.ErrAbortHandler)
 			}
 		}
