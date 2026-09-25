@@ -49,11 +49,11 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 }
 
 // LocalModeSource accounts for the progressive ADTS path used by live, audio-only
-// AAC HLS. That path does not require the fragmented-MP4 probe used by the
-// general REMUX pipeline.
+// AAC HLS. That path requires fresh advancing ADTS evidence and does not require
+// the fragmented-MP4 probe used by the general REMUX pipeline.
 func LocalModeSource(metadata domain.Metadata, source domain.Source, capabilities domain.Capabilities, requested string) string {
 	mode := LocalMode(metadata, source.MIME, capabilities, requested)
-	if mode == "EXTERNAL_PLAYER" && source.Live && isHLS(metadata.Format.Name, source.MIME) && (requested == "" || requested == "AUTO" || requested == "REMUX") {
+	if source.Live && isHLS(metadata.Format.Name, source.MIME) && (requested == "" || requested == "AUTO" || requested == "REMUX") {
 		hasAudio := false
 		compatible := true
 		for _, stream := range metadata.Streams {
@@ -62,8 +62,13 @@ func LocalModeSource(metadata domain.Metadata, source domain.Source, capabilitie
 			}
 			hasAudio = hasAudio || stream.Type == "audio"
 		}
-		if compatible && hasAudio && probeStatus(capabilities, "aac", time.Now().Unix()) == "PASS" {
-			return "REMUX"
+		if compatible && hasAudio {
+			if mode == "REMUX" || mode == "EXTERNAL_PLAYER" {
+				if probeStatus(capabilities, "aac-adts", time.Now().Unix()) == "PASS" {
+					return "REMUX"
+				}
+				return "EXTERNAL_PLAYER"
+			}
 		}
 	}
 	return mode

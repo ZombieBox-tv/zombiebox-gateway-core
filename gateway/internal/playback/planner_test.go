@@ -1405,20 +1405,72 @@ func TestLiveAACHLSUsesADTSWhenFragmentedMP4Fails(t *testing.T) {
 	metadata := domain.Metadata{Streams: []domain.Stream{{Type: "audio", Codec: "aac"}}}
 	metadata.Format.Name = "hls"
 	source := domain.Source{MIME: "application/vnd.apple.mpegurl", Live: true}
+
+	// 1. Fresh advancing aac-adts PASS allows live audio-only HLS to REMUX via ADTS even when fMP4 fails
 	caps := domain.Capabilities{Probes: []domain.Probe{
 		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
-		{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+		{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: now},
 	}}
 	if got := LocalModeSource(metadata, source, caps, "AUTO"); got != "REMUX" {
 		t.Fatalf("live AAC should use ADTS despite failed fMP4 probe, got %s", got)
 	}
-	caps.Probes[1].Status = "FAIL"
-	if got := LocalModeSource(metadata, source, caps, "AUTO"); got != "EXTERNAL_PLAYER" {
-		t.Fatalf("failed AAC decoder must not use ADTS, got %s", got)
+
+	// 2. Container-agnostic M4A aac alone (without aac-adts) must NOT qualify as ADTS proof
+	capsM4AOnly := domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+		{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+	}}
+	if got := LocalModeSource(metadata, source, capsM4AOnly, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("M4A aac probe alone must NOT be accepted as ADTS proof, got %s", got)
 	}
-	caps.Probes[1].Status = "PASS"
-	metadata.Streams = append(metadata.Streams, domain.Stream{Type: "video", Codec: "h264", Profile: "Baseline", Width: 640, Height: 360})
+
+	// 3. Explicit aac-adts FAIL falls back to EXTERNAL_PLAYER
+	caps.Probes[1] = domain.Probe{ID: "aac-adts", Status: "FAIL", TestedAt: now}
 	if got := LocalModeSource(metadata, source, caps, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("failed ADTS decoder must fall back to EXTERNAL_PLAYER, got %s", got)
+	}
+
+	// 4. Missing/UNKNOWN aac-adts falls back to EXTERNAL_PLAYER
+	capsMissing := domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+	}}
+	if got := LocalModeSource(metadata, source, capsMissing, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("missing ADTS probe must fall back to EXTERNAL_PLAYER, got %s", got)
+	}
+
+	// 5. Stale aac-adts (> 7 days ago) falls back to EXTERNAL_PLAYER
+	capsStale := domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+		{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: now - 8*24*3600},
+	}}
+	if got := LocalModeSource(metadata, source, capsStale, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("stale ADTS probe must fall back to EXTERNAL_PLAYER, got %s", got)
+	}
+
+	// 6. Mere prepare success (positionMS=0, completed=false) is UNKNOWN and must NOT qualify as PASS
+	capsMerePrepare := domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+		{ID: "aac-adts", Status: "PASS", PositionMS: 0, Completed: false, TestedAt: now},
+	}}
+	if got := LocalModeSource(metadata, source, capsMerePrepare, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("unadvancing ADTS probe must not qualify as PASS, got %s", got)
+	}
+
+	// 7. Stalled playback must fall back to EXTERNAL_PLAYER
+	capsStalled := domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+		{ID: "aac-adts", Status: "PASS", PositionMS: 1000, Stalled: true, TestedAt: now},
+	}}
+	if got := LocalModeSource(metadata, source, capsStalled, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("stalled ADTS playback must fall back to EXTERNAL_PLAYER, got %s", got)
+	}
+
+	// 8. Stream with video must NOT bypass fMP4 failure
+	caps.Probes[1] = domain.Probe{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: now}
+	metadataWithVideo := metadata
+	metadataWithVideo.Streams = append([]domain.Stream{}, metadata.Streams...)
+	metadataWithVideo.Streams = append(metadataWithVideo.Streams, domain.Stream{Type: "video", Codec: "h264", Profile: "Baseline", Width: 640, Height: 360})
+	if got := LocalModeSource(metadataWithVideo, source, caps, "AUTO"); got != "EXTERNAL_PLAYER" {
 		t.Fatalf("video HLS must not bypass failed fMP4 probe, got %s", got)
 	}
 }

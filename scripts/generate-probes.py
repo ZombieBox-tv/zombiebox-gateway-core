@@ -20,6 +20,7 @@ expected = [
     "high-720.mp4",
     "high-1080.mp4",
     "aac.m4a",
+    "aac.adts",
     "baseline.ts",
     "fragmented.mp4",
 ]
@@ -29,7 +30,9 @@ if not args.force and all(
     and 100 < (root / name).stat().st_size <= 8 << 20
     for name in expected
 ):
-    print(f"Reusing 8 probe fixtures in {root}; pass --force to regenerate")
+    print(
+        f"Reusing {len(expected)} probe fixtures in {root}; pass --force to regenerate"
+    )
     sys.exit(0)
 base = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
 video = [
@@ -41,6 +44,13 @@ video = [
 ]
 for suffix, size, profile, level in video:
     target = root / (profile + suffix + ".mp4")
+    if (
+        not args.force
+        and target.is_file()
+        and not target.is_symlink()
+        and 100 < target.stat().st_size <= 8 << 20
+    ):
+        continue
     temporary = target.with_suffix(".tmp.mp4")
     subprocess.run(
         base
@@ -89,6 +99,7 @@ for suffix, size, profile, level in video:
     os.replace(temporary, target)
 for name, options in [
     ("aac.m4a", ["-vn", "-c:a", "copy"]),
+    ("aac.adts", ["-vn", "-c:a", "copy", "-f", "adts"]),
     ("baseline.ts", ["-c", "copy", "-f", "mpegts"]),
     (
         "fragmented.mp4",
@@ -96,6 +107,13 @@ for name, options in [
     ),
 ]:
     target = root / name
+    if (
+        not args.force
+        and target.is_file()
+        and not target.is_symlink()
+        and 100 < target.stat().st_size <= 8 << 20
+    ):
+        continue
     temporary = target.with_name("tmp-" + name)
     subprocess.run(
         base + ["-i", str(root / "baseline-360.mp4")] + options + [str(temporary)],
@@ -103,4 +121,4 @@ for name, options in [
         timeout=20,
     )
     os.replace(temporary, target)
-print(f"Generated 8 probe fixtures in {root}")
+print(f"Generated {len(expected)} probe fixtures in {root}")

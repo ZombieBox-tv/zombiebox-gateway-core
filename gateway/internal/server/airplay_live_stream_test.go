@@ -114,6 +114,7 @@ func TestAirPlayLiveAudioStreamRealFFmpeg(t *testing.T) {
 		CacheKey:     devices.ProbeCacheKey(dev),
 		Probes: []domain.Probe{
 			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "mpegts-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "hls-h264-aac", Status: "UNKNOWN", TestedAt: now},
@@ -309,6 +310,7 @@ func TestAirPlayLiveAudioStreamClientCancellationReleasesSlot(t *testing.T) {
 		CacheKey:     devices.ProbeCacheKey(dev),
 		Probes: []domain.Probe{
 			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "mpegts-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "hls-h264-aac", Status: "UNKNOWN", TestedAt: now},

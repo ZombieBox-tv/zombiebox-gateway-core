@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"zombiebox.local/gateway/internal/devices"
@@ -33,6 +34,8 @@ var probeAssets = []probeAsset{
 	{ID: "aac", File: "aac.m4a"},
 	{ID: "mpegts-h264-aac", File: "baseline.ts", Video: true},
 	{ID: "http-fmp4", File: "fragmented.mp4", Video: true},
+	{ID: "http-progressive", File: "baseline-360.mp4", Video: true, Kind: "playback"},
+	{ID: "aac-adts", File: "aac.adts", Kind: "playback"},
 	{ID: "seek", File: "baseline-360.mp4", Video: true, Kind: "seek"},
 	{ID: "pause-resume", File: "baseline-360.mp4", Video: true, Kind: "pause-resume"},
 	{ID: "surface-reattach", File: "baseline-360.mp4", Video: true, Kind: "surface-reattach"},
@@ -64,7 +67,7 @@ func (s *Server) probeFile(asset probeAsset) (*os.File, error) {
 func (s *Server) probeManifest(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	assets := []probeAsset{}
 	suite := 1
-	if r.URL.Query().Get("suite") == "2" {
+	if reqSuite, err := strconv.Atoi(r.URL.Query().Get("suite")); err == nil && reqSuite >= 2 {
 		suite = devices.ProbeSuiteVersion
 	}
 	expires := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
@@ -132,6 +135,9 @@ func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				fail(w, 404, "probe_unavailable")
 				return
+			}
+			if asset.ID == "aac-adts" || strings.HasSuffix(asset.File, ".adts") || strings.HasSuffix(asset.File, ".aac") {
+				w.Header().Set("Content-Type", "audio/aac")
 			}
 			w.Header().Set("Cache-Control", "private, max-age=300")
 			http.ServeContent(w, r, asset.File, info.ModTime(), f)

@@ -314,6 +314,7 @@ func TestAirPlayReceiverVizioFallbackToGatewayRemux(t *testing.T) {
 		CacheKey:     devices.ProbeCacheKey(dev),
 		Probes: []domain.Probe{
 			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "mpegts-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
 			{ID: "hls-h264-aac", Status: "UNKNOWN", TestedAt: now},
@@ -572,6 +573,7 @@ func TestAirPlayReceiverADTSFallbackWhenFMP4Fails(t *testing.T) {
 		CacheKey:     devices.ProbeCacheKey(dev),
 		Probes: []domain.Probe{
 			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
 			{ID: "http-fmp4", Status: "FAIL", PositionMS: 0, TestedAt: time.Now().Unix()},
 		},
 	}
@@ -591,6 +593,53 @@ func TestAirPlayReceiverADTSFallbackWhenFMP4Fails(t *testing.T) {
 	}
 	if strings.Contains(resp.Body.String(), privateToken) || strings.Contains(resp.Body.String(), upstream.URL) {
 		t.Fatal("secret leaked in error response", resp.Body)
+	}
+
+	// When aac-adts has failed on a newly connected receiver, it must NOT produce an ADTS remux plan:
+	tokenFailed := pair(t, s, "fmp4-fail-adts-fail-tv")
+	var devFailed domain.Device
+	s.db.Get(t.Context(), "devices", "fmp4-fail-adts-fail-tv", &devFailed)
+	devFailed.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(devFailed),
+		Probes: []domain.Probe{
+			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "aac-adts", Status: "FAIL", PositionMS: 0, TestedAt: time.Now().Unix()},
+			{ID: "http-fmp4", Status: "FAIL", PositionMS: 0, TestedAt: time.Now().Unix()},
+		},
+	}
+	s.db.Put(t.Context(), "devices", devFailed.ID, devFailed)
+	call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay","replaceExisting":true}`, "fmp4-fail-adts-fail-tv", tokenFailed, "")
+	resp = call(s, "GET", "/v1/media-receiver", "", "fmp4-fail-adts-fail-tv", tokenFailed, "")
+	var snapFailed inbox.Snapshot
+	if err := json.Unmarshal(resp.Body.Bytes(), &snapFailed); err != nil {
+		t.Fatal(err)
+	}
+	if snapFailed.Plan != nil {
+		t.Fatalf("expected nil plan when ADTS probe failed, got %+v", snapFailed.Plan)
+	}
+
+	// Container-agnostic M4A aac alone (without aac-adts) must NOT produce ADTS plan:
+	tokenMissing := pair(t, s, "fmp4-fail-no-adts-tv")
+	var devMissing domain.Device
+	s.db.Get(t.Context(), "devices", "fmp4-fail-no-adts-tv", &devMissing)
+	devMissing.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(devMissing),
+		Probes: []domain.Probe{
+			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "http-fmp4", Status: "FAIL", PositionMS: 0, TestedAt: time.Now().Unix()},
+		},
+	}
+	s.db.Put(t.Context(), "devices", devMissing.ID, devMissing)
+	call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay","replaceExisting":true}`, "fmp4-fail-no-adts-tv", tokenMissing, "")
+	resp = call(s, "GET", "/v1/media-receiver", "", "fmp4-fail-no-adts-tv", tokenMissing, "")
+	var snapMissing inbox.Snapshot
+	if err := json.Unmarshal(resp.Body.Bytes(), &snapMissing); err != nil {
+		t.Fatal(err)
+	}
+	if snapMissing.Plan != nil {
+		t.Fatalf("expected nil plan when aac-adts probe is absent, got %+v", snapMissing.Plan)
 	}
 }
 

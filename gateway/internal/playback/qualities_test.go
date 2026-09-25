@@ -810,3 +810,26 @@ func TestYouTubeProgressiveVariantSurvivesFailedFMP4Probe(t *testing.T) {
 		t.Fatalf("split track must not use failed fMP4 output: %s", mode)
 	}
 }
+
+func TestYouTubeVariantsRequireAtLeastOneTransportPassing(t *testing.T) {
+	now := time.Now().Unix()
+	device := domain.Device{
+		Registration: domain.Registration{Display: domain.Display{Width: 1920, Height: 1080}},
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-progressive", Status: "FAIL", TestedAt: now},
+				{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+				{ID: "aac", Status: "PASS", TestedAt: now, PositionMS: 1000},
+				{ID: "h264-1080-high", Status: "PASS", TestedAt: now, PositionMS: 1000},
+			},
+		},
+	}
+	metadata := domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264", Width: 640, Height: 360}, {Type: "audio", Codec: "aac"}}}
+	metadata.Format.Name = "mp4"
+	source := domain.Source{MIME: "video/mp4", Item: domain.Item{Provider: "youtube", Kind: "video"}, Variants: []string{"1080p", "360p"}}
+	inventory := Qualities(metadata, source, device, "")
+	if HasQuality(inventory, "1080p") || HasQuality(inventory, "360p") {
+		t.Fatalf("variants must not be offered when both http-progressive and http-fmp4 fail: %+v", inventory.Options)
+	}
+}
