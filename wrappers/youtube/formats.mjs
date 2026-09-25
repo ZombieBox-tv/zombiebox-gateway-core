@@ -1,6 +1,31 @@
-export async function getAvailableVariants(info, player, validate = async () => true) {
+export const MAX_SAFE_FPS = 30;
+
+export function isSafeFps(format) {
+  if (!format) return false;
+  if (format.fps && format.fps > MAX_SAFE_FPS) return false;
+  const label = typeof format.quality_label === "string" ? format.quality_label : "";
+  if (/(?:50|60)$/.test(label) || /(?:50|60)fps/i.test(label)) return false;
+  const quality = typeof format.quality === "string" ? format.quality : "";
+  if (/(?:50|60)$/.test(quality) || /(?:50|60)fps/i.test(quality)) return false;
+  return true;
+}
+
+export const TIER_LABELS = Object.freeze({
+  "1080p": ["1080p"],
+  "720p": ["720p"],
+  "480p": ["480p"],
+  "360p": ["360p"],
+});
+
+export async function getAvailableVariants(
+  info,
+  player,
+  validate = async () => true,
+  tiersToCheck = ["1080p", "720p", "480p", "360p"],
+) {
   if (!info || typeof info.chooseFormat !== "function") return [];
-  const tiers = ["1080p", "720p", "480p", "360p"];
+  const tiers = Array.isArray(tiersToCheck) ? tiersToCheck : ["1080p", "720p", "480p", "360p"];
+  if (tiers.length === 0) return [];
   const checked = new Map();
 
   const isValid = (format) => {
@@ -45,34 +70,40 @@ export async function getAvailableVariants(info, player, validate = async () => 
     return audioPromise;
   };
 
-  const checkTier = async (quality) => {
+  const checkTier = async (tier) => {
     try {
-      let hasCombined = false;
-      try {
-        const combined = info.chooseFormat({
-          type: "video+audio",
-          format: "mp4",
-          codec: "avc1",
-          quality,
-        });
-        if (combined && combined.has_audio && combined.has_video) {
-          hasCombined = await isValid(combined);
+      const candidateLabels = TIER_LABELS[tier] || [tier];
+      for (const quality of candidateLabels) {
+        let hasCombined = false;
+        try {
+          const combined = info.chooseFormat({
+            type: "video+audio",
+            format: "mp4",
+            codec: "avc1",
+            quality,
+          });
+          if (combined && combined.has_audio && combined.has_video && isSafeFps(combined)) {
+            hasCombined = await isValid(combined);
+          }
+        } catch {}
+
+        if (hasCombined) {
+          return tier;
         }
-      } catch {}
 
-      if (hasCombined) {
-        return quality;
-      }
+        let video = null;
+        try {
+          video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
+        } catch {}
 
-      let video = null;
-      try {
-        video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
-      } catch {}
-
-      if (video && video.has_video && !video.has_audio) {
-        const hasAudio = await getHasValidAudio();
-        if (hasAudio && (await isValid(video))) {
-          return quality;
+        if (video && video.has_video && !video.has_audio && isSafeFps(video)) {
+          const hasAudio = await getHasValidAudio();
+          if (!hasAudio) {
+            return null;
+          }
+          if (await isValid(video)) {
+            return tier;
+          }
         }
       }
     } catch {}
@@ -141,35 +172,38 @@ export async function resolveFormats(
   const requestedTier = targetQuality && targetQuality !== "auto" ? targetQuality : "";
 
   if (requestedTier) {
-    try {
-      const combined = info.chooseFormat({
-        type: "video+audio",
-        format: "mp4",
-        codec: "avc1",
-        quality: requestedTier,
-      });
-      if (combined.has_audio && combined.has_video) {
-        const url = await playable(combined);
-        if (url) return { url, mimeType: "video/mp4" };
-      }
-    } catch {
-      /* Fall through to a separate H.264/AAC pair at this resolution. */
-    }
-    try {
-      const video = info.chooseFormat({
-        type: "video",
-        format: "mp4",
-        codec: "avc1",
-        quality: requestedTier,
-      });
-      if (video.has_video && !video.has_audio) {
-        const url = await playable(video);
-        if (url) {
-          adaptiveVideoFound = true;
-          if (await pairedAudio()) return { url, audioUrl, mimeType: "video/mp4" };
+    const candidateQualities = TIER_LABELS[requestedTier] || [requestedTier];
+    for (const quality of candidateQualities) {
+      try {
+        const combined = info.chooseFormat({
+          type: "video+audio",
+          format: "mp4",
+          codec: "avc1",
+          quality,
+        });
+        if (combined.has_audio && combined.has_video && isSafeFps(combined)) {
+          const url = await playable(combined);
+          if (url) return { url, mimeType: "video/mp4" };
         }
+      } catch {
+        /* Fall through to a separate H.264/AAC pair at this resolution. */
       }
-    } catch {}
+      try {
+        const video = info.chooseFormat({
+          type: "video",
+          format: "mp4",
+          codec: "avc1",
+          quality,
+        });
+        if (video.has_video && !video.has_audio && isSafeFps(video)) {
+          const url = await playable(video);
+          if (url) {
+            adaptiveVideoFound = true;
+            if (await pairedAudio()) return { url, audioUrl, mimeType: "video/mp4" };
+          }
+        }
+      } catch {}
+    }
     if (adaptiveVideoFound && !audioUrl) throw new Error("audio_unavailable");
     throw new Error("video_unavailable");
   }
@@ -183,7 +217,7 @@ export async function resolveFormats(
       codec: "avc1",
       quality: "360p",
     });
-    if (baseline?.has_audio && baseline?.has_video) {
+    if (baseline?.has_audio && baseline?.has_video && isSafeFps(baseline)) {
       const baselineUrl = await playable(baseline);
       if (baselineUrl) return { url: baselineUrl, mimeType: "video/mp4" };
     }
@@ -201,7 +235,7 @@ export async function resolveFormats(
           codec: "avc1",
           quality,
         });
-        if (combined?.has_audio && combined?.has_video) {
+        if (combined?.has_audio && combined?.has_video && isSafeFps(combined)) {
           const url = await playable(combined);
           if (url) return { url, mimeType: "video/mp4" };
         }
@@ -211,7 +245,7 @@ export async function resolveFormats(
     }
     try {
       const video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
-      if (video?.has_video && !video?.has_audio) {
+      if (video?.has_video && !video?.has_audio && isSafeFps(video)) {
         const url = await playable(video);
         if (url) {
           adaptiveVideoFound = true;

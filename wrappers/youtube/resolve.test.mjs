@@ -578,3 +578,192 @@ test("upstream error on all clients throws rather than returning empty result", 
     /sign_in_required_upstream_bot_detection/,
   );
 });
+
+test("resolveVideo avoids redundant checks across clients for already discovered tiers", async () => {
+  const iosChecked = [];
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      return {
+        chooseFormat(options) {
+          if (client === "ANDROID") {
+            if (options.quality === "360p" && options.type === "video+audio") {
+              return {
+                itag: 18,
+                has_audio: true,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/android-360",
+              };
+            }
+            throw new Error("no android hd");
+          }
+          if (client === "IOS") {
+            iosChecked.push(`${options.type}:${options.quality}`);
+            if (options.type === "video" && options.quality === "720p") {
+              return {
+                itag: 136,
+                has_audio: false,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/ios-720",
+              };
+            }
+            if (options.type === "audio") {
+              return {
+                itag: 140,
+                has_audio: true,
+                has_video: false,
+                decipher: async () => "https://r.googlevideo.com/ios-aac",
+              };
+            }
+            if (options.quality === "360p") {
+              return {
+                itag: 134,
+                has_audio: false,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/ios-360",
+              };
+            }
+          }
+          throw new Error("missing");
+        },
+      };
+    },
+  };
+
+  const result = await resolveVideo(yt, "dQw4w9WgXcQ", async () => true);
+  assert.equal(result.url, "https://r.googlevideo.com/android-360");
+  assert.deepEqual(result.variants, ["720p", "360p"]);
+  // iOS was never queried for 360p because Android already discovered it:
+  assert.ok(!iosChecked.some((c) => c.includes("360p")), "iOS did not re-query 360p tier");
+});
+
+test("resolveVideo rejects unprobed >30fps HD variants and falls back safely", async () => {
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      return {
+        chooseFormat(options) {
+          if (client === "ANDROID") {
+            if (options.quality === "360p" && options.type === "video+audio") {
+              return {
+                itag: 18,
+                fps: 30,
+                quality_label: "360p",
+                has_audio: true,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/android-360",
+              };
+            }
+            throw new Error("no android hd");
+          }
+          if (client === "IOS") {
+            if (options.type === "audio") {
+              return {
+                itag: 140,
+                has_audio: true,
+                has_video: false,
+                decipher: async () => "https://r.googlevideo.com/ios-aac",
+              };
+            }
+            if (options.type === "video" && options.quality === "1080p") {
+              return {
+                itag: 299,
+                fps: 60,
+                quality_label: "1080p60",
+                has_audio: false,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/ios-1080p60",
+              };
+            }
+            if (options.type === "video" && options.quality === "720p") {
+              return {
+                itag: 298,
+                fps: 60,
+                quality_label: "720p60",
+                has_audio: false,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/ios-720p60",
+              };
+            }
+          }
+          throw new Error("missing");
+        },
+      };
+    },
+  };
+
+  // 1. Auto mode: returns Android 360p baseline, and variants list excludes 60fps HD tiers
+  const autoResult = await resolveVideo(yt, "aqz-KE-bpKQ", async () => true);
+  assert.equal(autoResult.url, "https://r.googlevideo.com/android-360");
+  assert.deepEqual(autoResult.variants, ["360p"]);
+
+  // 2. Manual 1080p selection: rejects 1080p60 because it exceeds 30fps
+  await assert.rejects(
+    resolveVideo(yt, "aqz-KE-bpKQ", async () => true, "1080p"),
+    /video_unavailable/,
+  );
+});
+
+test("resolveVideo falls back to working 360p when iOS HD audio fails range validation with 403", async () => {
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      return {
+        chooseFormat(options) {
+          if (client === "ANDROID") {
+            if (options.quality === "360p" && options.type === "video+audio") {
+              return {
+                itag: 18,
+                fps: 30,
+                quality_label: "360p",
+                has_audio: true,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/android-360",
+              };
+            }
+            throw new Error("no android hd");
+          }
+          if (client === "IOS") {
+            if (options.type === "audio") {
+              return {
+                itag: 140,
+                has_audio: true,
+                has_video: false,
+                content_length: "7415606",
+                decipher: async () => "https://r.googlevideo.com/ios-aac-403-tail",
+              };
+            }
+            if (
+              options.type === "video" &&
+              (options.quality === "1080p" || options.quality === "720p")
+            ) {
+              return {
+                itag: options.quality === "1080p" ? 137 : 136,
+                fps: 30,
+                quality_label: options.quality,
+                has_audio: false,
+                has_video: true,
+                decipher: async () => `https://r.googlevideo.com/ios-${options.quality}`,
+              };
+            }
+          }
+          throw new Error("missing");
+        },
+      };
+    },
+  };
+
+  const rangeValidator = async (url) => {
+    if (url.includes("403-tail")) return false;
+    return true;
+  };
+
+  const autoResult = await resolveVideo(yt, "k8T1HORsVRs", rangeValidator);
+  assert.equal(autoResult.url, "https://r.googlevideo.com/android-360");
+  assert.deepEqual(autoResult.variants, ["360p"]);
+
+  await assert.rejects(
+    resolveVideo(yt, "k8T1HORsVRs", rangeValidator, "1080p"),
+    /audio_unavailable/,
+  );
+});

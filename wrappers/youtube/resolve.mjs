@@ -2,7 +2,7 @@ import { resolveFormats, getAvailableVariants } from "./formats.mjs";
 import { validateMediaRanges } from "./media-ranges.mjs";
 
 const TIERS = ["1080p", "720p", "480p", "360p"];
-const DEFAULT_VALIDATION_DEADLINE_MS = 12_000;
+const DEFAULT_VALIDATION_DEADLINE_MS = 13_500;
 const MAX_VALIDATION_CHECKS = 25;
 
 // The anonymous WEB client can return format shells without decipherable URLs.
@@ -80,17 +80,31 @@ export async function resolveVideo(
           targetQuality,
         );
       } catch (error) {
-        lastError = error;
+        if (
+          !lastError ||
+          error.message === "audio_unavailable" ||
+          lastError.message !== "audio_unavailable"
+        ) {
+          lastError = error;
+        }
       }
     }
 
     if (Date.now() - startTime < deadlineMs) {
-      try {
-        const variants = await getAvailableVariants(info, yt.session.player, boundValidate);
-        for (const v of variants) {
-          discoveredVariants.add(v);
-        }
-      } catch {}
+      const remainingTiers = TIERS.filter((t) => !discoveredVariants.has(t));
+      if (remainingTiers.length > 0) {
+        try {
+          const variants = await getAvailableVariants(
+            info,
+            yt.session.player,
+            boundValidate,
+            remainingTiers,
+          );
+          for (const v of variants) {
+            discoveredVariants.add(v);
+          }
+        } catch {}
+      }
     }
 
     if (resolvedResult) {

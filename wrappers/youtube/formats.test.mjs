@@ -437,3 +437,93 @@ test("shared validated AAC work is performed only once across adaptive tiers", a
   assert.equal(audioChecks, 1, "AAC audio was only validated once across all adaptive tiers");
   assert.deepEqual(variants, ["1080p", "720p", "480p", "360p"]);
 });
+
+test("getAvailableVariants rejects high framerate >30fps HD tiers", async () => {
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("https://r.googlevideo.com/aac", false, true);
+      if (options.type === "video" && options.quality === "1080p") {
+        const f = format("https://r.googlevideo.com/1080p60", true, false);
+        f.fps = 60;
+        f.quality_label = "1080p60";
+        return f;
+      }
+      if (options.type === "video" && options.quality === "720p") {
+        const f = format("https://r.googlevideo.com/720p50", true, false);
+        f.fps = 50;
+        f.quality_label = "720p50";
+        return f;
+      }
+      if (options.type === "video" && options.quality === "480p") {
+        const f = format("https://r.googlevideo.com/480p", true, false);
+        f.fps = 30;
+        f.quality_label = "480p";
+        return f;
+      }
+      if (options.type === "video+audio" && options.quality === "360p") {
+        const f = format("https://r.googlevideo.com/360p", true, true);
+        f.fps = 30;
+        f.quality_label = "360p";
+        return f;
+      }
+      throw new Error("missing format");
+    },
+  };
+  const variants = await getAvailableVariants(info, {}, async () => true);
+  assert.deepEqual(variants, ["480p", "360p"]);
+});
+
+test("resolveFormats with targetQuality rejects high framerate >30fps tier", async () => {
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("https://r.googlevideo.com/aac", false, true);
+      if (options.type === "video" && options.quality === "1080p") {
+        const f = format("https://r.googlevideo.com/1080p60", true, false);
+        f.fps = 60;
+        f.quality_label = "1080p60";
+        return f;
+      }
+      throw new Error("missing format");
+    },
+  };
+  await assert.rejects(
+    resolveFormats(info, {}, async () => true, "1080p"),
+    /video_unavailable/,
+  );
+});
+
+test("getAvailableVariants honors custom tiersToCheck subset", async () => {
+  const checked = [];
+  const info = {
+    chooseFormat(options) {
+      checked.push(`${options.type}:${options.quality}`);
+      if (options.type === "audio") return format("aac", false, true);
+      if (options.type === "video" && options.quality === "720p")
+        return format("720p-video", true, false);
+      throw new Error("missing");
+    },
+  };
+  const variants = await getAvailableVariants(info, {}, async () => true, ["720p"]);
+  assert.deepEqual(variants, ["720p"]);
+  assert.ok(checked.some((c) => c.includes("720p")));
+  assert.ok(!checked.some((c) => c.includes("1080p")));
+  assert.ok(!checked.some((c) => c.includes("360p")));
+});
+
+test("getAvailableVariants skips candidate labels early when audio validation fails", async () => {
+  let videoChecks = 0;
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("bad-audio", false, true);
+      if (options.type === "video") return format(`video-${options.quality}`, true, false);
+      throw new Error("no combined");
+    },
+  };
+  const validate = async (url) => {
+    if (url.includes("video")) videoChecks++;
+    return false; // audio fails
+  };
+  const variants = await getAvailableVariants(info, {}, validate);
+  assert.deepEqual(variants, []);
+  assert.equal(videoChecks, 0, "no video validation performed when audio is invalid");
+});
