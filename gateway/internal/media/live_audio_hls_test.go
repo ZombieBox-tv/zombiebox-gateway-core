@@ -145,9 +145,9 @@ func TestLiveAudioHLSRemuxLatencyAndOutput(t *testing.T) {
 	cancel()
 	t.Logf("Finished collection: total bytes = %d in %v", totalBytes, time.Since(start))
 	if totalBytes < 4096 {
-		t.Fatalf("expected at least 4KB of playable fMP4 audio, got %d bytes", totalBytes)
+		t.Fatalf("expected at least 4KB of playable ADTS audio, got %d bytes", totalBytes)
 	}
-	outPath := filepath.Join(dir, "output.mp4")
+	outPath := filepath.Join(dir, "output.aac")
 	if err := os.WriteFile(outPath, allBytes.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestLiveAudioHLSRemuxLatencyAndOutput(t *testing.T) {
 	defer probeCancel()
 	meta, err := tools.Probe(probeCtx, outPath)
 	if err != nil {
-		t.Fatalf("failed to probe remuxed live fMP4: %v", err)
+		t.Fatalf("failed to probe remuxed live ADTS: %v", err)
 	}
 	if len(meta.Streams) != 1 || meta.Streams[0].Type != "audio" || meta.Streams[0].Codec != "aac" {
 		t.Fatalf("unexpected stream metadata: %+v", meta)
@@ -231,6 +231,9 @@ func TestLiveAudioHLSRemuxCancellationReleasesJob(t *testing.T) {
 
 	// Cancel context and verify ConvertRemote terminates promptly
 	cancel()
+	// The HTTP response writer stops accepting bytes on disconnect. Close the
+	// pipe here too, since ADTS can already be writing another AAC frame.
+	pr.Close()
 	select {
 	case err := <-done:
 		if err == nil {

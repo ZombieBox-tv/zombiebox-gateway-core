@@ -292,3 +292,10 @@ device-scoped playback sources and caches the shelf for two minutes; a worker
 failure leaves Home available without invented media. The Vizio's YouTube
 tab, thumbnail art, playback and response time still need physical verification
 with an updated Full candidate.
+
+## dev.64 live AAC remux candidate
+
+Audio-only live HLS AAC uses progressive ADTS for the Gateway receiver stream.
+Host tests cover first-byte output, decoding, cancellation and the paired
+receiver plan's MIME. The Vizio AirPlay sender/player and timeline remain
+unverified after this change; Spotify audio-key refusal remains unresolved.

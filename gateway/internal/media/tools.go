@@ -89,7 +89,9 @@ func (t *Tools) probe(ctx context.Context, input string, remote bool, manifestKi
 	return result, nil
 }
 
-// Convert writes fragmented MP4 progressively. Remote URLs/credentials and arbitrary options are forbidden.
+// Convert writes fragmented MP4 progressively, except live AAC audio remuxes
+// which use ADTS for older platform players. Remote URLs/credentials and
+// arbitrary options are forbidden.
 // Caller owns the output lifetime; cancellation stops and reaps the process before capacity is released.
 func (t *Tools) Convert(ctx context.Context, path, mode string, output io.Writer) error {
 	return t.ConvertSelected(ctx, path, mode, domain.MediaSelection{}, output)
@@ -156,18 +158,19 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	args = append(args, "-map", "0:v:0?", "-map", audio, "-sn", "-dn", "-map_metadata", "-1")
 	if mode == "REMUX" {
 		args = append(args, "-c", "copy")
-		if adtsAAC {
+		if adtsAAC && !liveAudio {
 			args = append(args, "-bsf:a", "aac_adtstoasc")
 		}
 	} else {
 		args = append(args, videoEncoding(selection.Quality)...)
 	}
-	args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof")
 	if liveAudio {
-		// Audio-only streams have no video keyframes to trigger a timely fragment.
-		args = append(args, "-frag_duration", "1000000")
+		// ADTS has no MP4 fragment index or moov dependency. Each AAC frame can
+		// reach an HTTP progressive player without waiting for a video keyframe.
+		args = append(args, "-f", "adts", "pipe:1")
+	} else {
+		args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
 	}
-	args = append(args, "-f", "mp4", "pipe:1")
 	if err := t.runner.Run(ctx, t.ffmpeg, args, output); err != nil {
 		return toolError(ctx, "conversion_failed")
 	}

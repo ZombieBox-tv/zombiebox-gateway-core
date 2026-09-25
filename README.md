@@ -143,3 +143,11 @@ Dev.42: automatic VOD planning evaluates the preferred audio before codec policy
 ## dev.43 navigation and functional media increment
 
 Dev.43: bounded local software pipeline diagnostic generates, remuxes, transcodes and decodes synthetic audio/video. Missing tools/cancellation remain distinct; no receiver/network capability is granted. Full/Edge share the same implementation.
+
+## dev.64 live AirPlay audio transport candidate
+
+Audio-only live AAC HLS remux now emits progressive ADTS with an `audio/aac`
+plan instead of fragmented MP4. Real FFmpeg and Gateway HTTP tests verify
+early bytes, AAC decoding, cancellation and the MIME contract. This is a
+legacy-player compatibility candidate, not a successful Vizio/iPad playback
+result; the existing YouTube video conversion path is unchanged.

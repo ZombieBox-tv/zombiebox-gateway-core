@@ -296,7 +296,7 @@ func TestAirPlayReceiverVizioFallbackToGatewayRemux(t *testing.T) {
 			if mode != "REMUX" {
 				return fmt.Errorf("unexpected mode: %s", mode)
 			}
-			_, err := io.WriteString(out, "fmp4-audio-fixture-bytes")
+			_, err := io.WriteString(out, "adts-audio-fixture-bytes")
 			return err
 		},
 	}
@@ -346,8 +346,8 @@ func TestAirPlayReceiverVizioFallbackToGatewayRemux(t *testing.T) {
 	if plan.Mode != "REMUX" {
 		t.Fatalf("expected REMUX mode for Vizio fallback, got %s", plan.Mode)
 	}
-	if plan.MIME != "audio/mp4" {
-		t.Fatalf("expected audio/mp4 MIME for audio-only plan, got %s", plan.MIME)
+	if plan.MIME != "audio/aac" {
+		t.Fatalf("expected audio/aac MIME for audio-only plan, got %s", plan.MIME)
 	}
 	if plan.Item.Kind != "audio" {
 		t.Fatalf("expected audio kind, got %s", plan.Item.Kind)
@@ -367,10 +367,10 @@ func TestAirPlayReceiverVizioFallbackToGatewayRemux(t *testing.T) {
 	if streamResp.Code != 200 {
 		t.Fatalf("stream serving failed: %d %s", streamResp.Code, streamResp.Body)
 	}
-	if streamResp.Header().Get("Content-Type") != "audio/mp4" {
-		t.Fatalf("expected Content-Type audio/mp4, got %s", streamResp.Header().Get("Content-Type"))
+	if streamResp.Header().Get("Content-Type") != "audio/aac" {
+		t.Fatalf("expected Content-Type audio/aac, got %s", streamResp.Header().Get("Content-Type"))
 	}
-	if streamResp.Body.String() != "fmp4-audio-fixture-bytes" {
+	if streamResp.Body.String() != "adts-audio-fixture-bytes" {
 		t.Fatalf("expected fixture bytes, got %s", streamResp.Body.String())
 	}
 	if strings.Contains(streamResp.Body.String(), privateToken) || strings.Contains(streamResp.Body.String(), upstream.URL) {

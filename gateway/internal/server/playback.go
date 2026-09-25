@@ -373,6 +373,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		if isAudioOnly(src, sess.metadata) {
 			mime = "audio/mp4"
 		}
+		if media.LiveAACRemux(src, sess.metadata, sess.mode) {
+			mime = "audio/aac"
+		}
 		w.Header().Set("Content-Type", mime)
 		if r.Method == "HEAD" {
 			return

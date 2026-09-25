@@ -142,8 +142,8 @@ func TestAirPlayLiveAudioStreamRealFFmpeg(t *testing.T) {
 	if snapshot.Plan.Mode != "REMUX" {
 		t.Fatalf("expected REMUX mode, got %s", snapshot.Plan.Mode)
 	}
-	if snapshot.Plan.MIME != "audio/mp4" {
-		t.Fatalf("expected audio/mp4 MIME, got %s", snapshot.Plan.MIME)
+	if snapshot.Plan.MIME != "audio/aac" {
+		t.Fatalf("expected audio/aac MIME, got %s", snapshot.Plan.MIME)
 	}
 
 	gwServer := httptest.NewServer(s)
@@ -170,8 +170,8 @@ func TestAirPlayLiveAudioStreamRealFFmpeg(t *testing.T) {
 	if headerLatency > 3*time.Second {
 		t.Fatalf("header latency too slow: %v", headerLatency)
 	}
-	if ctype := resp.Header.Get("Content-Type"); ctype != "audio/mp4" {
-		t.Fatalf("expected Content-Type audio/mp4, got %s", ctype)
+	if ctype := resp.Header.Get("Content-Type"); ctype != "audio/aac" {
+		t.Fatalf("expected Content-Type audio/aac, got %s", ctype)
 	}
 
 	// Read first chunk
@@ -218,13 +218,13 @@ func TestAirPlayLiveAudioStreamRealFFmpeg(t *testing.T) {
 	}
 doneReading:
 
-	t.Logf("Collected %d bytes of fMP4 in %v", collected.Len(), time.Since(start))
+	t.Logf("Collected %d bytes of ADTS in %v", collected.Len(), time.Since(start))
 	if collected.Len() < 4096 {
-		t.Fatalf("expected at least 4KB of playable fMP4 audio, got %d bytes", collected.Len())
+		t.Fatalf("expected at least 4KB of playable ADTS audio, got %d bytes", collected.Len())
 	}
 
-	// Probe collected bytes to verify valid AAC audio in fMP4
-	outPath := filepath.Join(dir, "vizio_stream.mp4")
+	// Probe collected bytes to verify valid AAC audio in ADTS.
+	outPath := filepath.Join(dir, "vizio_stream.aac")
 	if err := os.WriteFile(outPath, collected.Bytes(), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -233,12 +233,12 @@ doneReading:
 	defer probeCancel()
 	meta, err := localMedia.Probe(probeCtx, outPath)
 	if err != nil {
-		t.Fatalf("failed to probe client stream MP4: %v", err)
+		t.Fatalf("failed to probe client stream ADTS: %v", err)
 	}
 	if len(meta.Streams) != 1 || meta.Streams[0].Type != "audio" || meta.Streams[0].Codec != "aac" {
 		t.Fatalf("expected 1 AAC audio stream, got %+v", meta.Streams)
 	}
-	t.Logf("Probe successful: stream is valid AAC fMP4!")
+	t.Logf("Probe successful: stream is valid AAC ADTS!")
 }
 
 func TestAirPlayLiveAudioStreamClientCancellationReleasesSlot(t *testing.T) {

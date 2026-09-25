@@ -93,7 +93,7 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 				adtsAAC = stream.Codec == "aac"
 			}
 		}
-		liveAudio = source.Live && hasAudio && !hasVideo
+		liveAudio = source.Live && hasAudio && adtsAAC && !hasVideo
 	}
 	err = t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, liveAudio, mode, selection, output, bridge.kind)
 	if err == nil && bridge.failedUpstream() {

@@ -86,6 +86,9 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 		if isAudioOnly(source, decision.metadata) {
 			mime = "audio/mp4"
 		}
+		if media.LiveAACRemux(source, decision.metadata, mode) {
+			mime = "audio/aac"
+		}
 	}
 	item := source.Item
 	if isAudioOnly(source, decision.metadata) && item.Kind == "" {
