@@ -58,11 +58,77 @@ func CastProfile(device domain.Device) (CastVideo, error) {
 	return base, nil
 }
 
+var screenTiers = []CastVideo{
+	{"h264", 3840, 2160, 30, 12000000},
+	{"h264", 1920, 1080, 30, 4000000},
+	{"h264", 1280, 720, 30, 2000000},
+	{"h264", 854, 480, 24, 1200000},
+	{"h264", 640, 360, 24, 800000},
+}
+
+// CapCastProfileForNetwork conservatively caps a selected SCREEN CastVideo profile
+// using measured gateway->TV goodput (kbps) with about 30% transport headroom.
+//
+// NOTE: This sample only measures the gateway->TV HLS leg, not the phone->gateway
+// RTSP transmission. This is a conservative initial grant cap based on paired-client
+// evidence, not full runtime congestion control.
+//
+// If goodput is unknown or unmeasured (kbps <= 0), the profile is returned unchanged.
+// If goodput is insufficient to sustain the explicit viable 360p floor (800 kbps),
+// it rejects the session rather than fabricating success.
+func CapCastProfileForNetwork(profile CastVideo, goodputKbps int64) (CastVideo, error) {
+	if goodputKbps <= 0 {
+		return profile, nil
+	}
+	// 30% transport headroom: budget = goodput_bps * 0.70 = kbps * 1000 * 0.70 = kbps * 700.
+	budget := goodputKbps * 700
+	if budget < 800000 {
+		return CastVideo{}, errors.New("insufficient network goodput for cast")
+	}
+	if int64(profile.Bitrate) <= budget {
+		return profile, nil
+	}
+	codec := profile.Codec
+	if codec == "" {
+		codec = "h264"
+	}
+	for _, tier := range screenTiers {
+		if int64(tier.Bitrate) <= budget &&
+			tier.Bitrate <= profile.Bitrate &&
+			tier.MaxHeight <= profile.MaxHeight &&
+			tier.MaxWidth <= profile.MaxWidth {
+			return CastVideo{
+				Codec:     codec,
+				MaxWidth:  tier.MaxWidth,
+				MaxHeight: tier.MaxHeight,
+				FPS:       min(profile.FPS, tier.FPS),
+				Bitrate:   tier.Bitrate,
+			}, nil
+		}
+	}
+	return CastVideo{
+		Codec:     codec,
+		MaxWidth:  min(profile.MaxWidth, 640),
+		MaxHeight: min(profile.MaxHeight, 360),
+		FPS:       min(profile.FPS, 24),
+		Bitrate:   min(profile.Bitrate, 800000),
+	}, nil
+}
+
 // Audio sessions do not need an H.264 decoder. Unknown support is still only a
 // candidate; explicit failed AAC/transport probes must not be ignored.
-func CastProfileForMode(device domain.Device, mode string, maxHeight int, now time.Time) (CastVideo, error) {
+// SCREEN sessions conservatively cap the granted profile if a valid goodput sample
+// is provided. AUDIO sessions leave goodput unconstrained.
+func CastProfileForMode(device domain.Device, mode string, maxHeight int, now time.Time, goodputKbps ...int64) (CastVideo, error) {
 	if mode == "SCREEN" {
-		return CastProfileForSender(device, maxHeight, now)
+		video, err := CastProfileForSender(device, maxHeight, now)
+		if err != nil {
+			return video, err
+		}
+		if len(goodputKbps) > 0 {
+			return CapCastProfileForNetwork(video, goodputKbps[0])
+		}
+		return video, nil
 	}
 	if mode != "AUDIO" {
 		return CastVideo{}, errors.New("invalid cast mode")

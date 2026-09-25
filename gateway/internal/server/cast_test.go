@@ -296,3 +296,127 @@ func TestAudioCastNegotiatesWithoutVideoAndDeliversAudioPlan(t *testing.T) {
 		t.Fatal("audio stream survived revocation", w.Code)
 	}
 }
+
+func TestCastServerGoodputGrantFreshVsStaleAndAudioUnaffected(t *testing.T) {
+	s := testServer(t, nil, "")
+	sender := pair(t, s, "sender-goodput")
+	receiver := pair(t, s, "receiver-goodput")
+	call(s, "GET", "/v1/device", "", "receiver-goodput", receiver, "")
+	s.opt.RelayURL = "http://127.0.0.1:8888"
+
+	var dev domain.Device
+	if err := s.db.Get(t.Context(), "devices", "receiver-goodput", &dev); err != nil {
+		t.Fatal(err)
+	}
+	dev.Preferences.AllowCasting = true
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		},
+	}
+	if err := s.db.Put(t.Context(), "devices", dev.ID, dev); err != nil {
+		t.Fatal(err)
+	}
+
+	requestGrant := func(body string) (*httptest.ResponseRecorder, string, playback.CastVideo) {
+		w := call(s, "POST", "/v1/cast", body, "sender-goodput", sender, "")
+		if w.Code != 201 {
+			return w, "", playback.CastVideo{}
+		}
+		var grant struct {
+			CastID string             `json:"castId"`
+			Video  playback.CastVideo `json:"video"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
+			t.Fatal(err)
+		}
+		return w, grant.CastID, grant.Video
+	}
+
+	deleteGrant := func(id string) {
+		if id != "" {
+			if w := call(s, "DELETE", "/v1/cast/"+id, "", "sender-goodput", sender, ""); w.Code != 200 {
+				t.Fatalf("failed to delete cast %s: %d", id, w.Code)
+			}
+		}
+	}
+
+	// 1. Fresh sample with 3000 kbps: caps 1080p request to 720p
+	s.mu.Lock()
+	s.networkSamples["receiver-goodput"] = networkSample{measured: time.Now(), kbps: 3000}
+	s.mu.Unlock()
+	w, id, video := requestGrant(`{"receiverId":"receiver-goodput","maxVideoHeight":1080}`)
+	if w.Code != 201 || video.MaxHeight != 720 || video.Bitrate != 2000000 {
+		t.Fatalf("expected 720p cap with fresh 3000 kbps sample, got code %d, video: %v", w.Code, video)
+	}
+	deleteGrant(id)
+
+	// 2. Fresh sample with 1800 kbps: caps 1080p request to 480p
+	s.mu.Lock()
+	s.networkSamples["receiver-goodput"] = networkSample{measured: time.Now(), kbps: 1800}
+	s.mu.Unlock()
+	w, id, video = requestGrant(`{"receiverId":"receiver-goodput","maxVideoHeight":1080}`)
+	if w.Code != 201 || video.MaxHeight != 480 || video.Bitrate != 1200000 {
+		t.Fatalf("expected 480p cap with fresh 1800 kbps sample, got code %d, video: %v", w.Code, video)
+	}
+	deleteGrant(id)
+
+	// 3. Fresh sample with insufficient goodput (< 800 kbps budget): safe rejection with 409 receiver_media_unsupported
+	for _, lowKbps := range []int64{1000, 500, 100} {
+		s.mu.Lock()
+		s.networkSamples["receiver-goodput"] = networkSample{measured: time.Now(), kbps: lowKbps}
+		s.mu.Unlock()
+		w, _, _ = requestGrant(`{"receiverId":"receiver-goodput","maxVideoHeight":1080}`)
+		if w.Code != 409 || !strings.Contains(w.Body.String(), "receiver_media_unsupported") {
+			t.Fatalf("expected 409 receiver_media_unsupported for low goodput %d kbps, got code %d, body: %s", lowKbps, w.Code, w.Body.String())
+		}
+	}
+
+	// 4. Stale sample (> 5 minutes old): ignored, preserves decoder ceiling (1080p)
+	s.mu.Lock()
+	s.networkSamples["receiver-goodput"] = networkSample{measured: time.Now().Add(-6 * time.Minute), kbps: 500}
+	s.mu.Unlock()
+	w, id, video = requestGrant(`{"receiverId":"receiver-goodput","maxVideoHeight":1080}`)
+	if w.Code != 201 || video.MaxHeight != 1080 || video.Bitrate != 4000000 {
+		t.Fatalf("expected stale sample to preserve 1080p, got code %d, video: %v", w.Code, video)
+	}
+	deleteGrant(id)
+
+	// 5. Unknown/absent sample: ignored, preserves decoder ceiling (1080p)
+	s.mu.Lock()
+	delete(s.networkSamples, "receiver-goodput")
+	s.mu.Unlock()
+	w, id, video = requestGrant(`{"receiverId":"receiver-goodput","maxVideoHeight":1080}`)
+	if w.Code != 201 || video.MaxHeight != 1080 || video.Bitrate != 4000000 {
+		t.Fatalf("expected absent sample to preserve 1080p, got code %d, video: %v", w.Code, video)
+	}
+	deleteGrant(id)
+
+	// 6. AUDIO mode: unaffected even when fresh goodput is low (500 kbps which rejects SCREEN)
+	s.mu.Lock()
+	s.networkSamples["receiver-goodput"] = networkSample{measured: time.Now(), kbps: 500}
+	s.mu.Unlock()
+	wAudio := call(s, "POST", "/v1/cast", `{"receiverId":"receiver-goodput","mode":"AUDIO"}`, "sender-goodput", sender, "")
+	if wAudio.Code != 201 {
+		t.Fatalf("expected 201 for AUDIO mode despite low goodput, got %d, body: %s", wAudio.Code, wAudio.Body.String())
+	}
+	var audioGrant struct {
+		CastID string `json:"castId"`
+		Mode   string `json:"mode"`
+		Audio  struct {
+			Codec   string `json:"codec"`
+			Bitrate int    `json:"bitrate"`
+		} `json:"audio"`
+		Video json.RawMessage `json:"video"`
+	}
+	if err := json.Unmarshal(wAudio.Body.Bytes(), &audioGrant); err != nil {
+		t.Fatal(err)
+	}
+	if audioGrant.Mode != "AUDIO" || audioGrant.Audio.Codec != "aac" || audioGrant.Audio.Bitrate != 128000 || len(audioGrant.Video) != 0 {
+		t.Fatalf("unexpected audio grant: %+v", audioGrant)
+	}
+	deleteGrant(audioGrant.CastID)
+}

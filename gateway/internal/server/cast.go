@@ -100,7 +100,17 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		return
 	}
 	receiver.Capabilities = devices.CurrentCapabilities(receiver)
-	video, err := playback.CastProfileForMode(receiver, mode, maxHeight, time.Now())
+	// Cap the SCREEN profile using paired-client gateway->TV goodput evidence.
+	// NOTE: This sample only measures the gateway->TV HLS leg, not the phone->gateway
+	// RTSP transmission. This is a conservative initial grant cap based on paired-client
+	// evidence, not full runtime congestion control. Stale or absent samples preserve
+	// the decoder-evidenced grant, while AUDIO grants remain unconstrained.
+	var goodput int64
+	sample := s.networkSamples[receiver.ID]
+	if !sample.measured.IsZero() && time.Since(sample.measured) <= 5*time.Minute && sample.kbps > 0 {
+		goodput = sample.kbps
+	}
+	video, err := playback.CastProfileForMode(receiver, mode, maxHeight, time.Now(), goodput)
 	if err != nil {
 		fail(w, 409, "receiver_media_unsupported")
 		return

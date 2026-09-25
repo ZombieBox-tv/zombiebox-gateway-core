@@ -174,3 +174,160 @@ func TestCast4KRequiresOptInFreshAdvancingEvidenceAndDisplay(t *testing.T) {
 		}
 	}
 }
+
+// Pure tier boundaries, never-raise semantics, unknown goodput, and low sample rejection.
+// NOTE: Goodput measures gateway->TV HLS leg, not phone->gateway RTSP; this is a
+// conservative initial grant cap, not full runtime congestion control.
+func TestCapCastProfileForNetworkPureTierBoundaries(t *testing.T) {
+	p4K := CastVideo{"h264", 3840, 2160, 30, 12000000}
+	p1080 := CastVideo{"h264", 1920, 1080, 30, 4000000}
+	p720 := CastVideo{"h264", 1280, 720, 30, 2000000}
+	p480 := CastVideo{"h264", 854, 480, 24, 1200000}
+	p360 := CastVideo{"h264", 640, 360, 24, 800000}
+
+	// 1. Pure tier boundaries from 4K candidate
+	// 4K fits (budget >= 12,000,000)
+	c, err := CapCastProfileForNetwork(p4K, 20000) // 14 Mbps budget
+	if err != nil || c != p4K {
+		t.Fatalf("expected 4K unchanged, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 17143) // 12,000,100 budget
+	if err != nil || c != p4K {
+		t.Fatalf("expected 4K at threshold, got %v, err: %v", c, err)
+	}
+	// Just below 4K threshold -> caps to 1080p
+	c, err = CapCastProfileForNetwork(p4K, 17142) // 11,999,400 budget
+	if err != nil || c != p1080 {
+		t.Fatalf("expected 1080p below 4K threshold, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 6000) // 4.2 Mbps budget
+	if err != nil || c != p1080 {
+		t.Fatalf("expected 1080p, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 5715) // 4,000,500 budget
+	if err != nil || c != p1080 {
+		t.Fatalf("expected 1080p at threshold, got %v, err: %v", c, err)
+	}
+	// Just below 1080p threshold -> caps to 720p
+	c, err = CapCastProfileForNetwork(p4K, 5714) // 3,999,800 budget
+	if err != nil || c != p720 {
+		t.Fatalf("expected 720p below 1080p threshold, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 3000) // 2.1 Mbps budget
+	if err != nil || c != p720 {
+		t.Fatalf("expected 720p, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 2858) // 2,000,600 budget
+	if err != nil || c != p720 {
+		t.Fatalf("expected 720p at threshold, got %v, err: %v", c, err)
+	}
+	// Just below 720p threshold -> caps to 480p
+	c, err = CapCastProfileForNetwork(p4K, 2857) // 1,999,900 budget
+	if err != nil || c != p480 {
+		t.Fatalf("expected 480p below 720p threshold, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 1800) // 1.26 Mbps budget
+	if err != nil || c != p480 {
+		t.Fatalf("expected 480p, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 1715) // 1,200,500 budget
+	if err != nil || c != p480 {
+		t.Fatalf("expected 480p at threshold, got %v, err: %v", c, err)
+	}
+	// Just below 480p threshold -> caps to 360p
+	c, err = CapCastProfileForNetwork(p4K, 1714) // 1,199,800 budget
+	if err != nil || c != p360 {
+		t.Fatalf("expected 360p below 480p threshold, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 1200) // 840,000 budget
+	if err != nil || c != p360 {
+		t.Fatalf("expected 360p, got %v, err: %v", c, err)
+	}
+	c, err = CapCastProfileForNetwork(p4K, 1143) // 800,100 budget
+	if err != nil || c != p360 {
+		t.Fatalf("expected 360p at threshold, got %v, err: %v", c, err)
+	}
+
+	// 2. Never-raise: candidate profile limits are never raised by abundant goodput
+	for _, candidate := range []CastVideo{p1080, p720, p480, p360} {
+		for _, highGoodput := range []int64{20000, 50000, 200000} {
+			result, err := CapCastProfileForNetwork(candidate, highGoodput)
+			if err != nil {
+				t.Fatalf("unexpected error for %v at %d kbps: %v", candidate, highGoodput, err)
+			}
+			if result.MaxHeight > candidate.MaxHeight || result.Bitrate > candidate.Bitrate || result.MaxWidth > candidate.MaxWidth || result.FPS > candidate.FPS {
+				t.Fatalf("candidate %v raised by goodput %d: got %v", candidate, highGoodput, result)
+			}
+			if result != candidate {
+				t.Fatalf("candidate %v modified by abundant goodput %d: got %v", candidate, highGoodput, result)
+			}
+		}
+	}
+
+	// 3. Unknown/unmeasured samples (kbps <= 0) preserve the profile untouched
+	for _, candidate := range []CastVideo{p4K, p1080, p720, p480, p360} {
+		for _, zeroOrNegative := range []int64{0, -1, -500} {
+			result, err := CapCastProfileForNetwork(candidate, zeroOrNegative)
+			if err != nil || result != candidate {
+				t.Fatalf("unknown goodput %d altered candidate %v: got %v, err: %v", zeroOrNegative, candidate, result, err)
+			}
+		}
+	}
+
+	// 4. Low sample / insufficient goodput (< 800 kbps budget) rejects with error
+	for _, candidate := range []CastVideo{p4K, p1080, p720, p480, p360} {
+		for _, lowGoodput := range []int64{1142, 1000, 700, 500, 100, 1} {
+			result, err := CapCastProfileForNetwork(candidate, lowGoodput)
+			if err == nil {
+				t.Fatalf("expected error for low goodput %d on candidate %v, got success: %v", lowGoodput, candidate, result)
+			}
+		}
+	}
+}
+
+func TestCastProfileForModeAppliesGoodputCapAndLeavesAudioUnaffected(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	device := domain.Device{
+		Registration: domain.Registration{
+			Memory: domain.Memory{PhysicalMB: 2048},
+		},
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			CacheKey:     "bound-1080",
+			Probes: []domain.Probe{
+				{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: now.Unix()},
+				{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: now.Unix()},
+			},
+		},
+	}
+
+	// SCREEN: fresh sample of 3000 kbps caps 1080p to 720p
+	video, err := CastProfileForMode(device, "SCREEN", 1080, now, 3000)
+	if err != nil || video.MaxHeight != 720 || video.Bitrate != 2000000 {
+		t.Fatalf("expected 720p cap, got %v, err: %v", video, err)
+	}
+
+	// SCREEN: low sample of 500 kbps rejects
+	_, err = CastProfileForMode(device, "SCREEN", 1080, now, 500)
+	if err == nil {
+		t.Fatal("expected low goodput to reject SCREEN")
+	}
+
+	// SCREEN: unknown sample (0) preserves 1080p
+	video, err = CastProfileForMode(device, "SCREEN", 1080, now, 0)
+	if err != nil || video.MaxHeight != 1080 || video.Bitrate != 4000000 {
+		t.Fatalf("expected 1080p uncapped, got %v, err: %v", video, err)
+	}
+
+	// AUDIO: low sample of 500 kbps does NOT reject AUDIO
+	audioVideo, err := CastProfileForMode(device, "AUDIO", 720, now, 500)
+	if err != nil || audioVideo != (CastVideo{}) {
+		t.Fatalf("AUDIO should succeed unaffected by low goodput, got %v, err: %v", audioVideo, err)
+	}
+
+	// AUDIO: fresh goodput of 3000 kbps also unaffected
+	audioVideo, err = CastProfileForMode(device, "AUDIO", 720, now, 3000)
+	if err != nil || audioVideo != (CastVideo{}) {
+		t.Fatalf("AUDIO should succeed unaffected, got %v, err: %v", audioVideo, err)
+	}
+}
