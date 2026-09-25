@@ -116,6 +116,59 @@ func TestBridgeLifecycleAndLateConsumer(t *testing.T) {
 	}
 }
 
+func TestBridgeRespondsBeforeFirstPCMFrame(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg required")
+	}
+
+	b := newSpotifyBridge(context.Background(), filepath.Join(t.TempDir(), "audio.pcm"))
+	if b == nil {
+		t.Fatal("failed to initialize bridge")
+	}
+	defer b.Close()
+	server := httptest.NewServer(http.HandlerFunc(b.ServeHTTP))
+	defer server.Close()
+
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	res, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("live stream headers waited for PCM: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.Header.Get("Content-Type") != "audio/mpeg" {
+		t.Fatalf("unexpected stream response: %d %q", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+}
+
+func TestBridgeAudioDiagnosticIsBoundedAndPrivate(t *testing.T) {
+	var absent *spotifyBridge
+	if d := absent.diagnostic(); d.Available || d.LastEncodedAgeMs != -1 {
+		t.Fatalf("unexpected absent bridge diagnostic: %+v", d)
+	}
+
+	b := &spotifyBridge{maxBuffer: 128 * 1024, subscribers: make(map[*subscriber]struct{})}
+	if d := b.diagnostic(); !d.Available || d.Active || d.EncodedBytes != 0 || d.LastEncodedAgeMs != -1 {
+		t.Fatalf("unexpected idle bridge diagnostic: %+v", d)
+	}
+	b.broadcast([]byte{1, 2, 3, 4})
+	if d := b.diagnostic(); !d.Active || d.EncodedBytes != 4 || d.LastEncodedAgeMs < 0 {
+		t.Fatalf("unexpected active bridge diagnostic: %+v", d)
+	}
+	b.mu.Lock()
+	b.lastEncoded = time.Now().Add(-2 * time.Minute)
+	b.mu.Unlock()
+	if d := b.diagnostic(); d.Active || d.LastEncodedAgeMs != time.Minute.Milliseconds() {
+		t.Fatalf("unexpected stale bridge diagnostic: %+v", d)
+	}
+	b.mu.Lock()
+	b.encodedBytes = ^uint64(0) - 1
+	b.mu.Unlock()
+	b.broadcast([]byte{1, 2, 3, 4})
+	if d := b.diagnostic(); d.EncodedBytes != ^uint64(0) {
+		t.Fatalf("audio counter overflowed instead of saturating: %+v", d)
+	}
+}
+
 func TestBridgeConsumerReconnect(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg required")

@@ -342,15 +342,10 @@ func (s *Server) youtubeRelated(w http.ResponseWriter, r *http.Request, d domain
 			fail(w, 504, "provider_timeout")
 			return
 		}
-		respond(w, 200, domain.RelatedPage{
-			APIVersion:   1,
-			VideoID:      videoID,
-			CurrentVideo: currentVideo,
-			Items:        []domain.Item{},
-			NextCursor:   "",
-			HasMore:      false,
-			Total:        0,
-		})
+		// The optional YouTube worker accepts one operation at a time. A browse
+		// racing playback resolution can fail transiently; returning a successful
+		// empty page would make clients treat that failure as a real empty feed.
+		fail(w, 503, "provider_unavailable")
 		return
 	}
 	page := s.browse.Present(reqCtx, d.ID, "youtube", providers.Titles["youtube"], revision, config, "", query, offset, result)

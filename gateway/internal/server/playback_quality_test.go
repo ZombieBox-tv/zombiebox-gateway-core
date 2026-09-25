@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/providers"
@@ -54,8 +55,9 @@ func setDevicePassingProbes(t *testing.T, s *Server, deviceID string, probeIDs .
 	dev.Capabilities.Probes = nil
 	for _, p := range probeIDs {
 		dev.Capabilities.Probes = append(dev.Capabilities.Probes, domain.Probe{
-			ID:     p,
-			Status: "PASS",
+			ID:       p,
+			Status:   "PASS",
+			TestedAt: time.Now().Unix(),
 		})
 	}
 	_ = s.db.Put(t.Context(), "devices", deviceID, dev)

@@ -62,7 +62,7 @@ func isProbePassing(caps domain.Capabilities, probeID string, now int64) bool {
 			if p.Status != "PASS" || p.Stalled {
 				return false
 			}
-			if p.TestedAt > 0 && (p.TestedAt < now-7*24*3600 || p.TestedAt > now+300) {
+			if p.TestedAt <= 0 || p.TestedAt < now-7*24*3600 || p.TestedAt > now+300 {
 				return false
 			}
 			return true
@@ -106,9 +106,6 @@ func canDecodeH264Tier(caps domain.Capabilities, tierID string, device domain.De
 		// Match the actual FFmpeg output codec (H.264) rather than accepting a HEVC-only decode probe as proof of H.264 transcode.
 		return isProbePassing(caps, "h264-1080-high", now) || isProbePassing(caps, "h264-2160-high", now)
 	case "720p":
-		if device.Registration.Memory.PhysicalMB > 0 && device.Registration.Memory.PhysicalMB <= 768 {
-			return false
-		}
 		return isProbePassing(caps, "h264-720-main", now) ||
 			isProbePassing(caps, "h264-720-high", now) ||
 			isProbePassing(caps, "h264-1080-high", now) ||

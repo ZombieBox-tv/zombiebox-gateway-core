@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,29 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSpotifyWorkerHealthPayloadExposesOnlyAudioFlow(t *testing.T) {
+	payload := spotifyWorkerHealth{
+		spotifyHealthResult: spotifyHealthResult{Ready: true, AuthMode: "zeroconf"},
+		Audio:               spotifyAudioDiagnostic{Available: true, EncodedBytes: 1234, LastEncodedAgeMs: 20, Active: true},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["ready"] != true || fields["authMode"] != "zeroconf" || fields["audio"] == nil {
+		t.Fatalf("health compatibility or audio flow missing: %s", raw)
+	}
+	for _, forbidden := range []string{"username", "uri", "title", "token", "artwork", "password"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("private field %q appeared in health payload", forbidden)
+		}
+	}
+}
 
 func TestReceiverFilesAndPrivateBoundary(t *testing.T) {
 	dir := t.TempDir()

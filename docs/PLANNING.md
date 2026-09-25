@@ -1,5 +1,18 @@
 # zombiebox-gateway-core: component work
 
+## dev.60 playback evidence and receiver diagnostics
+
+Expose the gateway's probe time and an authenticated Client version refresh so
+new media measurements on devices with wrong clocks retain valid age without
+reusing a prior APK's evidence. Reject undated PASS results for manual quality;
+let a fresh 720p PASS outrank a low-memory hint while preserving source, output,
+transport and audio gates. Return a retryable failure when the single YouTube
+worker is busy rather than presenting a false empty related rail. The Spotify
+bridge publishes stream headers before its first PCM frame and exposes only
+bounded audio-flow counters through authenticated health for supervised QA.
+Physical manual quality, related relevance and Spotify sound still require
+device/phone tests; no product milestone closes.
+
 ## dev.57 YouTube physical-QA and Spotify readiness corrections
 
 The anonymous YouTube tab and browse root request a bounded real exploration

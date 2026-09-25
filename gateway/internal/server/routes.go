@@ -64,6 +64,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, Health{"ok", 1}) })
 	s.mux.HandleFunc("POST /v1/devices/register", s.register)
 	s.mux.HandleFunc("GET /v1/device", s.auth(func(w http.ResponseWriter, r *http.Request, d domain.Device) { respond(w, 200, d) }))
+	s.mux.HandleFunc("PUT /v1/device/client", s.auth(s.clientVersion))
 	s.mux.HandleFunc("GET /v1/device/preferences", s.auth(func(w http.ResponseWriter, r *http.Request, d domain.Device) { respond(w, 200, d.Preferences) }))
 	s.mux.HandleFunc("PUT /v1/device/preferences", s.auth(s.preferences))
 	s.mux.HandleFunc("PUT /v1/device/hardware", s.auth(s.hardwareReport))

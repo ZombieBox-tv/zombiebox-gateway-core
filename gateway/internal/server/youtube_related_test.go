@@ -305,6 +305,56 @@ func TestYouTubeRelatedEmptyState(t *testing.T) {
 	}
 }
 
+func TestYouTubeRelatedTransientProviderFailureCanBeRetried(t *testing.T) {
+	const currentID = "aqz-KE-bpKQ"
+	const relatedID = "rel12345678"
+	var requests atomic.Int32
+	wrapper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/browse" || r.URL.Query().Get("q") != currentID {
+			t.Errorf("unexpected related browse request: %s", r.URL.String())
+		}
+		if requests.Add(1) == 1 {
+			// The real wrapper reports busy while its single worker resolves playback.
+			http.Error(w, `{"error":"busy"}`, http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintf(w, `{"items":[
+			{"id":"%s","kind":"video","title":"Current video"},
+			{"id":"%s","kind":"video","title":"Related video"}
+		],"nextOffset":-1}`, currentID, relatedID)
+	}))
+	defer wrapper.Close()
+
+	s := testServer(t, nil, "")
+	if err := s.SeedProviders(context.Background(), map[string]providers.Config{
+		"youtube": {Enabled: true, URL: wrapper.URL, Token: strings.Repeat("s", 32)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "busy-device")
+	path := "/v1/youtube/related?video=" + currentID
+
+	first := call(s, "GET", path, "", "busy-device", token, "")
+	if first.Code != http.StatusServiceUnavailable || !strings.Contains(first.Body.String(), "provider_unavailable") {
+		t.Fatalf("busy provider must be retryable, got %d: %s", first.Code, first.Body)
+	}
+
+	second := call(s, "GET", path, "", "busy-device", token, "")
+	if second.Code != http.StatusOK {
+		t.Fatalf("retry failed: %d %s", second.Code, second.Body)
+	}
+	var page domain.RelatedPage
+	if err := json.Unmarshal(second.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != "youtube-"+relatedID {
+		t.Fatalf("expected a related item after provider recovery, got %+v", page.Items)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("provider failure was cached or extra browse ran: %d requests", requests.Load())
+	}
+}
+
 func TestYouTubeRelatedValidationAndBadCursors(t *testing.T) {
 	s := testServer(t, nil, "")
 	if err := s.SeedProviders(context.Background(), map[string]providers.Config{

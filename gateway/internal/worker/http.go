@@ -24,6 +24,13 @@ type Config struct {
 	Pin      string `json:"pin,omitempty"`
 }
 
+// The private worker health response exposes only bounded audio-flow evidence.
+// The daemon's account, track URI, title and artwork never enter this payload.
+type spotifyWorkerHealth struct {
+	spotifyHealthResult
+	Audio spotifyAudioDiagnostic `json:"audio"`
+}
+
 func (c Config) Validate() error {
 	if (c.Mode != "spotify" && c.Mode != "airplay") || c.Listen == "" || len(c.Token) < 32 || !filepath.IsAbs(c.StateDir) {
 		return errors.New("invalid worker configuration")
@@ -102,7 +109,7 @@ func Handler(ctx context.Context, c Config) http.Handler {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(health)
+			_ = json.NewEncoder(w).Encode(spotifyWorkerHealth{spotifyHealthResult: health, Audio: bridge.diagnostic()})
 		})
 		mux.HandleFunc("GET /status", proxy)
 		mux.HandleFunc("GET /auth/code", proxy)

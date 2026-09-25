@@ -83,7 +83,7 @@ func (s *Server) probeManifest(w http.ResponseWriter, r *http.Request, d domain.
 		asset.URL = "/v1/probes/" + asset.ID + "?expires=" + expires + "&ticket=" + s.probeSignature(asset.ID, expires)
 		assets = append(assets, asset)
 	}
-	manifest := map[string]any{"apiVersion": 1, "suiteVersion": suite, "probes": assets}
+	manifest := map[string]any{"apiVersion": 1, "suiteVersion": suite, "serverTimeUnixSeconds": time.Now().Unix(), "probes": assets}
 	if suite == devices.ProbeSuiteVersion {
 		manifest["cacheKey"] = devices.ProbeCacheKey(d)
 	}

@@ -7,6 +7,38 @@ import (
 	"zombiebox.local/gateway/internal/domain"
 )
 
+func qualitiesWithFreshEvidence(metadata domain.Metadata, source domain.Source, device domain.Device, selected string) domain.QualityInventory {
+	device.Capabilities.Probes = append([]domain.Probe(nil), device.Capabilities.Probes...)
+	for i := range device.Capabilities.Probes {
+		if device.Capabilities.Probes[i].Status == "PASS" && device.Capabilities.Probes[i].TestedAt == 0 {
+			device.Capabilities.Probes[i].TestedAt = time.Now().Unix()
+		}
+	}
+	return Qualities(metadata, source, device, selected)
+}
+
+func TestQualitiesRejectsUndatedPassEvidence(t *testing.T) {
+	metadata := domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "h264", Width: 1280, Height: 720},
+		{Type: "audio", Codec: "aac"},
+	}}
+	source := domain.Source{Item: domain.Item{Kind: "video", Provider: "youtube"}, MIME: "video/mp4"}
+	device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-fmp4", Status: "PASS"},
+		{ID: "aac", Status: "PASS"},
+		{ID: "h264-720-main", Status: "PASS"},
+	}}}
+	if inventory := Qualities(metadata, source, device, ""); HasQuality(inventory, "720p") {
+		t.Fatalf("undated PASS cannot establish usable quality: %+v", inventory.Options)
+	}
+	for i := range device.Capabilities.Probes {
+		device.Capabilities.Probes[i].TestedAt = time.Now().Unix()
+	}
+	if inventory := Qualities(metadata, source, device, ""); !HasQuality(inventory, "720p") {
+		t.Fatalf("dated current PASS should establish quality: %+v", inventory.Options)
+	}
+}
+
 func TestQualitiesSourceBoundingAndDeviceCapabilities(t *testing.T) {
 	meta1080 := domain.Metadata{
 		Streams: []domain.Stream{
@@ -27,7 +59,7 @@ func TestQualitiesSourceBoundingAndDeviceCapabilities(t *testing.T) {
 			{ID: "h264-720-main", Status: "PASS"},
 		}},
 	}
-	inv := Qualities(meta1080, srcVideo, api13Device, "")
+	inv := qualitiesWithFreshEvidence(meta1080, srcVideo, api13Device, "")
 	if HasQuality(inv, "1080p") {
 		t.Fatalf("1080p should not be offered without passing 1080p probe: %+v", inv.Options)
 	}
@@ -49,7 +81,7 @@ func TestQualitiesSourceBoundingAndDeviceCapabilities(t *testing.T) {
 			{ID: "h264-1080-high", Status: "PASS"},
 		}},
 	}
-	invCapable := Qualities(meta1080, srcVideo, capableDevice, "")
+	invCapable := qualitiesWithFreshEvidence(meta1080, srcVideo, capableDevice, "")
 	if !HasQuality(invCapable, "1080p") {
 		t.Fatalf("1080p should be offered for passing probe: %+v", invCapable.Options)
 	}
@@ -64,7 +96,7 @@ func TestQualitiesSourceBoundingAndDeviceCapabilities(t *testing.T) {
 			{Type: "audio", Codec: "aac"},
 		},
 	}
-	inv720 := Qualities(meta720, srcVideo, capableDevice, "")
+	inv720 := qualitiesWithFreshEvidence(meta720, srcVideo, capableDevice, "")
 	if HasQuality(inv720, "1080p") || HasQuality(inv720, "2160p") || HasQuality(inv720, "1440p") {
 		t.Fatalf("1080p/2160p/1440p should not be offered for 720p source: %+v", inv720.Options)
 	}
@@ -79,12 +111,48 @@ func TestQualitiesSourceBoundingAndDeviceCapabilities(t *testing.T) {
 			{Type: "audio", Codec: "aac"},
 		},
 	}
-	inv480 := Qualities(meta480, srcVideo, capableDevice, "")
+	inv480 := qualitiesWithFreshEvidence(meta480, srcVideo, capableDevice, "")
 	if HasQuality(inv480, "720p") || HasQuality(inv480, "1080p") {
 		t.Fatalf("qualities higher than 480p must not be offered: %+v", inv480.Options)
 	}
 	if !HasQuality(inv480, "480p") || !HasQuality(inv480, "360p") {
 		t.Fatalf("expected 480p and 360p: %+v", inv480.Options)
+	}
+}
+
+func TestQualities720ProbeOutranksLowMemoryHintButCannotInventDecode(t *testing.T) {
+	metadata := domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "h264", Width: 1920, Height: 1080},
+		{Type: "audio", Codec: "aac"},
+	}}
+	source := domain.Source{Item: domain.Item{ID: "video-1", Provider: "youtube", Kind: "video"}, MIME: "video/mp4"}
+	device := domain.Device{
+		Registration: domain.Registration{
+			Display: domain.Display{Width: 1826, Height: 1026},
+			Memory:  domain.Memory{PhysicalMB: 628},
+		},
+		Capabilities: domain.Capabilities{Probes: []domain.Probe{
+			{ID: "http-fmp4", Status: "PASS"},
+			{ID: "aac", Status: "PASS"},
+			{ID: "h264-720-main", Status: "PASS"},
+		}},
+	}
+	verified := qualitiesWithFreshEvidence(metadata, source, device, "")
+	if !HasQuality(verified, "720p") {
+		t.Fatalf("recent 720p PASS should outrank a low-memory hint: %+v", verified.Options)
+	}
+	if HasQuality(verified, "1080p") {
+		t.Fatalf("1026px output must not advertise 1080p: %+v", verified.Options)
+	}
+	device.Capabilities.Probes[2].Status = "FAIL"
+	failed := qualitiesWithFreshEvidence(metadata, source, device, "")
+	if HasQuality(failed, "720p") {
+		t.Fatalf("failed decode probe must not advertise 720p: %+v", failed.Options)
+	}
+	device.Capabilities.Probes = device.Capabilities.Probes[:2]
+	missing := qualitiesWithFreshEvidence(metadata, source, device, "")
+	if HasQuality(missing, "720p") {
+		t.Fatalf("missing decode probe must not advertise 720p: %+v", missing.Options)
 	}
 }
 
@@ -105,7 +173,7 @@ func TestQualitiesPositivePassRequired(t *testing.T) {
 			{ID: "h264-720-main", Status: "PASS"},
 		}},
 	}
-	invNoFmp4 := Qualities(meta, src, noFmp4Device, "")
+	invNoFmp4 := qualitiesWithFreshEvidence(meta, src, noFmp4Device, "")
 	if HasQuality(invNoFmp4, "720p") {
 		t.Fatalf("720p transcode should not be offered when http-fmp4 is missing: %+v", invNoFmp4.Options)
 	}
@@ -118,7 +186,7 @@ func TestQualitiesPositivePassRequired(t *testing.T) {
 			{ID: "h264-720-main", Status: "PASS"},
 		}},
 	}
-	invNoAAC := Qualities(meta, src, noAACDevice, "")
+	invNoAAC := qualitiesWithFreshEvidence(meta, src, noAACDevice, "")
 	if HasQuality(invNoAAC, "720p") {
 		t.Fatalf("720p transcode should not be offered when aac probe is missing: %+v", invNoAAC.Options)
 	}
@@ -133,7 +201,7 @@ func TestQualitiesPositivePassRequired(t *testing.T) {
 			{ID: "h264-720-main", Status: "UNKNOWN"},
 		}},
 	}
-	invUnknown720 := Qualities(meta, src, unknown720Device, "")
+	invUnknown720 := qualitiesWithFreshEvidence(meta, src, unknown720Device, "")
 	if HasQuality(invUnknown720, "720p") {
 		t.Fatalf("720p should not be offered for UNKNOWN probe status: %+v", invUnknown720.Options)
 	}
@@ -151,7 +219,7 @@ func TestQualitiesPositivePassRequired(t *testing.T) {
 			{ID: "h264-720-main", Status: "PASS", TestedAt: time.Now().Unix() - 8*24*60*60},
 		}},
 	}
-	invStale := Qualities(meta, src, staleDevice, "")
+	invStale := qualitiesWithFreshEvidence(meta, src, staleDevice, "")
 	if HasQuality(invStale, "720p") {
 		t.Fatalf("720p should not be offered for stale probe: %+v", invStale.Options)
 	}
@@ -165,7 +233,7 @@ func TestQualitiesPositivePassRequired(t *testing.T) {
 			{ID: "h264-720-main", Status: "PASS", Stalled: true},
 		}},
 	}
-	invStalled := Qualities(meta, src, stalledDevice, "")
+	invStalled := qualitiesWithFreshEvidence(meta, src, stalledDevice, "")
 	if HasQuality(invStalled, "720p") {
 		t.Fatalf("720p should not be offered for stalled probe: %+v", invStalled.Options)
 	}
@@ -179,7 +247,7 @@ func TestQualitiesPositivePassRequired(t *testing.T) {
 			{ID: "h264-720-main", Status: "FAIL"},
 		}},
 	}
-	invFail := Qualities(meta, src, failDevice, "")
+	invFail := qualitiesWithFreshEvidence(meta, src, failDevice, "")
 	if HasQuality(invFail, "720p") {
 		t.Fatalf("720p should not be offered when probe FAILs: %+v", invFail.Options)
 	}
@@ -206,7 +274,7 @@ func TestQualitiesMatchH264FFmpegOutputCodec(t *testing.T) {
 			{ID: "hevc-1080-main", Status: "PASS"},
 		}},
 	}
-	inv := Qualities(meta, src, hevcOnlyDevice, "")
+	inv := qualitiesWithFreshEvidence(meta, src, hevcOnlyDevice, "")
 	if HasQuality(inv, "1080p") {
 		t.Fatalf("1080p transcode should not be offered based on hevc-1080-main probe: %+v", inv.Options)
 	}
@@ -224,7 +292,7 @@ func TestQualitiesMatchH264FFmpegOutputCodec(t *testing.T) {
 			{ID: "h264-1080-high", Status: "PASS"},
 		}},
 	}
-	invH264 := Qualities(meta, src, h264CapableDevice, "")
+	invH264 := qualitiesWithFreshEvidence(meta, src, h264CapableDevice, "")
 	if !HasQuality(invH264, "1080p") {
 		t.Fatalf("1080p transcode should be offered when h264-1080-high passes: %+v", invH264.Options)
 	}
@@ -249,7 +317,7 @@ func TestQualitiesNativeDirectPlayPreservedWithoutTranscode(t *testing.T) {
 		}},
 	}
 
-	inv := Qualities(meta, src, noTranscodeDevice, "")
+	inv := qualitiesWithFreshEvidence(meta, src, noTranscodeDevice, "")
 	// 1080p native direct play MUST NOT be filtered out solely for lack of transcode evidence!
 	if !HasQuality(inv, "1080p") {
 		t.Fatalf("native direct-play quality 1080p should be offered even without transcode evidence: %+v", inv.Options)
@@ -294,7 +362,7 @@ func TestQualities1440pAnd4KOutputEvidence(t *testing.T) {
 			},
 		},
 	}
-	inv1080Panel := Qualities(meta1440, src1440, panel1080Device, "")
+	inv1080Panel := qualitiesWithFreshEvidence(meta1440, src1440, panel1080Device, "")
 	if HasQuality(inv1080Panel, "1440p") {
 		t.Fatalf("1440p should not be offered when display output is only 1080p: %+v", inv1080Panel.Options)
 	}
@@ -316,7 +384,7 @@ func TestQualities1440pAnd4KOutputEvidence(t *testing.T) {
 			},
 		},
 	}
-	inv1440 := Qualities(meta1440, src1440, panel1440Device, "")
+	inv1440 := qualitiesWithFreshEvidence(meta1440, src1440, panel1440Device, "")
 	if !HasQuality(inv1440, "1440p") {
 		t.Fatalf("1440p should be offered for verified 1440p source on capable display: %+v", inv1440.Options)
 	}
@@ -337,7 +405,7 @@ func TestQualities1440pAnd4KOutputEvidence(t *testing.T) {
 	meta4K.Format.BitRate = "10000000"
 	src4K := domain.Source{MIME: "video/mp4", Item: domain.Item{ID: "vid-4k", Provider: "local", Kind: "movie"}}
 
-	inv4KPanel1080 := Qualities(meta4K, src4K, panel1080Device, "")
+	inv4KPanel1080 := qualitiesWithFreshEvidence(meta4K, src4K, panel1080Device, "")
 	if HasQuality(inv4KPanel1080, "2160p") {
 		t.Fatalf("2160p should not be offered when display output is only 1080p: %+v", inv4KPanel1080.Options)
 	}
@@ -348,7 +416,7 @@ func TestQualities1440pAnd4KOutputEvidence(t *testing.T) {
 			{Type: "video", Width: 0, Height: 0},
 		},
 	}
-	invNoRes := Qualities(metaNoRes, src1440, panel1440Device, "")
+	invNoRes := qualitiesWithFreshEvidence(metaNoRes, src1440, panel1440Device, "")
 	if len(invNoRes.Options) != 1 || invNoRes.Options[0].ID != "auto" {
 		t.Fatalf("absent source resolution should yield Auto only: %+v", invNoRes.Options)
 	}
@@ -368,21 +436,21 @@ func TestQualitiesProviderAndLiveLimits(t *testing.T) {
 
 	// Live source offers Auto only
 	liveSrc := domain.Source{Live: true, Item: domain.Item{ID: "live-1", Provider: "iptv", Kind: "channel"}}
-	invLive := Qualities(meta, liveSrc, device, "")
+	invLive := qualitiesWithFreshEvidence(meta, liveSrc, device, "")
 	if len(invLive.Options) != 1 || invLive.Options[0].ID != "auto" {
 		t.Fatalf("live source should only offer Auto: %+v", invLive.Options)
 	}
 
 	// Audio track offers Auto only
 	audioSrc := domain.Source{Item: domain.Item{ID: "audio-1", Provider: "local", Kind: "track"}}
-	invAudio := Qualities(meta, audioSrc, device, "")
+	invAudio := qualitiesWithFreshEvidence(meta, audioSrc, device, "")
 	if len(invAudio.Options) != 1 || invAudio.Options[0].ID != "auto" {
 		t.Fatalf("audio track should only offer Auto: %+v", invAudio.Options)
 	}
 
 	// IPTV provider offers Auto only
 	iptvSrc := domain.Source{Item: domain.Item{ID: "iptv-1", Provider: "iptv", Kind: "video"}}
-	invIPTV := Qualities(meta, iptvSrc, device, "")
+	invIPTV := qualitiesWithFreshEvidence(meta, iptvSrc, device, "")
 	if len(invIPTV.Options) != 1 || invIPTV.Options[0].ID != "auto" {
 		t.Fatalf("iptv provider should only offer Auto: %+v", invIPTV.Options)
 	}
@@ -410,7 +478,7 @@ func TestQualities4KEvidenceRequired(t *testing.T) {
 			{ID: "h264-1080-high", Status: "PASS"},
 		}},
 	}
-	invUnverified := Qualities(meta4K, src, unverifiedDevice, "")
+	invUnverified := qualitiesWithFreshEvidence(meta4K, src, unverifiedDevice, "")
 	if HasQuality(invUnverified, "2160p") {
 		t.Fatalf("2160p must not be offered without verified 4K probe: %+v", invUnverified.Options)
 	}
@@ -432,7 +500,7 @@ func TestQualities4KEvidenceRequired(t *testing.T) {
 			},
 		},
 	}
-	invVerified := Qualities(meta4K, src, verifiedDevice, "")
+	invVerified := qualitiesWithFreshEvidence(meta4K, src, verifiedDevice, "")
 	if !HasQuality(invVerified, "2160p") {
 		t.Fatalf("2160p should be offered with verified 4K probe: %+v", invVerified.Options)
 	}

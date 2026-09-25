@@ -30,6 +30,8 @@ type spotifyBridge struct {
 	maxBuffer       int
 	subscribers     map[*subscriber]struct{}
 	currentTrackURI string
+	encodedBytes    uint64
+	lastEncoded     time.Time
 	stopped         bool
 	finished        bool
 	closed          bool
@@ -209,6 +211,15 @@ func (b *spotifyBridge) broadcast(chunk []byte) {
 	// are evicted from the front once maxBuffer is reached.
 	b.buffer = append(b.buffer, chunk)
 	b.bufferBytes += len(chunk)
+	// Saturating counters expose only transport activity, never PCM, track,
+	// account or stream identity. They help separate an idle decoder from a
+	// downstream player failure during a supervised Connect attempt.
+	if size := uint64(len(chunk)); b.encodedBytes <= ^uint64(0)-size {
+		b.encodedBytes += size
+	} else {
+		b.encodedBytes = ^uint64(0)
+	}
+	b.lastEncoded = time.Now()
 	for b.bufferBytes > b.maxBuffer && len(b.buffer) > 0 {
 		evicted := b.buffer[0]
 		b.buffer = b.buffer[1:]
@@ -225,6 +236,39 @@ func (b *spotifyBridge) broadcast(chunk []byte) {
 			delete(b.subscribers, sub)
 		}
 	}
+}
+
+type spotifyAudioDiagnostic struct {
+	Available        bool   `json:"available"`
+	EncodedBytes     uint64 `json:"encodedBytes"`
+	LastEncodedAgeMs int64  `json:"lastEncodedAgeMs"`
+	Active           bool   `json:"active"`
+}
+
+func (b *spotifyBridge) diagnostic() spotifyAudioDiagnostic {
+	if b == nil {
+		return spotifyAudioDiagnostic{LastEncodedAgeMs: -1}
+	}
+	b.mu.Lock()
+	d := spotifyAudioDiagnostic{
+		Available:        !b.closed,
+		EncodedBytes:     b.encodedBytes,
+		LastEncodedAgeMs: -1,
+	}
+	last := b.lastEncoded
+	b.mu.Unlock()
+	if !last.IsZero() {
+		age := time.Since(last)
+		if age < 0 {
+			age = 0
+		}
+		d.Active = d.Available && age < 5*time.Second
+		if age > time.Minute {
+			age = time.Minute
+		}
+		d.LastEncodedAgeMs = age.Milliseconds()
+	}
+	return d
 }
 
 func (b *spotifyBridge) subscribe() (*subscriber, []byte, bool) {
@@ -341,6 +385,13 @@ func (b *spotifyBridge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer b.unsubscribe(sub)
 
 	flusher, hasFlush := w.(http.Flusher)
+	// Playback status may become active before the decoder writes its first PCM
+	// frame. Publish the live response now so the gateway's bounded response-
+	// header timeout does not turn that normal startup delay into a failed stream.
+	w.WriteHeader(http.StatusOK)
+	if hasFlush {
+		flusher.Flush()
+	}
 	if len(initial) > 0 {
 		if _, err := w.Write(initial); err != nil {
 			return
