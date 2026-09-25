@@ -14,6 +14,7 @@ import (
 
 	"zombiebox.local/gateway/internal/companion"
 	"zombiebox.local/gateway/internal/companionmedia"
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -47,6 +48,17 @@ func TestCompanionMediaUploadHandoffAndRevocation(t *testing.T) {
 	w := call(s, "PUT", "/v1/device/preferences", `{"mode":"TV","uiLanguage":"en","subtitleMode":"auto","allowCasting":true}`, "media-tv", tv, "")
 	if w.Code != 200 {
 		t.Fatal(w.Body)
+	}
+	var target domain.Device
+	if err := s.db.Get(t.Context(), "devices", "media-tv", &target); err != nil {
+		t.Fatal(err)
+	}
+	target.Capabilities = domain.Capabilities{SuiteVersion: devices.ProbeSuiteVersion, CacheKey: devices.ProbeCacheKey(target), Probes: []domain.Probe{
+		{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "http-progressive", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+	}}
+	if err := s.db.Put(t.Context(), "devices", target.ID, target); err != nil {
+		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
 		w = call(s, "POST", path+"/play", `{"title":"My file","receiverId":"unapproved-tv"}`, request.ID, token, "")

@@ -19,12 +19,12 @@ type CastVideo struct {
 // evidence. Existing senders retain the original wire/encoder limits.
 func CastProfileForSender(device domain.Device, maxHeight int, now time.Time) (CastVideo, error) {
 	memory := device.Registration.Memory.PhysicalMB
-	if maxHeight == 1080 && (memory == 0 || memory > 768) && device.Capabilities.SuiteVersion == 2 && device.Capabilities.CacheKey != "" {
-		passed := map[string]bool{}
-		for _, probe := range device.Capabilities.Probes {
-			passed[probe.ID] = probe.Status == "PASS" && !probe.Stalled && probe.PositionMS >= 500 && probe.TestedAt > now.Unix()-7*24*60*60 && probe.TestedAt <= now.Unix()+300
+	if (maxHeight == 1080 || maxHeight == 2160) && (memory == 0 || memory > 768) && device.Capabilities.SuiteVersion == 2 && device.Capabilities.CacheKey != "" {
+		transportReady := probeStatus(device.Capabilities, "hls-h264-aac", now.Unix()) == "PASS"
+		if maxHeight == 2160 && probeStatus(device.Capabilities, "h264-2160-high", now.Unix()) == "PASS" && transportReady && maxSupportedOutputHeight(device) >= 2160 {
+			return CastVideo{"h264", 3840, 2160, 30, 12000000}, nil
 		}
-		if passed["h264-1080-high"] && passed["hls"] {
+		if probeStatus(device.Capabilities, "h264-1080-high", now.Unix()) == "PASS" && transportReady {
 			return CastVideo{"h264", 1920, 1080, 30, 4000000}, nil
 		}
 	}
@@ -39,7 +39,7 @@ func CastProfile(device domain.Device) (CastVideo, error) {
 		states[probe.ID] = probe.Status
 	}
 	base := CastVideo{"h264", 640, 360, 24, 800000}
-	if states["hls"] == "FAIL" {
+	if states["hls-h264-aac"] == "FAIL" {
 		return base, errors.New("receiver transport unsupported")
 	}
 	memory := device.Registration.Memory.PhysicalMB
@@ -68,7 +68,7 @@ func CastProfileForMode(device domain.Device, mode string, maxHeight int, now ti
 		return CastVideo{}, errors.New("invalid cast mode")
 	}
 	for _, probe := range device.Capabilities.Probes {
-		if (probe.ID == "aac" || probe.ID == "hls") && probe.Status == "FAIL" {
+		if (probe.ID == "aac" || probe.ID == "hls-h264-aac") && probe.Status == "FAIL" {
 			return CastVideo{}, errors.New("receiver audio transport unsupported")
 		}
 	}

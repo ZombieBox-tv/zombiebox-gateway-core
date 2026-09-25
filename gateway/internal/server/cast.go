@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/playback"
 	"zombiebox.local/gateway/internal/providers"
@@ -72,7 +73,7 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 	if request.MaxVideoHeight != nil {
 		maxHeight = *request.MaxVideoHeight
 	}
-	if maxHeight != 720 && maxHeight != 1080 {
+	if maxHeight != 720 && maxHeight != 1080 && maxHeight != 2160 {
 		fail(w, 400, "invalid_cast_video_limit")
 		return
 	}
@@ -98,6 +99,7 @@ func (s *Server) createCast(w http.ResponseWriter, r *http.Request, sender domai
 		fail(w, 409, "receiver_busy")
 		return
 	}
+	receiver.Capabilities = devices.CurrentCapabilities(receiver)
 	video, err := playback.CastProfileForMode(receiver, mode, maxHeight, time.Now())
 	if err != nil {
 		fail(w, 409, "receiver_media_unsupported")

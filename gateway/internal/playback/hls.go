@@ -44,20 +44,14 @@ func HasFreshHLSEvidence(caps domain.Capabilities) bool {
 		return false
 	}
 	now := time.Now().Unix()
-	for _, p := range caps.Probes {
-		if p.ID == "hls-h264-aac" {
-			return p.Status == "PASS" && !p.Stalled && (p.PositionMS >= 500 || p.Completed) &&
-				p.TestedAt > now-7*24*60*60 && p.TestedAt <= now+300
-		}
-	}
-	return false
+	return probeStatus(caps, "hls-h264-aac", now) == "PASS"
 }
 
 // nativeHLSCandidate validates that:
 // 1. The stream is an HLS manifest.
 // 2. The device has fresh, functional probe evidence for HLS (hls-h264-aac PASS).
 // 3. The video codec/profile/resolution has matching functional playback evidence.
-// 4. The audio codec is AAC with no active probe failure.
+// 4. The audio codec is AAC with fresh PASS probe evidence.
 // 5. The container is MPEG-TS, not fragmented MP4 or alternate container.
 // 6. Evidence is not stale (suite 2, valid cache key, tested within 7 days, non-stalled).
 func nativeHLSCandidate(metadata domain.Metadata, mime string, caps domain.Capabilities) bool {
@@ -70,13 +64,9 @@ func nativeHLSCandidate(metadata domain.Metadata, mime string, caps domain.Capab
 	if !HasFreshHLSEvidence(caps) {
 		return false
 	}
+	now := time.Now().Unix()
 	status := func(id string) string {
-		for _, p := range caps.Probes {
-			if p.ID == id {
-				return p.Status
-			}
-		}
-		return "UNKNOWN"
+		return probeStatus(caps, id, now)
 	}
 	hasVideo, hasAudio := false, false
 	for _, stream := range metadata.Streams {
@@ -88,7 +78,7 @@ func nativeHLSCandidate(metadata domain.Metadata, mime string, caps domain.Capab
 		}
 		if stream.Type == "audio" {
 			hasAudio = true
-			if stream.Codec != "aac" || status("aac") == "FAIL" {
+			if stream.Codec != "aac" || status("aac") != "PASS" {
 				return false
 			}
 		}
@@ -98,13 +88,17 @@ func nativeHLSCandidate(metadata domain.Metadata, mime string, caps domain.Capab
 
 // The HLS fixture certifies Baseline 360p only. Higher resolutions and other
 // profiles need their own advancing decoder probe; a missing probe is not PASS.
+// Modern devices with verified 4K H.264 evidence are not capped at legacy 1080p.
 func hlsVideoCandidate(stream domain.Stream, status func(string) string) bool {
-	if stream.Width <= 0 || stream.Height <= 0 || stream.Width > 1920 || stream.Height > 1080 {
+	if stream.Width <= 0 || stream.Height <= 0 || stream.Width > 3840 || stream.Height > 2160 {
 		return false
 	}
 	profile := strings.ToLower(stream.Profile)
 	switch {
 	case strings.Contains(profile, "high"):
+		if stream.Width > 1920 || stream.Height > 1080 {
+			return status("h264-2160-high") == "PASS"
+		}
 		if stream.Width > 1280 || stream.Height > 720 {
 			return status("h264-1080-high") == "PASS"
 		}

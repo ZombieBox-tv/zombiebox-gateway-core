@@ -45,6 +45,43 @@ test("player resolution has a bounded worker heap and longer deadline than brows
   const resolved = await fetch(url + "/resolve/dQw4w9WgXcQ", { headers });
   assert.equal(resolved.status, 200);
   assert.deepEqual(await resolved.json(), { mimeType: "video/mp4" });
+  const badQuality = await fetch(url + "/resolve/dQw4w9WgXcQ?quality=9999p", { headers });
+  assert.equal(badQuality.status, 400);
+  assert.deepEqual(await badQuality.json(), { error: "invalid_quality" });
+});
+
+test("quality parameter is passed to worker factory for HD resolution", async (t) => {
+  let passedQuality = "";
+  const { url } = await fixture(t, {
+    workerFactory: (data) => {
+      passedQuality = data.quality;
+      const worker = new FakeWorker();
+      setTimeout(
+        () =>
+          worker.emit("message", {
+            ok: true,
+            value: {
+              url: "https://r.googlevideo.com/v",
+              audioUrl: "https://r.googlevideo.com/a",
+              mimeType: "video/mp4",
+              variants: ["720p"],
+            },
+          }),
+        20,
+      );
+      return worker;
+    },
+  });
+  const headers = { authorization: `Bearer ${token}` };
+  const resp = await fetch(url + "/resolve/dQw4w9WgXcQ?quality=720p", { headers });
+  assert.equal(resp.status, 200);
+  assert.equal(passedQuality, "720p");
+  assert.deepEqual(await resp.json(), {
+    url: "https://r.googlevideo.com/v",
+    audioUrl: "https://r.googlevideo.com/a",
+    mimeType: "video/mp4",
+    variants: ["720p"],
+  });
 });
 test("interpreter evaluates without host access and stops infinite code", async () => {
   assert.deepEqual(await evaluate({ output: 'return {sig:"abc",n:"def"}' }), {

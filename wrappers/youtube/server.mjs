@@ -52,6 +52,9 @@ export function createWrapper({
     const offset = Number(url.searchParams.get("offset") ?? 0);
     if (!validParent(parent) || !Number.isInteger(offset) || offset < 0 || offset > 360)
       return reply(400, { error: "invalid_browse" });
+    const quality = url.searchParams.get("quality") ?? "";
+    if (quality && !["1080p", "720p", "480p", "360p"].includes(quality))
+      return reply(400, { error: "invalid_quality" });
     if (active) return reply(503, { error: "busy" });
     let worker;
     try {
@@ -60,6 +63,7 @@ export function createWrapper({
         parent,
         offset,
         id,
+        quality,
         query,
         cookie,
         poToken,

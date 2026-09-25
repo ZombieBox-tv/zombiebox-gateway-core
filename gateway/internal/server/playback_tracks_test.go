@@ -210,7 +210,7 @@ func TestLanguageDecisionSelectsRequestedAudioAndHonorsFragmentFailure(t *testin
 	if decision.mode != "REMUX" || decision.audioID == nil || *decision.audioID != 2 {
 		t.Fatal(decision)
 	}
-	device.Capabilities.Probes = []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}
+	device.Capabilities.Probes = []domain.Probe{{ID: "http-fmp4", Status: "FAIL", TestedAt: time.Now().Unix()}}
 	if decision := trackDecision(metadata, "AUTO", domain.Source{}, device); decision.mode != "EXTERNAL_PLAYER" || decision.audioID != nil {
 		t.Fatal(decision)
 	}
@@ -226,7 +226,7 @@ func TestAudioSelectionRejectsFailedOutputWithoutReplacingSession(t *testing.T) 
 	request := httptest.NewRequest("POST", "/", strings.NewReader(`{"audioId":1,"positionMs":1000}`))
 	request.SetPathValue("session", "original")
 	response := httptest.NewRecorder()
-	s.selectAudio(response, request, domain.Device{ID: "owner", Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}}})
+	s.selectAudio(response, request, domain.Device{ID: "owner", Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL", TestedAt: time.Now().Unix()}}}})
 	if response.Code != 409 || len(s.sessions) != 1 || ctx.Err() != nil || adapter.calls != 1 {
 		t.Fatalf("failed output changed playback: %d sessions=%d probes=%d", response.Code, len(s.sessions), adapter.calls)
 	}

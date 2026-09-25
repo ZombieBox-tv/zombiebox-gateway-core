@@ -8,7 +8,7 @@ Platform.shim.eval = evaluate;
 Log.setLevel(Log.Level.NONE);
 
 async function run() {
-  const { operation, query, id, cookie, poToken, visitorData } = workerData;
+  const { operation, query, id, quality, cookie, poToken, visitorData } = workerData;
   const yt = await Innertube.create({
     lang: "en",
     location: "US",
@@ -36,7 +36,7 @@ async function run() {
     }
     return { items };
   }
-  return resolveVideo(yt, id);
+  return resolveVideo(yt, id, undefined, quality);
 }
 
 try {

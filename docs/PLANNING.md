@@ -1,5 +1,19 @@
 # zombiebox-gateway-core: component work
 
+## dev.65 playback evidence and YouTube quality candidate
+
+Offer verified YouTube H.264/AAC renditions up to the device's measured decoder
+capability. Android UI viewport dimensions do not establish native video output:
+the Vizio's 1826x1026 viewport no longer hides its passing 1080p probe. UHD
+still requires an enumerated display output mode. The wrapper validates signed
+media ranges before advertising renditions, keeps a working Auto source, and
+checks remote audio/video before a quality switch. A failed switch preserves
+the playing session and returns the preference to Auto. Cast grants can
+negotiate 4K only with sender opt-in and fresh output, HLS and decoder evidence.
+AirPlay has a host-tested ADTS AAC fallback for live audio; Apple Music sound
+and timeline remain unverified on the Vizio. Spotify's current upstream AES
+key refusal remains unresolved. No product milestone closes.
+
 ## dev.63 live audio delivery and Spotify refusal containment
 
 Fragment audio-only live AAC into bounded one-second fMP4 units and flush each

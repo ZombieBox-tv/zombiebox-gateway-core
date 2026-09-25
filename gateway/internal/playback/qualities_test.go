@@ -13,6 +13,9 @@ func qualitiesWithFreshEvidence(metadata domain.Metadata, source domain.Source, 
 		if device.Capabilities.Probes[i].Status == "PASS" && device.Capabilities.Probes[i].TestedAt == 0 {
 			device.Capabilities.Probes[i].TestedAt = time.Now().Unix()
 		}
+		if device.Capabilities.Probes[i].Status == "PASS" && device.Capabilities.Probes[i].PositionMS == 0 {
+			device.Capabilities.Probes[i].PositionMS = 1000
+		}
 	}
 	return Qualities(metadata, source, device, selected)
 }
@@ -33,6 +36,7 @@ func TestQualitiesRejectsUndatedPassEvidence(t *testing.T) {
 	}
 	for i := range device.Capabilities.Probes {
 		device.Capabilities.Probes[i].TestedAt = time.Now().Unix()
+		device.Capabilities.Probes[i].PositionMS = 1000
 	}
 	if inventory := Qualities(metadata, source, device, ""); !HasQuality(inventory, "720p") {
 		t.Fatalf("dated current PASS should establish quality: %+v", inventory.Options)
@@ -89,12 +93,18 @@ func TestQualitiesSourceBoundingAndDeviceCapabilities(t *testing.T) {
 		t.Fatalf("2160p/1440p must not be fabricated on 1080p source: %+v", invCapable.Options)
 	}
 
-	// A 1080p decode PASS does not override a smaller known display output.
+	// The Android UI viewport is not evidence of the native video output.
 	outputLimitedDevice := capableDevice
+	outputLimitedDevice.Registration.Display.Width = 1826
 	outputLimitedDevice.Registration.Display.Height = 1026
 	invOutputLimited := qualitiesWithFreshEvidence(meta1080, srcVideo, outputLimitedDevice, "")
+	if !HasQuality(invOutputLimited, "1080p") || !HasQuality(invOutputLimited, "720p") {
+		t.Fatalf("1026px logical viewport must not cap a verified 1080p decoder: %+v", invOutputLimited.Options)
+	}
+	outputLimitedDevice.Registration.Hardware = &domain.HardwareReport{Displays: []domain.DisplayHint{{Default: true, Modes: []domain.DisplayModeHint{{Height: 720}}}}}
+	invOutputLimited = qualitiesWithFreshEvidence(meta1080, srcVideo, outputLimitedDevice, "")
 	if HasQuality(invOutputLimited, "1080p") || !HasQuality(invOutputLimited, "720p") {
-		t.Fatalf("1026px output must cap choices at 720p: %+v", invOutputLimited.Options)
+		t.Fatalf("known 720p output mode must cap choices at 720p: %+v", invOutputLimited.Options)
 	}
 
 	// 3. Source is 720p: 1080p must NOT be offered regardless of device capability.
@@ -355,7 +365,8 @@ func TestQualities1440pAnd4KOutputEvidence(t *testing.T) {
 	// 1. Device with 1080p display panel: 1440p must NOT be offered (impossible output)
 	panel1080Device := domain.Device{
 		Registration: domain.Registration{
-			Display: domain.Display{Width: 1920, Height: 1080},
+			Display:  domain.Display{Width: 1920, Height: 1080},
+			Hardware: &domain.HardwareReport{Displays: []domain.DisplayHint{{Default: true, Modes: []domain.DisplayModeHint{{Height: 1080}}}}},
 		},
 		Capabilities: domain.Capabilities{
 			SuiteVersion: 2,
@@ -381,7 +392,8 @@ func TestQualities1440pAnd4KOutputEvidence(t *testing.T) {
 	// 2. Device with 1440p capable display and passing UHD probe: 1440p IS offered!
 	panel1440Device := domain.Device{
 		Registration: domain.Registration{
-			Display: domain.Display{Width: 2560, Height: 1440},
+			Display:  domain.Display{Width: 2560, Height: 1440},
+			Hardware: &domain.HardwareReport{Displays: []domain.DisplayHint{{Default: true, Modes: []domain.DisplayModeHint{{Height: 1440}}}}},
 		},
 		Capabilities: domain.Capabilities{
 			SuiteVersion: 2,
@@ -493,6 +505,7 @@ func TestQualities4KEvidenceRequired(t *testing.T) {
 
 	// With valid 4K probe evidence (suiteVersion 2, fresh PASS): 2160p IS offered
 	verifiedDevice := domain.Device{
+		Registration: domain.Registration{Hardware: &domain.HardwareReport{Displays: []domain.DisplayHint{{Default: true, Modes: []domain.DisplayModeHint{{Height: 2160}}}}}},
 		Capabilities: domain.Capabilities{
 			SuiteVersion: 2,
 			CacheKey:     "synthetic-4k-probe",
@@ -515,6 +528,7 @@ func TestQualities4KEvidenceRequired(t *testing.T) {
 }
 
 func TestSelectedQualityModeAndPositionPreservation(t *testing.T) {
+	now := time.Now().Unix()
 	meta := domain.Metadata{
 		Streams: []domain.Stream{
 			{Type: "video", Codec: "h264", Profile: "High", Width: 1920, Height: 1080},
@@ -524,14 +538,18 @@ func TestSelectedQualityModeAndPositionPreservation(t *testing.T) {
 	meta.Format.Name = "mp4"
 	src := domain.Source{MIME: "video/mp4", Item: domain.Item{ID: "movie-1", Provider: "local", Kind: "movie"}}
 	device := domain.Device{
-		Capabilities: domain.Capabilities{Probes: []domain.Probe{
-			{ID: "http-fmp4", Status: "PASS"},
-			{ID: "aac", Status: "PASS"},
-			{ID: "h264-baseline-360", Status: "PASS"},
-			{ID: "h264-baseline-480", Status: "PASS"},
-			{ID: "h264-720-main", Status: "PASS"},
-			{ID: "h264-1080-high", Status: "PASS"},
-		}},
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-progressive", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-baseline-480", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-720-main", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			},
+		},
 	}
 
 	// Downscaled quality (720p on 1080p source) requires TRANSCODE
@@ -540,7 +558,7 @@ func TestSelectedQualityModeAndPositionPreservation(t *testing.T) {
 		t.Fatalf("expected TRANSCODE 720p, got %s %s", mode, q)
 	}
 
-	// Auto mode preserves native DIRECT_PLAY
+	// Auto mode preserves native DIRECT_PLAY when evidence is verified
 	autoMode, autoQ := SelectedQualityMode(meta, src, device, "auto", 0, "DIRECT_PLAY")
 	if autoMode != "DIRECT_PLAY" || autoQ != "" {
 		t.Fatalf("expected DIRECT_PLAY in auto, got %s %s", autoMode, autoQ)
@@ -562,5 +580,233 @@ func TestSelectedQualityModeAndPositionPreservation(t *testing.T) {
 	}
 	if RequiresTranscodeForQuality(meta, "auto") {
 		t.Fatal("auto should not require forced downscale transcoding")
+	}
+}
+
+func TestSelectedQualityModeProbeEvidenceGates(t *testing.T) {
+	now := time.Now().Unix()
+	meta := domain.Metadata{
+		Streams: []domain.Stream{
+			{Type: "video", Codec: "h264", Profile: "Baseline", Width: 640, Height: 360},
+			{Type: "audio", Codec: "aac"},
+		},
+	}
+	meta.Format.Name = "mp4"
+	src := domain.Source{MIME: "video/mp4", Item: domain.Item{ID: "yt-360", Provider: "youtube", Kind: "video"}}
+
+	// 1. Verified path: fresh advancing PASS probes for http-progressive, aac, and baseline h264 yields DIRECT_PLAY
+	verifiedDevice := domain.Device{
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-progressive", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			},
+		},
+	}
+	mode, q := SelectedQualityMode(meta, src, verifiedDevice, "auto", 0, "")
+	if mode != "DIRECT_PLAY" || q != "" {
+		t.Fatalf("expected DIRECT_PLAY for verified probe evidence, got mode %s q %s", mode, q)
+	}
+
+	// 2. Missing http-progressive probe: must NOT manufacture DIRECT_PLAY
+	missingProgressiveDevice := domain.Device{
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			},
+		},
+	}
+	modeMiss, _ := SelectedQualityMode(meta, src, missingProgressiveDevice, "auto", 0, "")
+	if modeMiss == "DIRECT_PLAY" {
+		t.Fatalf("missing http-progressive probe must not manufacture DIRECT_PLAY, got %s", modeMiss)
+	}
+
+	// 3. Stale probe (> 7 days): must NOT manufacture DIRECT_PLAY
+	staleDevice := domain.Device{
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-progressive", Status: "PASS", PositionMS: 1000, TestedAt: now - 8*24*3600}, // stale
+				{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			},
+		},
+	}
+	modeStale, _ := SelectedQualityMode(meta, src, staleDevice, "auto", 0, "")
+	if modeStale == "DIRECT_PLAY" {
+		t.Fatalf("stale probe must not manufacture DIRECT_PLAY, got %s", modeStale)
+	}
+
+	// 4. Failed probe: must NOT manufacture DIRECT_PLAY
+	failedDevice := domain.Device{
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-progressive", Status: "FAIL", PositionMS: 1000, TestedAt: now},
+				{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			},
+		},
+	}
+	modeFail, _ := SelectedQualityMode(meta, src, failedDevice, "auto", 0, "")
+	if modeFail == "DIRECT_PLAY" {
+		t.Fatalf("failed probe must not manufacture DIRECT_PLAY, got %s", modeFail)
+	}
+
+	// 5. Split YouTube audio/video source (source.AudioURL != ""): never DIRECT_PLAY
+	splitSrc := domain.Source{
+		MIME:     "video/mp4",
+		URL:      "https://r1.googlevideo.com/v",
+		AudioURL: "https://r2.googlevideo.com/audio",
+		Item:     domain.Item{ID: "yt-split", Provider: "youtube", Kind: "video"},
+	}
+	splitMode0, _ := SelectedQualityMode(meta, splitSrc, verifiedDevice, "auto", 0, "")
+	if splitMode0 != "REMUX" {
+		t.Fatalf("expected REMUX at pos 0 for split source, got %s", splitMode0)
+	}
+	splitModePos, _ := SelectedQualityMode(meta, splitSrc, verifiedDevice, "auto", 5000, "")
+	if splitModePos != "TRANSCODE" {
+		t.Fatalf("expected TRANSCODE at pos > 0 for split source, got %s", splitModePos)
+	}
+}
+
+func TestQualitiesYouTubeVariantsAndProbes(t *testing.T) {
+	now := time.Now().Unix()
+	meta360 := domain.Metadata{
+		Streams: []domain.Stream{
+			{Type: "video", Codec: "h264", Profile: "Baseline", Width: 640, Height: 360},
+			{Type: "audio", Codec: "aac"},
+		},
+	}
+	meta360.Format.Name = "mp4"
+
+	// 1. Capable device with 1080p screen and valid passing probes
+	capableDevice := domain.Device{
+		Registration: domain.Registration{
+			Display: domain.Display{Width: 1920, Height: 1080},
+		},
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-fmp4", Status: "PASS", TestedAt: now},
+				{ID: "aac", Status: "PASS", TestedAt: now},
+				{ID: "h264-baseline-360", Status: "PASS", TestedAt: now},
+				{ID: "h264-720-main", Status: "PASS", TestedAt: now},
+				{ID: "h264-1080-high", Status: "PASS", TestedAt: now},
+			},
+		},
+	}
+
+	ytSourceWithHD := domain.Source{
+		MIME:     "video/mp4",
+		Variants: []string{"1080p", "720p", "360p"},
+		Item:     domain.Item{ID: "yt-1", Provider: "youtube", Kind: "video"},
+	}
+
+	inv := qualitiesWithFreshEvidence(meta360, ytSourceWithHD, capableDevice, "")
+	if !HasQuality(inv, "1080p") || !HasQuality(inv, "720p") || !HasQuality(inv, "360p") {
+		t.Fatalf("expected 1080p, 720p, 360p in inventory: %+v", inv.Options)
+	}
+
+	// 2. Source lacking HD (only 360p variant) on capable device: must NOT offer 720p or 1080p
+	ytSourceSDOnly := domain.Source{
+		MIME:     "video/mp4",
+		Variants: []string{"360p"},
+		Item:     domain.Item{ID: "yt-2", Provider: "youtube", Kind: "video"},
+	}
+	invSD := qualitiesWithFreshEvidence(meta360, ytSourceSDOnly, capableDevice, "")
+	if HasQuality(invSD, "720p") || HasQuality(invSD, "1080p") {
+		t.Fatalf("720p/1080p must not be offered for source lacking HD: %+v", invSD.Options)
+	}
+
+	// 3. Stale/failed 1080p probe: must NOT offer 1080p, but 720p remains available
+	stale1080Device := domain.Device{
+		Registration: domain.Registration{
+			Display: domain.Display{Width: 1920, Height: 1080},
+		},
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-fmp4", Status: "PASS", TestedAt: now},
+				{ID: "aac", Status: "PASS", TestedAt: now},
+				{ID: "h264-baseline-360", Status: "PASS", TestedAt: now},
+				{ID: "h264-720-main", Status: "PASS", TestedAt: now},
+				{ID: "h264-1080-high", Status: "FAIL", TestedAt: now}, // FAILED probe
+			},
+		},
+	}
+	invStale := qualitiesWithFreshEvidence(meta360, ytSourceWithHD, stale1080Device, "")
+	if HasQuality(invStale, "1080p") {
+		t.Fatalf("1080p must not be offered when probe failed: %+v", invStale.Options)
+	}
+	if !HasQuality(invStale, "720p") {
+		t.Fatalf("720p should still be offered when 720 probe passed: %+v", invStale.Options)
+	}
+
+	// 4. Missing/failed audio probe: cannot play adaptive video without audio
+	failedAudioDevice := domain.Device{
+		Registration: domain.Registration{
+			Display: domain.Display{Width: 1920, Height: 1080},
+		},
+		Capabilities: domain.Capabilities{
+			SuiteVersion: 2,
+			Probes: []domain.Probe{
+				{ID: "http-fmp4", Status: "PASS", TestedAt: now},
+				{ID: "aac", Status: "FAIL", TestedAt: now}, // AAC failed
+				{ID: "h264-720-main", Status: "PASS", TestedAt: now},
+				{ID: "h264-1080-high", Status: "PASS", TestedAt: now},
+			},
+		},
+	}
+	invAudioFail := qualitiesWithFreshEvidence(meta360, ytSourceWithHD, failedAudioDevice, "")
+	if HasQuality(invAudioFail, "720p") || HasQuality(invAudioFail, "1080p") {
+		t.Fatalf("adaptive HD must not be offered when aac probe failed: %+v", invAudioFail.Options)
+	}
+
+	// 5. SelectedQualityMode with separate audio (H.264/AAC pair)
+	adaptiveSrc := domain.Source{
+		MIME:     "video/mp4",
+		URL:      "https://r1.googlevideo.com/v720",
+		AudioURL: "https://r2.googlevideo.com/audio",
+		Item:     domain.Item{ID: "yt-1", Provider: "youtube", Kind: "video"},
+	}
+	for i := range capableDevice.Capabilities.Probes {
+		capableDevice.Capabilities.Probes[i].PositionMS = 1000
+	}
+	remuxMode, qRemux := SelectedQualityMode(meta360, adaptiveSrc, capableDevice, "720p", 0, "")
+	if remuxMode != "REMUX" || qRemux != "720p" {
+		t.Fatalf("expected REMUX 720p at pos 0, got %s %s", remuxMode, qRemux)
+	}
+	transcodeMode, qTrans := SelectedQualityMode(meta360, adaptiveSrc, capableDevice, "720p", 10000, "")
+	if transcodeMode != "TRANSCODE" || qTrans != "720p" {
+		t.Fatalf("expected TRANSCODE 720p at pos 10000, got %s %s", transcodeMode, qTrans)
+	}
+}
+
+func TestYouTubeProgressiveVariantSurvivesFailedFMP4Probe(t *testing.T) {
+	now := time.Now().Unix()
+	device := domain.Device{Registration: domain.Registration{Display: domain.Display{Width: 1826, Height: 1026}}, Capabilities: domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-progressive", Status: "PASS", TestedAt: now, PositionMS: 1000},
+		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+		{ID: "aac", Status: "PASS", TestedAt: now, PositionMS: 1000},
+		{ID: "h264-1080-high", Status: "PASS", TestedAt: now, PositionMS: 1000},
+	}}}
+	metadata := domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264", Width: 640, Height: 360}, {Type: "audio", Codec: "aac"}}}
+	metadata.Format.Name = "mp4"
+	source := domain.Source{MIME: "video/mp4", Item: domain.Item{Provider: "youtube", Kind: "video"}, Variants: []string{"1080p", "360p"}}
+	if inventory := Qualities(metadata, source, device, ""); !HasQuality(inventory, "1080p") {
+		t.Fatalf("validated 1080p progressive candidate hidden by fMP4 failure: %+v", inventory.Options)
+	}
+	source.AudioURL = "https://r2.googlevideo.com/audio"
+	if mode, _ := SelectedQualityMode(metadata, source, device, "1080p", 0, ""); mode != "EXTERNAL_PLAYER" {
+		t.Fatalf("split track must not use failed fMP4 output: %s", mode)
 	}
 }

@@ -33,6 +33,10 @@ type Source struct {
 	Headers        http.Header
 	MIME           string
 	Live           bool
+	Variants       []string
+	ResolveURL     string
+	ResolveHeaders http.Header
+	ResolveQuality string
 }
 
 // SubtitleSource stays on the gateway; only semantic tracks/cues reach clients.

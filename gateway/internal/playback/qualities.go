@@ -57,31 +57,25 @@ func ValidQuality(quality string) bool {
 }
 
 func isProbePassing(caps domain.Capabilities, probeID string, now int64) bool {
-	for _, p := range caps.Probes {
-		if p.ID == probeID {
-			if p.Status != "PASS" || p.Stalled {
-				return false
-			}
-			if p.TestedAt <= 0 || p.TestedAt < now-7*24*3600 || p.TestedAt > now+300 {
-				return false
-			}
-			return true
-		}
-	}
-	return false
+	return probeStatus(caps, probeID, now) == "PASS"
 }
 
 func maxSupportedOutputHeight(device domain.Device) int {
-	maxH := device.Registration.Display.Height
-	if device.Registration.Hardware != nil {
-		for _, disp := range device.Registration.Hardware.Displays {
-			if disp.Height > maxH {
-				maxH = disp.Height
-			}
-			for _, mode := range disp.Modes {
-				if mode.Height > maxH {
-					maxH = mode.Height
-				}
+	// Registration.Display and DisplayHint dimensions describe the Android UI
+	// viewport. Overscan can make that viewport smaller than the video output
+	// (the Vizio reports 1826x1026 while its 1080p decoder probe passes).
+	// Only enumerated output modes are evidence for a hard output ceiling.
+	if device.Registration.Hardware == nil {
+		return 0
+	}
+	maxH := 0
+	for _, disp := range device.Registration.Hardware.Displays {
+		if !disp.Default {
+			continue
+		}
+		for _, mode := range disp.Modes {
+			if mode.Height > maxH {
+				maxH = mode.Height
 			}
 		}
 	}
@@ -202,6 +196,15 @@ func currentCaps(device domain.Device) domain.Capabilities {
 	return c
 }
 
+func hasVariant(variants []string, id string) bool {
+	for _, v := range variants {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
 // Qualities computes the selectable playback renditions bounded by source resolution
 // and validated device capability probes. Providers without multiple known renditions
 // offer Auto only. Selectable options require positive PASS evidence for output format,
@@ -221,10 +224,13 @@ func Qualities(metadata domain.Metadata, source domain.Source, device domain.Dev
 	}
 
 	videoStream := findVideoStream(metadata.Streams)
-	if videoStream == nil || videoStream.Height <= 0 {
+	if (videoStream == nil || videoStream.Height <= 0) && len(source.Variants) == 0 {
 		return autoInventory
 	}
-	srcHeight := videoStream.Height
+	srcHeight := 0
+	if videoStream != nil {
+		srcHeight = videoStream.Height
+	}
 
 	caps := currentCaps(device)
 	now := time.Now().Unix()
@@ -237,13 +243,38 @@ func Qualities(metadata domain.Metadata, source domain.Source, device domain.Dev
 	}
 
 	for _, tier := range standardTiers {
-		// Source bounding: never fabricate entries higher than the source rendition.
-		if tier.Height > srcHeight {
-			continue
+		if len(source.Variants) > 0 {
+			// For sources with validated upstream variants (like YouTube),
+			// only consider tiers actually present in upstream variants:
+			if !hasVariant(source.Variants, tier.ID) {
+				continue
+			}
+		} else {
+			// Source bounding: never fabricate entries higher than the source rendition.
+			if tier.Height > srcHeight {
+				continue
+			}
 		}
 
+		// UHD needs positive output-mode evidence. A logical UI viewport is
+		// never proof that 1080p video is impossible.
+		if tier.Height > 1080 && maxOutputH == 0 {
+			continue
+		}
 		// Output evidence bounding: avoid impossible options if display output is known and too small.
 		if maxOutputH > 0 && maxOutputH < tier.Height {
+			continue
+		}
+		if len(source.Variants) > 0 {
+			// The wrapper validates each upstream rendition. A variant can be
+			// progressive H.264/AAC or separate tracks; the current Auto stream
+			// does not describe its container. Admit the candidate if either
+			// transport passed and verify the resolved source before switching.
+			if !canDecodeH264Tier(caps, tier.ID, device, now) || !isProbePassing(caps, "aac", now) ||
+				(!isProbePassing(caps, "http-progressive", now) && !isProbePassing(caps, "http-fmp4", now)) {
+				continue
+			}
+			options = append(options, domain.QualityOption{ID: tier.ID, Label: tier.Label, Width: tier.Width, Height: tier.Height})
 			continue
 		}
 
@@ -272,8 +303,8 @@ func Qualities(metadata domain.Metadata, source domain.Source, device domain.Dev
 			continue
 		}
 
-		// Downscaled tiers (tier.Height < srcHeight):
-		// These are gateway downscale choices. Gateway downscale transcodes to H.264 up to 1080p.
+		// Alternative or downscaled tiers:
+		// These require H.264 decode capability, valid fmp4+aac transcode evidence, and <= 1080p.
 		if tier.Height > 1080 {
 			continue
 		}
@@ -359,13 +390,38 @@ func RequiresTranscodeForQuality(metadata domain.Metadata, qualityID string) boo
 // SelectedQualityMode determines the playback mode and quality parameter when a user
 // selects a rendition or reverts to Auto. It respects the DIRECT_PLAY -> REMUX -> TRANSCODE policy.
 func SelectedQualityMode(metadata domain.Metadata, source domain.Source, device domain.Device, qualityID string, positionMS int64, currentMode string) (string, string) {
+	caps := currentCaps(device)
+	if source.AudioURL != "" && !isProbePassing(caps, "http-fmp4", time.Now().Unix()) {
+		return "EXTERNAL_PLAYER", ""
+	}
 	if qualityID == "" || qualityID == "auto" {
-		mode := LocalMode(metadata, source.MIME, device.Capabilities, "")
 		if source.AudioURL != "" {
-			if mode == "DIRECT_PLAY" {
-				mode = "REMUX"
+			// Separate audio and video streams (e.g. YouTube adaptive):
+			// DIRECT_PLAY is never supported for separate tracks on the client.
+			if positionMS > 0 {
+				return "TRANSCODE", ""
 			}
+			tierID := ""
+			videoStream := findVideoStream(metadata.Streams)
+			if videoStream != nil {
+				switch {
+				case videoStream.Height > 720:
+					tierID = "1080p"
+				case videoStream.Height > 480:
+					tierID = "720p"
+				case videoStream.Height > 360:
+					tierID = "480p"
+				default:
+					tierID = "360p"
+				}
+			}
+			if tierID != "" && canDecodeH264Tier(caps, tierID, device, time.Now().Unix()) && isProbePassing(caps, "http-fmp4", time.Now().Unix()) {
+				return "REMUX", ""
+			}
+			return "TRANSCODE", ""
 		}
+
+		mode := LocalModeSource(metadata, source, caps, "")
 		if positionMS > 0 && mode == "REMUX" {
 			mode = "TRANSCODE"
 		}
@@ -387,10 +443,21 @@ func SelectedQualityMode(metadata domain.Metadata, source domain.Source, device 
 	tier := findTier(norm)
 
 	// If chosen quality matches native resolution exactly and source can direct play:
-	if tier != nil && srcHeight > 0 && tier.Height == srcHeight {
-		mode := LocalMode(metadata, source.MIME, device.Capabilities, "")
-		if mode == "DIRECT_PLAY" && source.AudioURL == "" && !needsCompatibleContainer(metadata.Format.Name, source.MIME) {
+	if tier != nil && srcHeight > 0 && tier.Height == srcHeight && source.AudioURL == "" {
+		mode := LocalModeSource(metadata, source, caps, "")
+		if mode == "DIRECT_PLAY" {
 			return "DIRECT_PLAY", norm
+		}
+	}
+
+	// For separate audio and video streams (e.g. YouTube adaptive):
+	// DIRECT_PLAY -> REMUX -> TRANSCODE
+	if source.AudioURL != "" {
+		if positionMS > 0 {
+			return "TRANSCODE", norm
+		}
+		if tier != nil && canDecodeH264Tier(caps, tier.ID, device, time.Now().Unix()) && isProbePassing(caps, "http-fmp4", time.Now().Unix()) {
+			return "REMUX", norm
 		}
 	}
 

@@ -89,6 +89,58 @@ func (s *Server) cleanupSupersededSessionsLocked(deviceID, activeOldID string) {
 	}
 }
 
+func isManualYouTubeSession(sess *session) bool {
+	if sess == nil || sess.source.Item.Provider != "youtube" {
+		return false
+	}
+	if sess.selection.Quality != "" && sess.selection.Quality != "auto" {
+		return true
+	}
+	if sess.source.ResolveQuality != "" && sess.source.ResolveQuality != "auto" {
+		return true
+	}
+	if sess.source.AudioURL != "" {
+		return true
+	}
+	return false
+}
+
+func (s *Server) probeRemoteMedia(ctx context.Context, src domain.Source) (domain.Metadata, bool) {
+	if s.deps.RemoteMedia == nil || !media.RemoteCandidate(src) {
+		return domain.Metadata{}, false
+	}
+	meta, err := s.deps.RemoteMedia.ProbeRemote(ctx, src)
+	if err != nil {
+		return domain.Metadata{}, false
+	}
+	hasVideo, hasAudio := false, false
+	for _, stream := range meta.Streams {
+		hasVideo = hasVideo || stream.Type == "video"
+		hasAudio = hasAudio || stream.Type == "audio"
+	}
+	if !hasVideo || !hasAudio {
+		return domain.Metadata{}, false
+	}
+	return meta, true
+}
+
+func (s *Server) resolveAndProbeYouTubeSource(ctx context.Context, base domain.Source, quality string) (domain.Source, domain.Metadata, bool) {
+	if s.deps.Resolver == nil {
+		return domain.Source{}, domain.Metadata{}, false
+	}
+	req := base
+	req.ResolveQuality = quality
+	resolved, err := s.deps.Resolver.Resolve(ctx, req)
+	if err != nil {
+		return domain.Source{}, domain.Metadata{}, false
+	}
+	meta, ok := s.probeRemoteMedia(ctx, resolved)
+	if !ok {
+		return domain.Source{}, domain.Metadata{}, false
+	}
+	return resolved, meta, true
+}
+
 func (s *Server) playbackQualities(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	sess := s.ownedMediaSession(r, d.ID)
 	if sess == nil {
@@ -168,7 +220,55 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		return
 	}
 
-	mode, chosenQuality := playback.SelectedQualityMode(*metadata, sess.source, d, request.QualityID, request.PositionMS, sess.mode)
+	originalSource := sess.source
+	originalMetadata := metadata
+	targetSource := sess.source
+	targetMetadata := metadata
+
+	if sess.source.Item.Provider == "youtube" && (len(sess.source.Variants) > 0 || sess.source.ResolveURL != "") {
+		kind := sess.source.Item.Kind
+		if kind == "" {
+			kind = "video"
+		}
+		if request.QualityID != "auto" && request.QualityID != "" {
+			target, meta, ok := s.resolveAndProbeYouTubeSource(r.Context(), sess.source, request.QualityID)
+			if ok {
+				targetSource = target
+				targetMetadata = &meta
+			} else {
+				// Resolution or required remote media probe failed:
+				// Revert preference to Auto
+				_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+				request.QualityID = "auto"
+
+				if isManualYouTubeSession(sess) {
+					autoSource, autoMeta, autoOK := s.resolveAndProbeYouTubeSource(r.Context(), originalSource, "auto")
+					if !autoOK {
+						fail(w, 502, "quality_unavailable")
+						return
+					}
+					targetSource = autoSource
+					targetMetadata = &autoMeta
+				} else {
+					targetSource = originalSource
+					targetMetadata = originalMetadata
+				}
+			}
+		} else if request.QualityID == "auto" {
+			if isManualYouTubeSession(sess) {
+				autoSource, autoMeta, autoOK := s.resolveAndProbeYouTubeSource(r.Context(), sess.source, "auto")
+				if !autoOK {
+					fail(w, 502, "quality_unavailable")
+					return
+				}
+				targetSource = autoSource
+				targetMetadata = &autoMeta
+				_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+			}
+		}
+	}
+
+	mode, chosenQuality := playback.SelectedQualityMode(*targetMetadata, targetSource, d, request.QualityID, request.PositionMS, sess.mode)
 	if mode == "EXTERNAL_PLAYER" {
 		fail(w, 409, "quality_unavailable")
 		return
@@ -208,8 +308,8 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		device:            d.ID,
 		ticket:            ticket,
 		expires:           oldSess.expires,
-		source:            oldSess.source,
-		metadata:          oldSess.metadata,
+		source:            targetSource,
+		metadata:          targetMetadata,
 		subtitleID:        oldSess.subtitleID,
 		ctx:               ctx,
 		cancel:            cancel,
@@ -226,9 +326,9 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		SessionID:  id,
 		Mode:       mode,
 		URL:        "/v1/streams/" + id + "?ticket=" + ticket,
-		MIME:       oldSess.source.MIME,
-		Live:       oldSess.source.Live,
-		Item:       oldSess.source.Item,
+		MIME:       targetSource.MIME,
+		Live:       targetSource.Live,
+		Item:       targetSource.Item,
 	}
 	if mode == "TRANSCODE" || mode == "REMUX" {
 		plan.MIME = "video/mp4"
@@ -238,7 +338,7 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 			plan.TimelineOffsetMS = request.PositionMS
 		}
 	} else {
-		plan.Seekable = !oldSess.source.Live
+		plan.Seekable = !targetSource.Live
 		plan.ResumeMS = request.PositionMS
 	}
 

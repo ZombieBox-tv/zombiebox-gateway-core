@@ -114,6 +114,17 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 		return
 	}
+	if req.Quality != "" && req.Quality != "auto" {
+		var meta domain.Metadata
+		if decision.metadata != nil {
+			meta = *decision.metadata
+		}
+		inv := playback.Qualities(meta, resolved, d, "")
+		if !playback.HasQuality(inv, req.Quality) {
+			fail(w, 409, "quality_unavailable")
+			return
+		}
+	}
 	mode := decision.mode
 	if (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation) {
 		if quality := s.networkQuality(d, decision); quality != "" {
@@ -129,17 +140,64 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		if preferred != "" && preferred != "auto" && decision.metadata != nil {
 			inv := playback.Qualities(*decision.metadata, resolved, d, "")
 			if playback.HasQuality(inv, preferred) {
-				newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, preferred, 0, mode)
-				if newMode != "EXTERNAL_PLAYER" {
-					mode, req.Quality = newMode, newQuality
+				originalResolved := resolved
+				originalMetadata := decision.metadata
+				originalMode := mode
+
+				resolvedHD := false
+				if resolved.Item.Provider == "youtube" && (len(resolved.Variants) > 0 || resolved.ResolveURL != "") {
+					targetSource, probedMeta, ok := s.resolveAndProbeYouTubeSource(r.Context(), resolved, preferred)
+					if ok {
+						resolved = targetSource
+						decision.metadata = &probedMeta
+						resolvedHD = true
+					} else {
+						_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+						resolved = originalResolved
+						decision.metadata = originalMetadata
+					}
+				}
+				if resolvedHD || (resolved.Item.Provider != "youtube" && playback.HasQuality(inv, preferred)) {
+					newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, preferred, 0, originalMode)
+					if newMode != "EXTERNAL_PLAYER" {
+						mode, req.Quality = newMode, newQuality
+					} else {
+						resolved = originalResolved
+						decision.metadata = originalMetadata
+						_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+					}
 				}
 			}
 		}
 	} else if (req.Mode == "" || req.Mode == "AUTO") && req.Quality != "" && req.Quality != "LOW" && req.Quality != "STANDARD" {
 		if decision.metadata != nil {
-			newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, req.Quality, 0, mode)
-			if newMode != "EXTERNAL_PLAYER" {
-				mode, req.Quality = newMode, newQuality
+			originalResolved := resolved
+			originalMetadata := decision.metadata
+			originalMode := mode
+
+			resolvedQuality := false
+			if resolved.Item.Provider == "youtube" && (len(resolved.Variants) > 0 || resolved.ResolveURL != "") {
+				targetSource, probedMeta, ok := s.resolveAndProbeYouTubeSource(r.Context(), resolved, req.Quality)
+				if ok {
+					resolved = targetSource
+					decision.metadata = &probedMeta
+					resolvedQuality = true
+				} else {
+					// Fallback genuinely to Auto on failed HD resolve or probe
+					req.Quality = ""
+					resolved = originalResolved
+					decision.metadata = originalMetadata
+				}
+			}
+			if resolvedQuality || resolved.Item.Provider != "youtube" {
+				newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, req.Quality, 0, originalMode)
+				if newMode != "EXTERNAL_PLAYER" {
+					mode, req.Quality = newMode, newQuality
+				} else {
+					req.Quality = ""
+					resolved = originalResolved
+					decision.metadata = originalMetadata
+				}
 			}
 		}
 	}

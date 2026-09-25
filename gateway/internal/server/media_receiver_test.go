@@ -534,7 +534,7 @@ func TestAirPlayReceiverProbeFailureUnavailableAndPreservesSession(t *testing.T)
 	}
 }
 
-func TestAirPlayReceiverConversionFailureUnavailableAndPreservesSession(t *testing.T) {
+func TestAirPlayReceiverADTSFallbackWhenFMP4Fails(t *testing.T) {
 	privateToken := strings.Repeat("c", 32)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -564,7 +564,7 @@ func TestAirPlayReceiverConversionFailureUnavailableAndPreservesSession(t *testi
 	}
 
 	token := pair(t, s, "fmp4-fail-tv")
-	// Device where http-fmp4 fails and native HLS is not PASS
+	// The progressive ADTS fallback does not depend on fragmented MP4 playback.
 	var dev domain.Device
 	s.db.Get(t.Context(), "devices", "fmp4-fail-tv", &dev)
 	dev.Capabilities = domain.Capabilities{
@@ -582,8 +582,12 @@ func TestAirPlayReceiverConversionFailureUnavailableAndPreservesSession(t *testi
 	}
 
 	resp := call(s, "GET", "/v1/media-receiver", "", "fmp4-fail-tv", token, "")
-	if resp.Code != 502 {
-		t.Fatalf("expected 502 receiver_unavailable when conversion is unsupported, got %d: %s", resp.Code, resp.Body)
+	if resp.Code != 200 {
+		t.Fatalf("expected ADTS fallback when fragmented MP4 is unsupported, got %d: %s", resp.Code, resp.Body)
+	}
+	var snapshot inbox.Snapshot
+	if err := json.Unmarshal(resp.Body.Bytes(), &snapshot); err != nil || snapshot.Plan == nil || snapshot.Plan.Mode != "REMUX" || snapshot.Plan.MIME != "audio/aac" {
+		t.Fatalf("expected audio/aac REMUX plan, got %s: %v", resp.Body, err)
 	}
 	if strings.Contains(resp.Body.String(), privateToken) || strings.Contains(resp.Body.String(), upstream.URL) {
 		t.Fatal("secret leaked in error response", resp.Body)

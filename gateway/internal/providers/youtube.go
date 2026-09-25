@@ -53,13 +53,27 @@ func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, e
 	// The bounded worker may need more than the metadata client's five seconds
 	// to resolve both H.264 video and AAC audio. The private client retains the
 	// wrapper's longer timeout and redirect restrictions.
+	resolveURL := source.URL
+	resolveHeaders := source.Headers.Clone()
+	if source.ResolveURL != "" {
+		resolveURL = source.ResolveURL
+		resolveHeaders = source.ResolveHeaders.Clone()
+	}
+	if source.ResolveQuality != "" && source.ResolveQuality != "auto" {
+		separator := "?"
+		if strings.Contains(resolveURL, "?") {
+			separator = "&"
+		}
+		resolveURL += separator + "quality=" + url.QueryEscape(source.ResolveQuality)
+	}
+
 	var body []byte
 	var err error
 	// The single-flight worker can report busy briefly while a completed worker
 	// releases its resources. Retry that one transient status within the caller's
 	// deadline; provider failures and invalid streams remain terminal.
 	for attempt := 0; attempt < 6; attempt++ {
-		body, err = requestWithClient(ctx, a.privateHTTP, source.URL, source.Headers)
+		body, err = requestWithClient(ctx, a.privateHTTP, resolveURL, resolveHeaders)
 		if !errors.Is(err, errProviderBusy) || attempt == 5 {
 			break
 		}
@@ -73,9 +87,10 @@ func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, e
 		return source, err
 	}
 	var result struct {
-		URL      string `json:"url"`
-		AudioURL string `json:"audioUrl"`
-		MIME     string `json:"mimeType"`
+		URL      string          `json:"url"`
+		AudioURL string          `json:"audioUrl"`
+		MIME     string          `json:"mimeType"`
+		Variants json.RawMessage `json:"variants"`
 	}
 	if json.Unmarshal(body, &result) != nil {
 		return source, errors.New("invalid wrapper stream")
@@ -84,10 +99,88 @@ func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, e
 	if !youtubeStreamURL(result.URL) || (result.AudioURL != "" && !youtubeStreamURL(result.AudioURL)) || result.MIME != "video/mp4" {
 		return source, errors.New("invalid YouTube stream origin")
 	}
+	if source.ResolveURL == "" {
+		source.ResolveURL = source.URL
+		source.ResolveHeaders = source.Headers.Clone()
+	}
 	source.URL, source.MIME, source.Headers = result.URL, result.MIME, nil
 	source.AudioURL, source.AudioHeaders = result.AudioURL, nil
+	if variants := parseVariants(result.Variants); len(variants) > 0 {
+		if len(source.Variants) == 0 {
+			source.Variants = variants
+		} else {
+			seen := make(map[string]bool)
+			merged := make([]string, 0, len(variants)+len(source.Variants))
+			for _, v := range variants {
+				if !seen[v] {
+					seen[v] = true
+					merged = append(merged, v)
+				}
+			}
+			for _, v := range source.Variants {
+				if !seen[v] {
+					seen[v] = true
+					merged = append(merged, v)
+				}
+			}
+			source.Variants = boundVariants(merged)
+		}
+	}
 
 	return source, nil
+}
+
+var allowedVariantTiers = map[string]bool{
+	"2160p": true,
+	"1440p": true,
+	"1080p": true,
+	"720p":  true,
+	"480p":  true,
+	"360p":  true,
+	"240p":  true,
+	"144p":  true,
+}
+
+func parseVariants(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var stringsList []string
+	if err := json.Unmarshal(raw, &stringsList); err == nil {
+		return boundVariants(stringsList)
+	}
+	var objects []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &objects); err == nil {
+		out := make([]string, 0, len(objects))
+		for _, obj := range objects {
+			if obj.ID != "" {
+				out = append(out, obj.ID)
+			}
+		}
+		return boundVariants(out)
+	}
+	return nil
+}
+
+func boundVariants(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, id := range items {
+		id = strings.TrimSpace(id)
+		if allowedVariantTiers[id] && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+			if len(out) >= 8 {
+				break
+			}
+		}
+	}
+	return out
 }
 
 func youtubeStreamURL(raw string) bool {

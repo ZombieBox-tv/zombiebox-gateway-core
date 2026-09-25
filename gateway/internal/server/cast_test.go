@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/playback"
 )
@@ -145,9 +146,9 @@ func TestCastWireNegotiatesCeilingWithoutRaisingOldSenders(t *testing.T) {
 		t.Fatal(err)
 	}
 	receiver.Preferences.AllowCasting = true
-	receiver.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: "bound", Probes: []domain.Probe{
+	receiver.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: devices.ProbeCacheKey(receiver), Probes: []domain.Probe{
 		{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
-		{ID: "hls", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
 	}}
 	if err := s.db.Put(t.Context(), "devices", receiver.ID, receiver); err != nil {
 		t.Fatal(err)
@@ -157,7 +158,8 @@ func TestCastWireNegotiatesCeilingWithoutRaisingOldSenders(t *testing.T) {
 		status, height int
 	}{
 		{"", 201, 360}, {`,"maxVideoHeight":720`, 201, 360},
-		{`,"maxVideoHeight":1080`, 201, 1080}, {`,"maxVideoHeight":2160`, 400, 0}, {`,"maxVideoHeight":0`, 400, 0},
+		{`,"maxVideoHeight":1080`, 201, 1080}, {`,"maxVideoHeight":2160`, 201, 1080},
+		{`,"maxVideoHeight":0`, 400, 0}, {`,"maxVideoHeight":4320`, 400, 0},
 	} {
 		w := call(s, "POST", "/v1/cast", `{"receiverId":"receiver-ceiling"`+example.extra+`}`, "sender-ceiling", token, "")
 		if w.Code != example.status {
@@ -175,6 +177,60 @@ func TestCastWireNegotiatesCeilingWithoutRaisingOldSenders(t *testing.T) {
 		}
 		if grant.Video.MaxHeight != example.height {
 			t.Fatal(grant)
+		}
+		if w = call(s, "DELETE", "/v1/cast/"+grant.CastID, "", "sender-ceiling", token, ""); w.Code != 200 {
+			t.Fatal(w.Body)
+		}
+	}
+
+	// Receiver with verified 4K probes and display evidence
+	receiver4KToken := pair(t, s, "receiver-4k")
+	call(s, "GET", "/v1/device", "", "receiver-4k", receiver4KToken, "")
+	var receiver4K domain.Device
+	if err := s.db.Get(t.Context(), "devices", "receiver-4k", &receiver4K); err != nil {
+		t.Fatal(err)
+	}
+	receiver4K.Preferences.AllowCasting = true
+	receiver4K.Registration.Display = domain.Display{Width: 3840, Height: 2160}
+	receiver4K.Registration.Hardware = &domain.HardwareReport{Displays: []domain.DisplayHint{{Default: true, Modes: []domain.DisplayModeHint{{Height: 2160}}}}}
+	receiver4K.Registration.Memory.PhysicalMB = 2048
+	receiver4K.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: devices.ProbeCacheKey(receiver4K), Probes: []domain.Probe{
+		{ID: "h264-2160-high", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+	}}
+	if err := s.db.Put(t.Context(), "devices", receiver4K.ID, receiver4K); err != nil {
+		t.Fatal(err)
+	}
+	for _, example := range []struct {
+		extra          string
+		status, height int
+	}{
+		{"", 201, 360},
+		{`,"maxVideoHeight":720`, 201, 360},
+		{`,"maxVideoHeight":1080`, 201, 1080},
+		{`,"maxVideoHeight":2160`, 201, 2160},
+		{`,"maxVideoHeight":4320`, 400, 0},
+	} {
+		w := call(s, "POST", "/v1/cast", `{"receiverId":"receiver-4k"`+example.extra+`}`, "sender-ceiling", token, "")
+		if w.Code != example.status {
+			t.Fatal(w.Code, w.Body)
+		}
+		if w.Code != 201 {
+			continue
+		}
+		var grant struct {
+			CastID string
+			Video  playback.CastVideo
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
+			t.Fatal(err)
+		}
+		if grant.Video.MaxHeight != example.height {
+			t.Fatal(grant)
+		}
+		if example.height == 2160 && (grant.Video.MaxWidth != 3840 || grant.Video.Bitrate != 12000000) {
+			t.Fatal("unexpected 4K video parameters", grant.Video)
 		}
 		if w = call(s, "DELETE", "/v1/cast/"+grant.CastID, "", "sender-ceiling", token, ""); w.Code != 200 {
 			t.Fatal(w.Body)

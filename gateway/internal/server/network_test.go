@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/providers"
 )
@@ -75,6 +76,17 @@ func TestPlaybackAppliesNetworkQualityAndRespectsOverrides(t *testing.T) {
 	s := testServer(t, nil, dir)
 	s.deps.Media = &networkMedia{}
 	token := pair(t, s, "network-playback")
+	var device domain.Device
+	if err := s.db.Get(t.Context(), "devices", "network-playback", &device); err != nil {
+		t.Fatal(err)
+	}
+	device.Capabilities = domain.Capabilities{SuiteVersion: devices.ProbeSuiteVersion, CacheKey: devices.ProbeCacheKey(device), Probes: []domain.Probe{
+		{ID: "http-progressive", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+	}}
+	if err := s.db.Put(t.Context(), "devices", device.ID, device); err != nil {
+		t.Fatal(err)
+	}
 	sources, err := providers.Local(dir)
 	if err != nil || len(sources) != 1 {
 		t.Fatal(err)

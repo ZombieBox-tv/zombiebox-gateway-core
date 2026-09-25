@@ -77,7 +77,7 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 }
 
 func trackDecision(metadata domain.Metadata, requested string, source domain.Source, device domain.Device) playbackDecision {
-	mode := playback.LocalMode(metadata, source.MIME, device.Capabilities, requested)
+	mode := playback.LocalModeSource(metadata, source, device.Capabilities, requested)
 	decision := playbackDecision{mode: mode, metadata: &metadata}
 	// Split YouTube inputs and live streams have no stable single-input track IDs.
 	if source.Live || source.AudioURL != "" {

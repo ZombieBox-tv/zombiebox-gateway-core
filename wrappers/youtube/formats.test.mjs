@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveFormats } from "./formats.mjs";
+import { resolveFormats, getAvailableVariants } from "./formats.mjs";
 const format = (url, video, audio) => ({
   has_video: video,
   has_audio: audio,
@@ -12,16 +12,16 @@ test("combined stream wins over adaptive at the same resolution", async () => {
     {
       chooseFormat(options) {
         calls.push(`${options.type}:${options.quality}`);
-        if (options.quality === "1080p") throw new Error("missing");
         return format("combined", true, true);
       },
     },
     {},
   );
   assert.deepEqual(result, { url: "combined", mimeType: "video/mp4" });
-  assert.deepEqual(calls, ["video+audio:360p", "video:1080p", "video+audio:720p"]);
+  assert.deepEqual(calls, ["video+audio:360p"]);
 });
-test("validated 1080p adaptive source beats a lower combined stream", async () => {
+
+test("auto keeps valid 360p progressive baseline when HD adaptive exists", async () => {
   const calls = [];
   const result = await resolveFormats(
     {
@@ -30,14 +30,34 @@ test("validated 1080p adaptive source beats a lower combined stream", async () =
         if (options.type === "video" && options.quality === "1080p")
           return format("high-video", true, false);
         if (options.type === "audio") return format("aac", false, true);
-        if (options.type === "video+audio") return format("low-combined", true, true);
+        if (options.type === "video+audio" && options.quality === "360p")
+          return format("baseline-360", true, true);
+        throw new Error("missing");
+      },
+    },
+    {},
+  );
+  assert.deepEqual(result, { url: "baseline-360", mimeType: "video/mp4" });
+  assert.deepEqual(calls, ["video+audio:360p"]);
+});
+
+test("when baseline 360p is unavailable, auto falls back to validated adaptive HD", async () => {
+  const calls = [];
+  const result = await resolveFormats(
+    {
+      chooseFormat(options) {
+        calls.push(`${options.type}:${options.quality}`);
+        if (options.type === "video+audio" && options.quality === "360p")
+          throw new Error("baseline missing");
+        if (options.type === "video" && options.quality === "1080p")
+          return format("high-video", true, false);
+        if (options.type === "audio") return format("aac", false, true);
         throw new Error("missing");
       },
     },
     {},
   );
   assert.deepEqual(result, { url: "high-video", audioUrl: "aac", mimeType: "video/mp4" });
-  assert.deepEqual(calls, ["video+audio:360p", "video:1080p", "audio:bestefficiency"]);
 });
 test("adaptive selection requires separate audio and bounds video resolution", async () => {
   const calls = [];
@@ -152,4 +172,90 @@ test("failed combined and low-rate audio try another bounded format", async () =
   );
   assert.deepEqual(result, { url: "video", audioUrl: "high-audio", mimeType: "video/mp4" });
   assert.deepEqual(selected, ["combined", "video", "low-audio", "high-audio"]);
+});
+
+test("getAvailableVariants lists only tiers with video and available audio", async () => {
+  const infoWithHD = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("aac", false, true);
+      if (options.type === "video" && (options.quality === "1080p" || options.quality === "720p")) {
+        return format("hd-video", true, false);
+      }
+      if (options.type === "video+audio" && options.quality === "360p") {
+        return format("combined-360", true, true);
+      }
+      throw new Error("missing");
+    },
+  };
+  assert.deepEqual(await getAvailableVariants(infoWithHD), ["1080p", "720p", "360p"]);
+
+  const infoMissingAudio = {
+    chooseFormat(options) {
+      if (options.type === "audio") throw new Error("no audio");
+      if (options.type === "video" && options.quality === "1080p")
+        return format("video", true, false);
+      if (options.type === "video+audio" && options.quality === "360p")
+        return format("combined", true, true);
+      throw new Error("missing");
+    },
+  };
+  assert.deepEqual(await getAvailableVariants(infoMissingAudio), ["360p"]);
+
+  const infoSDOnly = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("aac", false, true);
+      if (options.type === "video+audio" && options.quality === "360p")
+        return format("combined", true, true);
+      throw new Error("missing");
+    },
+  };
+  assert.deepEqual(await getAvailableVariants(infoSDOnly), ["360p"]);
+});
+
+test("getAvailableVariants omits tiers whose video or audio URLs fail validation", async () => {
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("https://r.googlevideo.com/audio", false, true);
+      if (options.type === "video" && options.quality === "1080p")
+        return format("https://r.googlevideo.com/video-1080-fail", true, false);
+      if (options.type === "video" && options.quality === "720p")
+        return format("https://r.googlevideo.com/video-720-ok", true, false);
+      if (options.type === "video+audio" && options.quality === "360p")
+        return format("https://r.googlevideo.com/combined-360", true, true);
+      throw new Error("missing");
+    },
+  };
+
+  const validate = async (url) => !url.includes("fail");
+  const result = await getAvailableVariants(info, {}, validate);
+  assert.deepEqual(result, ["720p", "360p"]);
+
+  // If audio fails validation, adaptive 720p must also be omitted:
+  const validateAudioFail = async (url) => !url.includes("audio") && !url.includes("fail");
+  const resultAudioFail = await getAvailableVariants(info, {}, validateAudioFail);
+  assert.deepEqual(resultAudioFail, ["360p"]);
+});
+
+test("resolveFormats with targetQuality returns requested tier or errors", async () => {
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("aac-audio", false, true);
+      if (options.type === "video" && options.quality === "720p")
+        return format("720-video", true, false);
+      if (options.type === "video+audio" && options.quality === "360p")
+        return format("360-combined", true, true);
+      throw new Error("missing");
+    },
+  };
+
+  const res720 = await resolveFormats(info, {}, async () => true, "720p");
+  assert.deepEqual(res720, { url: "720-video", audioUrl: "aac-audio", mimeType: "video/mp4" });
+
+  const res360 = await resolveFormats(info, {}, async () => true, "360p");
+  assert.deepEqual(res360, { url: "360-combined", mimeType: "video/mp4" });
+
+  await assert.rejects(
+    resolveFormats(info, {}, async () => true, "1080p"),
+    /video_unavailable/,
+  );
 });

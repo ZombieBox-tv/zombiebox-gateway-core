@@ -68,9 +68,14 @@ func TestPreferredAudioPlanningAcrossLocalRemoteAndManifestSources(t *testing.T)
 				if tc.split {
 					source.AudioURL = "https://media.test/audio"
 				}
-				device := domain.Device{Preferences: domain.Preferences{AudioLanguages: []string{tc.language}}}
+				now := time.Now().Unix()
+				device := domain.Device{Preferences: domain.Preferences{AudioLanguages: []string{tc.language}}, Capabilities: domain.Capabilities{Probes: []domain.Probe{
+					{ID: "http-progressive", Status: "PASS", PositionMS: 1000, TestedAt: now},
+					{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+					{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+				}}}
 				if tc.failed != "" {
-					device.Capabilities.Probes = []domain.Probe{{ID: tc.failed, Status: "FAIL"}}
+					device.Capabilities.Probes = append(device.Capabilities.Probes, domain.Probe{ID: tc.failed, Status: "FAIL", TestedAt: now})
 				}
 				s := testServer(t, nil, "")
 				s.deps.Media, s.deps.RemoteMedia = adapter, adapter

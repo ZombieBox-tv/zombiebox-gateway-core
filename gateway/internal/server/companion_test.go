@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/companion"
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/playback"
 )
@@ -93,9 +94,9 @@ func TestCompanionCastCannotChooseAnotherTargetAndRevokeRetiresLease(t *testing.
 	if err = s.db.Get(t.Context(), "devices", "paired-television", &target); err != nil {
 		t.Fatal(err)
 	}
-	target.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: "bound", Probes: []domain.Probe{
+	target.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: devices.ProbeCacheKey(target), Probes: []domain.Probe{
 		{ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
-		{ID: "hls", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
 	}}
 	if err = s.db.Put(t.Context(), "devices", target.ID, target); err != nil {
 		t.Fatal(err)

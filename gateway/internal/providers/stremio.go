@@ -48,7 +48,7 @@ func (a *Adapters) Resolve(ctx context.Context, source Source) (Source, error) {
 	if source.MIME == "application/x-zombie-plex" {
 		return a.resolvePlex(ctx, source)
 	}
-	if source.MIME == "application/x-zombie-youtube" {
+	if source.MIME == "application/x-zombie-youtube" || (source.Item.Provider == "youtube" && source.ResolveURL != "") {
 		return a.resolveYouTube(ctx, source)
 	}
 	if source.MIME != "application/x-zombie-stremio" {

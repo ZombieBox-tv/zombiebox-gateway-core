@@ -57,7 +57,7 @@ func TestAdaptivePlaybackNeverReturnsVideoOnlyOrIgnoresFailedFragmentProbe(t *te
 			t.Fatal("accepted video-only mode", requested)
 		}
 	}
-	device.Capabilities.Probes = []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}
+	device.Capabilities.Probes = []domain.Probe{{ID: "http-fmp4", Status: "FAIL", TestedAt: time.Now().Unix()}}
 	if _, err := s.playbackMode(context.Background(), source, device, ""); err == nil {
 		t.Fatal("ignored failed fragment probe")
 	}
@@ -75,7 +75,12 @@ func TestYouTubeCombinedStreamUsesBoundedGatewayProgressiveRelay(t *testing.T) {
 	s := testServer(t, nil, t.TempDir())
 	s.deps.RemoteMedia = remoteMediaStub{}
 	source := domain.Source{Item: domain.Item{Provider: "youtube"}, URL: "https://r1.googlevideo.com/clip", MIME: "video/mp4"}
-	if mode, err := s.playbackMode(t.Context(), source, domain.Device{}, "AUTO"); err != nil || mode.mode != "DIRECT_PLAY" {
+	device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-progressive", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+	}}}
+	if mode, err := s.playbackMode(t.Context(), source, device, "AUTO"); err != nil || mode.mode != "DIRECT_PLAY" {
 		t.Fatal(mode, err)
 	}
 	for _, requested := range []string{"DIRECT_PLAY", "EXTERNAL_PLAYER"} {
@@ -83,7 +88,7 @@ func TestYouTubeCombinedStreamUsesBoundedGatewayProgressiveRelay(t *testing.T) {
 			t.Fatal("YouTube bypassed finite range relay", requested)
 		}
 	}
-	device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}}}
+	device.Capabilities.Probes = append(device.Capabilities.Probes, domain.Probe{ID: "http-fmp4", Status: "FAIL", TestedAt: time.Now().Unix()})
 	if mode, err := s.playbackMode(t.Context(), source, device, "AUTO"); err != nil || mode.mode != "DIRECT_PLAY" {
 		t.Fatal("fragment probe incorrectly blocked progressive MP4", mode, err)
 	}
@@ -153,7 +158,7 @@ func TestManifestAutoConvertsBothLiveAndVod(t *testing.T) {
 			if mode, err := s.playbackMode(t.Context(), source, domain.Device{}, "AUTO"); err != nil || mode.mode != "REMUX" {
 				t.Fatal(mime, live, mode, err)
 			}
-			device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL"}}}}
+			device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{{ID: "http-fmp4", Status: "FAIL", TestedAt: time.Now().Unix()}}}}
 			if mode, err := s.playbackMode(t.Context(), source, device, "AUTO"); err != nil || mode.mode != "EXTERNAL_PLAYER" {
 				t.Fatal(mode, err)
 			}
