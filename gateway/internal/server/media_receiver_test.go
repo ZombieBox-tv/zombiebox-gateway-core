@@ -3,13 +3,17 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/providers"
 	"zombiebox.local/gateway/internal/receivers/inbox"
@@ -103,6 +107,23 @@ func TestAirPlayVideoToAudioReplacesOwnedStreamAndRetiresOldTicket(t *testing.T)
 		t.Fatal(err)
 	}
 	token := pair(t, s, "airplay-switch")
+	var dev domain.Device
+	if err := s.db.Get(t.Context(), "devices", "airplay-switch", &dev); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1500, TestedAt: now},
+			{ID: "h264-720-main", Status: "PASS", PositionMS: 1500, TestedAt: now},
+			{ID: "aac", Status: "PASS", PositionMS: 800, TestedAt: now},
+		},
+	}
+	if err := s.db.Put(t.Context(), "devices", dev.ID, dev); err != nil {
+		t.Fatal(err)
+	}
 	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "airplay-switch", token, ""); w.Code != 200 {
 		t.Fatal(w.Body)
 	}
@@ -215,5 +236,456 @@ func TestSpotifyMetadataPauseAndNaturalEndKeepThenRevokeStream(t *testing.T) {
 	}
 	if w := call(s, "GET", first.Plan.URL, "", "", "", ""); w.Code != http.StatusUnauthorized {
 		t.Fatal("ended Spotify ticket survived", w.Code)
+	}
+}
+
+type mockReceiverRemoteMedia struct {
+	probeFunc   func(context.Context, domain.Source) (domain.Metadata, error)
+	convertFunc func(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error
+}
+
+func (m *mockReceiverRemoteMedia) ProbeRemote(ctx context.Context, s domain.Source) (domain.Metadata, error) {
+	if m.probeFunc != nil {
+		return m.probeFunc(ctx, s)
+	}
+	return domain.Metadata{}, errors.New("probe not implemented")
+}
+
+func (m *mockReceiverRemoteMedia) ConvertRemote(ctx context.Context, s domain.Source, mode string, sel domain.MediaSelection, out io.Writer) error {
+	if m.convertFunc != nil {
+		return m.convertFunc(ctx, s, mode, sel, out)
+	}
+	return errors.New("convert not implemented")
+}
+
+func TestAirPlayReceiverVizioFallbackToGatewayRemux(t *testing.T) {
+	privateToken := strings.Repeat("k", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+privateToken {
+			t.Error("AirPlay worker request lost its private token")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/status":
+			fmt.Fprint(w, `{"active":false,"audioActive":true,"metadata":{"title":"Vizio AirPlay Track","artist":"Apple Music","album":"Test Album"}}`)
+		case "/stream/audio.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\naudio.ts\n")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+
+	mockRemote := &mockReceiverRemoteMedia{
+		probeFunc: func(_ context.Context, src domain.Source) (domain.Metadata, error) {
+			meta := domain.Metadata{
+				Streams: []domain.Stream{
+					{Type: "audio", Codec: "aac", Index: 0},
+				},
+			}
+			meta.Format.Name = "hls,applehttp"
+			return meta, nil
+		},
+		convertFunc: func(_ context.Context, src domain.Source, mode string, _ domain.MediaSelection, out io.Writer) error {
+			if mode != "REMUX" {
+				return fmt.Errorf("unexpected mode: %s", mode)
+			}
+			_, err := io.WriteString(out, "fmp4-audio-fixture-bytes")
+			return err
+		},
+	}
+	s.deps.RemoteMedia = mockRemote
+
+	token := pair(t, s, "vizio-tv")
+	var dev domain.Device
+	if err := s.db.Get(t.Context(), "devices", "vizio-tv", &dev); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	// Stored Vizio probes: AAC PASS, mpegts-h264-aac PASS, http-fmp4 PASS, hls-h264-aac UNKNOWN (or absent)
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			{ID: "mpegts-h264-aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+			{ID: "hls-h264-aac", Status: "UNKNOWN", TestedAt: now},
+		},
+	}
+	if err := s.db.Put(t.Context(), "devices", dev.ID, dev); err != nil {
+		t.Fatal(err)
+	}
+
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "vizio-tv", token, ""); w.Code != 200 {
+		t.Fatalf("PUT failed: %d %s", w.Code, w.Body)
+	}
+
+	resp := call(s, "GET", "/v1/media-receiver", "", "vizio-tv", token, "")
+	if resp.Code != 200 {
+		t.Fatalf("GET /v1/media-receiver failed: %d %s", resp.Code, resp.Body)
+	}
+	if strings.Contains(resp.Body.String(), privateToken) || strings.Contains(resp.Body.String(), upstream.URL) {
+		t.Fatal("secret token or upstream URL leaked in response", resp.Body)
+	}
+
+	var snapshot inbox.Snapshot
+	if err := json.Unmarshal(resp.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Plan == nil {
+		t.Fatal("expected non-nil plan in snapshot")
+	}
+	plan := snapshot.Plan
+	if plan.Mode != "REMUX" {
+		t.Fatalf("expected REMUX mode for Vizio fallback, got %s", plan.Mode)
+	}
+	if plan.MIME != "audio/mp4" {
+		t.Fatalf("expected audio/mp4 MIME for audio-only plan, got %s", plan.MIME)
+	}
+	if plan.Item.Kind != "audio" {
+		t.Fatalf("expected audio kind, got %s", plan.Item.Kind)
+	}
+	if plan.Item.Title != "Vizio AirPlay Track" {
+		t.Fatalf("expected title 'Vizio AirPlay Track', got %s", plan.Item.Title)
+	}
+	if plan.Live != true || plan.Seekable != false {
+		t.Fatalf("expected live and non-seekable plan, got live=%v seekable=%v", plan.Live, plan.Seekable)
+	}
+	if !strings.HasPrefix(plan.URL, "/v1/streams/") {
+		t.Fatalf("expected stream URL starting with /v1/streams/, got %s", plan.URL)
+	}
+
+	// Stream serving test
+	streamResp := call(s, "GET", plan.URL, "", "", "", "")
+	if streamResp.Code != 200 {
+		t.Fatalf("stream serving failed: %d %s", streamResp.Code, streamResp.Body)
+	}
+	if streamResp.Header().Get("Content-Type") != "audio/mp4" {
+		t.Fatalf("expected Content-Type audio/mp4, got %s", streamResp.Header().Get("Content-Type"))
+	}
+	if streamResp.Body.String() != "fmp4-audio-fixture-bytes" {
+		t.Fatalf("expected fixture bytes, got %s", streamResp.Body.String())
+	}
+	if strings.Contains(streamResp.Body.String(), privateToken) || strings.Contains(streamResp.Body.String(), upstream.URL) {
+		t.Fatal("secret leaked in stream response")
+	}
+}
+
+func TestAirPlayReceiverFreshHLSPASSDirect(t *testing.T) {
+	privateToken := strings.Repeat("h", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+privateToken {
+			t.Error("AirPlay worker request lost its private token")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/status":
+			fmt.Fprint(w, `{"active":false,"audioActive":true,"metadata":{"title":"Direct HLS Track","artist":"Direct Artist"}}`)
+		case "/stream/audio.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\naudio.ts\n")
+		case "/stream/audio.ts":
+			fmt.Fprint(w, "direct-hls-ts-data")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.deps.RemoteMedia = &mockReceiverRemoteMedia{
+		probeFunc: func(_ context.Context, src domain.Source) (domain.Metadata, error) {
+			meta := domain.Metadata{
+				Streams: []domain.Stream{
+					{Type: "audio", Codec: "aac", Index: 0},
+				},
+			}
+			meta.Format.Name = "hls,applehttp"
+			return meta, nil
+		},
+	}
+
+	token := pair(t, s, "direct-hls-tv")
+	var dev domain.Device
+	if err := s.db.Get(t.Context(), "devices", "direct-hls-tv", &dev); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1500, TestedAt: now},
+			{ID: "h264-720-main", Status: "PASS", PositionMS: 1500, TestedAt: now},
+			{ID: "aac", Status: "PASS", PositionMS: 800, TestedAt: now},
+			{ID: "http-fmp4", Status: "PASS", PositionMS: 800, TestedAt: now},
+		},
+	}
+	if err := s.db.Put(t.Context(), "devices", dev.ID, dev); err != nil {
+		t.Fatal(err)
+	}
+
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "direct-hls-tv", token, ""); w.Code != 200 {
+		t.Fatalf("PUT failed: %d %s", w.Code, w.Body)
+	}
+
+	resp := call(s, "GET", "/v1/media-receiver", "", "direct-hls-tv", token, "")
+	if resp.Code != 200 {
+		t.Fatalf("GET failed: %d %s", resp.Code, resp.Body)
+	}
+	if strings.Contains(resp.Body.String(), privateToken) || strings.Contains(resp.Body.String(), upstream.URL) {
+		t.Fatal("secret leaked in response", resp.Body)
+	}
+
+	var snapshot inbox.Snapshot
+	if err := json.Unmarshal(resp.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Plan == nil {
+		t.Fatal("expected non-nil plan")
+	}
+	plan := snapshot.Plan
+	if plan.Mode != "DIRECT_PLAY" {
+		t.Fatalf("expected DIRECT_PLAY mode for fresh HLS PASS, got %s", plan.Mode)
+	}
+	if plan.MIME != "application/vnd.apple.mpegurl" {
+		t.Fatalf("expected application/vnd.apple.mpegurl MIME, got %s", plan.MIME)
+	}
+
+	// Stream serving should serve rewritten HLS playlist
+	streamResp := call(s, "GET", plan.URL, "", "", "", "")
+	if streamResp.Code != 200 {
+		t.Fatalf("stream serving failed: %d %s", streamResp.Code, streamResp.Body)
+	}
+	if streamResp.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" {
+		t.Fatalf("expected mpegurl Content-Type, got %s", streamResp.Header().Get("Content-Type"))
+	}
+	if strings.Contains(streamResp.Body.String(), upstream.URL) || strings.Contains(streamResp.Body.String(), privateToken) {
+		t.Fatal("upstream URL or private token leaked in playlist", streamResp.Body)
+	}
+
+	// Read segment
+	lines := strings.Split(strings.TrimSpace(streamResp.Body.String()), "\n")
+	segmentPath := lines[len(lines)-1]
+	segResp := call(s, "GET", segmentPath, "", "", "", "")
+	if segResp.Code != 200 || segResp.Body.String() != "direct-hls-ts-data" {
+		t.Fatalf("segment fetch failed: %d %s", segResp.Code, segResp.Body)
+	}
+}
+
+func TestAirPlayReceiverProbeFailureUnavailableAndPreservesSession(t *testing.T) {
+	privateToken := strings.Repeat("p", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			fmt.Fprint(w, `{"active":false,"audioActive":true,"metadata":{"title":"Failing Probe"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.deps.RemoteMedia = &mockReceiverRemoteMedia{
+		probeFunc: func(_ context.Context, _ domain.Source) (domain.Metadata, error) {
+			return domain.Metadata{}, errors.New("upstream worker probe error")
+		},
+	}
+
+	token := pair(t, s, "probe-fail-tv")
+	// Device with Vizio-like probes (no HLS PASS)
+	var dev domain.Device
+	s.db.Get(t.Context(), "devices", "probe-fail-tv", &dev)
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		},
+	}
+	s.db.Put(t.Context(), "devices", dev.ID, dev)
+
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "probe-fail-tv", token, ""); w.Code != 200 {
+		t.Fatalf("PUT failed: %d %s", w.Code, w.Body)
+	}
+
+	resp := call(s, "GET", "/v1/media-receiver", "", "probe-fail-tv", token, "")
+	if resp.Code != 502 {
+		t.Fatalf("expected 502 receiver_unavailable on probe failure, got %d: %s", resp.Code, resp.Body)
+	}
+	if strings.Contains(resp.Body.String(), privateToken) || strings.Contains(resp.Body.String(), upstream.URL) {
+		t.Fatal("secret leaked in error response", resp.Body)
+	}
+}
+
+func TestAirPlayReceiverConversionFailureUnavailableAndPreservesSession(t *testing.T) {
+	privateToken := strings.Repeat("c", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			fmt.Fprint(w, `{"active":false,"audioActive":true,"metadata":{"title":"Unsupported Track"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.deps.RemoteMedia = &mockReceiverRemoteMedia{
+		probeFunc: func(_ context.Context, _ domain.Source) (domain.Metadata, error) {
+			meta := domain.Metadata{
+				Streams: []domain.Stream{
+					{Type: "audio", Codec: "aac", Index: 0},
+				},
+			}
+			meta.Format.Name = "hls,applehttp"
+			return meta, nil
+		},
+	}
+
+	token := pair(t, s, "fmp4-fail-tv")
+	// Device where http-fmp4 fails and native HLS is not PASS
+	var dev domain.Device
+	s.db.Get(t.Context(), "devices", "fmp4-fail-tv", &dev)
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "http-fmp4", Status: "FAIL", PositionMS: 0, TestedAt: time.Now().Unix()},
+		},
+	}
+	s.db.Put(t.Context(), "devices", dev.ID, dev)
+
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "fmp4-fail-tv", token, ""); w.Code != 200 {
+		t.Fatalf("PUT failed: %d %s", w.Code, w.Body)
+	}
+
+	resp := call(s, "GET", "/v1/media-receiver", "", "fmp4-fail-tv", token, "")
+	if resp.Code != 502 {
+		t.Fatalf("expected 502 receiver_unavailable when conversion is unsupported, got %d: %s", resp.Code, resp.Body)
+	}
+	if strings.Contains(resp.Body.String(), privateToken) || strings.Contains(resp.Body.String(), upstream.URL) {
+		t.Fatal("secret leaked in error response", resp.Body)
+	}
+}
+
+func TestAirPlayReceiverPreservesPreviousWorkingSessionOnSubsequentFailure(t *testing.T) {
+	privateToken := strings.Repeat("w", 32)
+	isAudio := atomic.Bool{}
+	isAudio.Store(false)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			if !isAudio.Load() {
+				fmt.Fprint(w, `{"active":true,"audioActive":false,"metadata":{"title":"Working Screen Video"}}`)
+			} else {
+				fmt.Fprint(w, `{"active":false,"audioActive":true,"metadata":{"title":"Broken Audio Track"}}`)
+			}
+		case "/stream/index.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXTINF:1,\nvideo.ts\n")
+		case "/stream/audio.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXTINF:1,\naudio.ts\n")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+
+	probeFailing := atomic.Bool{}
+	s.deps.RemoteMedia = &mockReceiverRemoteMedia{
+		probeFunc: func(_ context.Context, src domain.Source) (domain.Metadata, error) {
+			if probeFailing.Load() {
+				return domain.Metadata{}, errors.New("probe failure on track 2")
+			}
+			meta := domain.Metadata{
+				Streams: []domain.Stream{
+					{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+					{Type: "audio", Codec: "aac", Index: 1},
+				},
+			}
+			meta.Format.Name = "hls,applehttp"
+			return meta, nil
+		},
+		convertFunc: func(_ context.Context, _ domain.Source, _ string, _ domain.MediaSelection, out io.Writer) error {
+			_, err := io.WriteString(out, "fmp4-working-track-1")
+			return err
+		},
+	}
+
+	token := pair(t, s, "preserve-tv")
+	var dev domain.Device
+	s.db.Get(t.Context(), "devices", "preserve-tv", &dev)
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+			{ID: "h264-720-main", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix()},
+		},
+	}
+	s.db.Put(t.Context(), "devices", dev.ID, dev)
+
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "preserve-tv", token, ""); w.Code != 200 {
+		t.Fatal(w.Body)
+	}
+
+	// Stream 1 (video) succeeds and creates session
+	r1 := call(s, "GET", "/v1/media-receiver", "", "preserve-tv", token, "")
+	if r1.Code != 200 {
+		t.Fatalf("first stream failed: %d %s", r1.Code, r1.Body)
+	}
+	var snap1 inbox.Snapshot
+	json.Unmarshal(r1.Body.Bytes(), &snap1)
+	if snap1.Plan == nil || snap1.Plan.Item.ID != "airplay-live" {
+		t.Fatalf("unexpected snapshot 1: %+v", snap1)
+	}
+
+	// Verify stream 1 plays
+	streamR1 := call(s, "GET", snap1.Plan.URL, "", "", "", "")
+	if streamR1.Code != 200 || streamR1.Body.String() != "fmp4-working-track-1" {
+		t.Fatalf("stream 1 failed: %d %s", streamR1.Code, streamR1.Body)
+	}
+
+	// Now source 2 (audio) arrives, but its probe fails
+	isAudio.Store(true)
+	probeFailing.Store(true)
+
+	r2 := call(s, "GET", "/v1/media-receiver", "", "preserve-tv", token, "")
+	if r2.Code != 502 {
+		t.Fatalf("expected 502 on broken stream 2, got %d: %s", r2.Code, r2.Body)
+	}
+
+	// Working stream 1 must still be alive and accessible (session was preserved)
+	streamR1Again := call(s, "GET", snap1.Plan.URL, "", "", "", "")
+	if streamR1Again.Code != 200 || streamR1Again.Body.String() != "fmp4-working-track-1" {
+		t.Fatalf("stream 1 was terminated when stream 2 failed: %d %s", streamR1Again.Code, streamR1Again.Body)
 	}
 }

@@ -13,11 +13,11 @@ type replaceSessions struct {
 	fail bool
 }
 
-func (s *replaceSessions) Start(owner string, source domain.Source) (domain.Plan, error) {
+func (s *replaceSessions) Start(ctx context.Context, owner string, source domain.Source) (domain.Plan, error) {
 	if s.fail {
 		return domain.Plan{}, ErrBusy
 	}
-	return s.sessions.Start(owner, source)
+	return s.sessions.Start(ctx, owner, source)
 }
 
 func TestAutomaticHandoffDebouncesAndPreservesConfirmedSession(t *testing.T) {

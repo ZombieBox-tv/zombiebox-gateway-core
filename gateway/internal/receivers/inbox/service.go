@@ -19,7 +19,7 @@ type Backend interface {
 	Read(context.Context, string) (*domain.Source, domain.NowPlaying, error)
 }
 type Sessions interface {
-	Start(string, domain.Source) (domain.Plan, error)
+	Start(context.Context, string, domain.Source) (domain.Plan, error)
 	Stop(string)
 }
 type Snapshot struct {
@@ -162,7 +162,16 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 		key := sha256.Sum256(keyData)
 		if s.plan == nil || s.plan.Item.ID != source.Item.ID || s.sourceKey != key {
 			// Preserve the confirmed stream if replacement allocation fails.
-			plan, err := s.sessions.Start(owner, *source)
+			s.mu.Unlock()
+			plan, err := s.sessions.Start(request, owner, *source)
+			s.mu.Lock()
+			s.expire()
+			if s.owner != owner || s.generation != generation {
+				if err == nil {
+					s.sessions.Stop(plan.SessionID)
+				}
+				return Snapshot{}, ErrChanged
+			}
 			if err != nil {
 				return Snapshot{}, err
 			}

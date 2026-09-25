@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,11 +49,22 @@ func Handler(ctx context.Context, c Config) http.Handler {
 	return HandlerWithSpotifyDiagnostics(ctx, c, nil)
 }
 
+func spotifyDaemonURL() string {
+	if raw := os.Getenv("ZOMBIE_SPOTIFY_DAEMON_URL"); raw != "" {
+		u, err := url.Parse(raw)
+		if err == nil && u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost") && u.Port() != "" && u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == "" {
+			return raw
+		}
+	}
+	return "http://127.0.0.1:3678"
+}
+
 // HandlerWithSpotifyDiagnostics adds only fixed failure categories to the
 // authenticated private worker health route; raw daemon output is never served.
 func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics) http.Handler {
 	mux := http.NewServeMux()
 	var bridge *spotifyBridge
+	daemonURL := spotifyDaemonURL()
 	client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	proxy := func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
@@ -60,7 +72,7 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			http.Error(w, "invalid request", 400)
 			return
 		}
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, "http://127.0.0.1:3678"+r.URL.Path, strings.NewReader(string(body)))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, daemonURL+r.URL.Path, strings.NewReader(string(body)))
 		if err != nil {
 			http.Error(w, "invalid request", 400)
 			return
@@ -77,32 +89,83 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			http.Error(w, "invalid response", 502)
 			return
 		}
-		if bridge != nil && (res.StatusCode == 200 || res.StatusCode == 204) {
+		if c.Mode == "spotify" && (res.StatusCode == 200 || res.StatusCode == 204) {
 			if r.URL.Path == "/status" {
 				if res.StatusCode == 204 {
-					bridge.OnStopped()
+					if bridge != nil {
+						bridge.OnStopped()
+					}
 					diagnostics.observe(false, false)
 				} else {
 					var st struct {
-						Stopped   bool `json:"stopped"`
-						Buffering bool `json:"buffering"`
-						Track     *struct {
-							URI string `json:"uri"`
+						Stopped     bool `json:"stopped"`
+						Paused      bool `json:"paused"`
+						Buffering   bool `json:"buffering"`
+						Volume      int  `json:"volume"`
+						VolumeSteps int  `json:"volume_steps"`
+						Track       *struct {
+							URI      string   `json:"uri"`
+							Name     string   `json:"name"`
+							Cover    *string  `json:"album_cover_url"`
+							Artists  []string `json:"artist_names"`
+							Duration int64    `json:"duration"`
+							Position int64    `json:"position"`
 						} `json:"track"`
 					}
-					if json.Unmarshal(data, &st) == nil {
-						if st.Stopped {
+					if json.Unmarshal(data, &st) != nil {
+						http.Error(w, "invalid response", 502)
+						return
+					}
+					if st.Stopped {
+						if bridge != nil {
 							bridge.OnStopped()
-						} else if st.Track != nil && st.Track.URI != "" {
+						}
+					} else if st.Track != nil && st.Track.URI != "" {
+						if bridge != nil {
 							bridge.OnTrack(st.Track.URI)
 						}
-						diagnostics.observe(!st.Stopped && st.Buffering && st.Track == nil, bridge.diagnostic().Active)
+					}
+					audioActive := bridge != nil && bridge.diagnostic().Active
+					diagnostics.observe(!st.Stopped && st.Buffering && st.Track == nil, audioActive)
+					// Forward only the fields the gateway needs. The daemon's raw
+					// status also contains account, device and track identifiers.
+					safe := map[string]any{
+						"stopped": st.Stopped, "paused": st.Paused,
+						"buffering": st.Buffering, "volume": st.Volume,
+						"volume_steps": st.VolumeSteps, "track": nil,
+					}
+					if st.Track != nil {
+						safe["track"] = map[string]any{
+							"name": st.Track.Name, "album_cover_url": st.Track.Cover,
+							"artist_names": st.Track.Artists, "duration": st.Track.Duration,
+							"position": st.Track.Position,
+						}
+					}
+					if diagnostics != nil {
+						safe["daemon"] = diagnostics.snapshot(!st.Stopped && st.Buffering && st.Track == nil, audioActive)
+					}
+					if sanitized, err := json.Marshal(safe); err == nil {
+						data = sanitized
+					} else {
+						http.Error(w, "invalid response", 502)
+						return
 					}
 				}
 			} else if r.URL.Path == "/player/stop" {
-				bridge.OnStopped()
+				if bridge != nil {
+					bridge.OnStopped()
+				}
 			} else if r.URL.Path == "/player/next" || r.URL.Path == "/player/prev" || r.URL.Path == "/player/seek" {
-				bridge.ResetBuffer()
+				if bridge != nil {
+					bridge.ResetBuffer()
+				}
+				if diagnostics != nil {
+					diagnostics.ResetRefusals()
+				}
+			} else if r.URL.Path == "/player/resume" {
+				if diagnostics != nil {
+					diagnostics.ResetRefusals()
+				}
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -110,12 +173,25 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 		_, _ = w.Write(data)
 	}
 	if c.Mode == "spotify" {
+		if diagnostics != nil {
+			diagnostics.SetOnRefusalLimit(func() {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer stopCancel()
+				req, err := http.NewRequestWithContext(stopCtx, http.MethodPost, daemonURL+"/player/stop", nil)
+				if err == nil {
+					res, doErr := client.Do(req)
+					if doErr == nil {
+						_ = res.Body.Close()
+					}
+				}
+			})
+		}
 		bridge = newSpotifyBridge(ctx, filepath.Join(c.StateDir, "audio.pcm"))
 		if bridge != nil {
 			context.AfterFunc(ctx, bridge.Close)
 		}
 		mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-			health, err := spotifyHealth(r.Context(), client, "http://127.0.0.1:3678", c.StateDir)
+			health, err := spotifyHealth(r.Context(), client, daemonURL, c.StateDir)
 			if err != nil {
 				http.Error(w, "daemon unavailable", 503)
 				return

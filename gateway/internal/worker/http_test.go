@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -242,5 +243,111 @@ func TestAirplayHLSReadinessAndMetadataOnly(t *testing.T) {
 	active, audioActive, meta = getStatus()
 	if !audioActive || meta["title"] != "Song" {
 		t.Fatalf("expected audioActive=true and metadata populated, got audioActive=%v meta=%v", audioActive, meta)
+	}
+}
+
+func TestSpotifyStatusAugmentsDaemonDiagnosticsWithoutSecrets(t *testing.T) {
+	var stopCalled atomic.Bool
+	var exposeTrack atomic.Bool
+	stopCh := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/player/stop" {
+			stopCalled.Store(true)
+			select {
+			case stopCh <- struct{}{}:
+			default:
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"stopped":true}`)
+			return
+		}
+		if r.URL.Path == "/status" {
+			w.WriteHeader(http.StatusOK)
+			if exposeTrack.Load() {
+				_, _ = io.WriteString(w, `{"stopped":false,"track":{"uri":"spotify:track:private-uri","name":"Visible song","artist_names":["Artist"],"duration":1234,"position":56},"username":"secret-account-name","context_uri":"spotify:playlist:private-context","device_id":"private-device"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"stopped":false,"buffering":true,"track":null,"volume":75,"volume_steps":100,"username":"secret-account-name"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("ZOMBIE_SPOTIFY_DAEMON_URL", upstream.URL)
+
+	dir := t.TempDir()
+	c := Config{Mode: "spotify", Token: strings.Repeat("k", 32), StateDir: dir}
+	diagnostics := NewSpotifyDaemonDiagnostics()
+	handler := HandlerWithSpotifyDiagnostics(context.Background(), c, diagnostics)
+
+	// Call GET /status through the worker
+	req := httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 from status proxy, got %d: %s", rec.Code, rec.Body.String())
+	}
+	bodyStr := rec.Body.String()
+	if strings.Contains(bodyStr, "secret-account-name") {
+		t.Fatalf("private username leaked through /status proxy: %s", bodyStr)
+	}
+	var statusMap map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusMap); err != nil {
+		t.Fatalf("invalid json from /status proxy: %v", err)
+	}
+	if statusMap["daemon"] == nil {
+		t.Fatalf("daemon diagnostics missing from augmented /status response: %s", bodyStr)
+	}
+	exposeTrack.Store(true)
+	req = httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Visible song") {
+		t.Fatalf("expected safe track metadata, got %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, forbidden := range []string{"private-uri", "private-context", "private-device", "secret-account-name"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("private daemon field leaked through /status: %s", rec.Body.String())
+		}
+	}
+	exposeTrack.Store(false)
+
+	// Now trigger 3 audio key refusals
+	private := "spotify:track:private-uri secret-token"
+	for i := 0; i < 3; i++ {
+		diagnostics.Write([]byte("skipping track: Spotify refused the audio key (code 1) for this playback context: " + private + "\n"))
+	}
+
+	select {
+	case <-stopCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for worker to send /player/stop on refusal limit")
+	}
+
+	if !stopCalled.Load() {
+		t.Fatal("expected /player/stop to be called when skip storm refusal limit was hit")
+	}
+
+	// Verify augmented /status reflects RefusalLimited
+	req = httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), private) || strings.Contains(rec.Body.String(), "secret-account-name") {
+		t.Fatalf("secrets leaked in /status: %s", rec.Body.String())
+	}
+	var updatedMap map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &updatedMap); err != nil {
+		t.Fatal(err)
+	}
+	daemonField, ok := updatedMap["daemon"].(map[string]any)
+	if !ok || daemonField["refusalLimited"] != true {
+		t.Fatalf("refusalLimited missing or false in /status daemon field: %+v", updatedMap)
 	}
 }

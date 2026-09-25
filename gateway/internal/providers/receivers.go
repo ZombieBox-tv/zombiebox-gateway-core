@@ -127,6 +127,12 @@ func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, boo
 			Duration int64    `json:"duration"`
 			Position int64    `json:"position"`
 		} `json:"track"`
+		Daemon *struct {
+			FailureCounts       map[string]uint64 `json:"failureCounts"`
+			StalledBuffering    bool              `json:"stalledBuffering"`
+			RefusalLimited      bool              `json:"refusalLimited"`
+			ConsecutiveRefusals int               `json:"consecutiveRefusals"`
+		} `json:"daemon"`
 	}
 	if json.Unmarshal(body, &status) != nil {
 		return out, false, errors.New("invalid player status")
@@ -165,6 +171,24 @@ func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, boo
 			item.ImageURL = spotifyArtworkPath(out.ArtworkURL, item.Title)
 		}
 		out.Item = item
+	} else if status.Daemon != nil {
+		refused := status.Daemon.RefusalLimited || status.Daemon.ConsecutiveRefusals > 0
+		if refused {
+			out.Item.Title = "Spotify audio unavailable"
+			out.Item.Subtitle = "Spotify refused the audio key for this playback context; select another track"
+			out.Item.Playable = false
+			if status.Daemon.RefusalLimited {
+				out.State = "STOPPED"
+			}
+		} else if status.Daemon.StalledBuffering {
+			out.Item.Title = "Spotify playback stalled"
+			out.Item.Subtitle = "Waiting for audio from Spotify"
+			out.Item.Playable = false
+		} else if status.Daemon.FailureCounts != nil && status.Daemon.FailureCounts["trackLoad"] > 0 && !status.Stopped {
+			out.Item.Title = "Spotify track unavailable"
+			out.Item.Subtitle = "Failed loading Spotify track; select another track"
+			out.Item.Playable = false
+		}
 	}
 	return out, hasTrack, nil
 }
@@ -227,7 +251,6 @@ func spotifySource(c Config, state NowPlaying) Source {
 	item := domain.Item{ID: "spotify-connect", Provider: "spotify", Kind: "audio", Title: "Spotify Connect", Subtitle: "Select Zombie Box in Spotify, then listen here", Playable: true}
 	if state.Item != nil {
 		item = *state.Item
-		item.Playable = true
 	}
 	headers, _ := wrapperHeaders(c)
 	return Source{Item: item, ArtworkURL: state.ArtworkURL, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}

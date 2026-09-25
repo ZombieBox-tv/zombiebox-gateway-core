@@ -95,3 +95,81 @@ func TestSpotifyDaemonDiagnosticsClassifiesPinnedKeyRetrievalErrors(t *testing.T
 		}
 	}
 }
+
+func TestSpotifyDaemonDiagnosticsStopsSkipStormAtRefusalLimit(t *testing.T) {
+	d := NewSpotifyDaemonDiagnostics()
+	called := 0
+	doneCh := make(chan struct{}, 1)
+	d.SetOnRefusalLimit(func() {
+		called++
+		select {
+		case doneCh <- struct{}{}:
+		default:
+		}
+	})
+
+	private := "spotify:track:private-uri private-account secret-token"
+	refusalLine := "skipping track: Spotify refused the audio key (code 1) for this playback context: " + private + "\n"
+
+	// 1st refusal: below threshold (spotifyMaxConsecutiveRefusals = 3)
+	d.Write([]byte(refusalLine))
+	snap := d.snapshot(true, false)
+	if snap.FailureCounts["audioKeyRefused"] != 1 || snap.RefusalLimited || snap.ConsecutiveRefusals != 1 || called != 0 {
+		t.Fatalf("1st refusal should not trigger limit: %+v called=%d", snap, called)
+	}
+
+	// 2nd refusal: still below threshold
+	d.Write([]byte(refusalLine))
+	snap = d.snapshot(true, false)
+	if snap.FailureCounts["audioKeyRefused"] != 2 || snap.RefusalLimited || snap.ConsecutiveRefusals != 2 || called != 0 {
+		t.Fatalf("2nd refusal should not trigger limit: %+v called=%d", snap, called)
+	}
+
+	// 3rd refusal: threshold reached -> triggers refusal limit callback
+	d.Write([]byte(refusalLine))
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for refusal limit callback")
+	}
+	snap = d.snapshot(true, false)
+	if snap.FailureCounts["audioKeyRefused"] != 3 || !snap.RefusalLimited || snap.ConsecutiveRefusals != 3 || called != 1 {
+		t.Fatalf("3rd refusal must trigger limit: %+v called=%d", snap, called)
+	}
+
+	// 4th refusal: bounded callback; should NOT fire again while limit is active
+	d.Write([]byte(refusalLine))
+	snap = d.snapshot(true, false)
+	if snap.FailureCounts["audioKeyRefused"] != 4 || !snap.RefusalLimited || snap.ConsecutiveRefusals != 4 || called != 1 {
+		t.Fatalf("subsequent refusal must not re-trigger callback: %+v called=%d", snap, called)
+	}
+
+	// Verify zero secret exposure in JSON
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{private, "private-uri", "private-account", "secret-token", "refused the audio key"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("secret leaked in snapshot: %s", raw)
+		}
+	}
+
+	// Explicit user action permits another bounded attempt.
+	d.ResetRefusals()
+	snap = d.snapshot(false, false)
+	if snap.RefusalLimited || snap.ConsecutiveRefusals != 0 {
+		t.Fatalf("user retry must reset refusal limit: %+v", snap)
+	}
+
+	// Recovery via active audio flow
+	d.Write([]byte(refusalLine))
+	snap = d.snapshot(true, false)
+	if snap.ConsecutiveRefusals != 1 {
+		t.Fatalf("expected 1 consecutive refusal, got %d", snap.ConsecutiveRefusals)
+	}
+	snap = d.snapshot(false, true) // audioActive = true
+	if snap.RefusalLimited || snap.ConsecutiveRefusals != 0 {
+		t.Fatalf("active audio must clear consecutive refusals: %+v", snap)
+	}
+}

@@ -333,3 +333,130 @@ func TestAirPlayMetadataOnlyAndPlayableReadiness(t *testing.T) {
 		t.Fatalf("playable AirPlay should start playback: source=%v state=%+v err=%v", source, state, err)
 	}
 }
+
+func TestSpotifyStatusReportsRefusedAudioKeyActionableState(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"stopped":true,"buffering":false,"track":null,"daemon":{"failureCounts":{"audioKeyRefused":3},"refusalLimited":true,"consecutiveRefusals":3}}`)
+	}))
+	defer upstream.Close()
+
+	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("t", 32)}
+	status, err := testAdapters.SpotifyStatus(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.State != "STOPPED" {
+		t.Fatalf("expected state STOPPED, got %s", status.State)
+	}
+	if status.Item == nil {
+		t.Fatal("expected non-nil item")
+	}
+	if status.Item.Title != "Spotify audio unavailable" {
+		t.Fatalf("expected actionable title, got %q", status.Item.Title)
+	}
+	if status.Item.Subtitle != "Spotify refused the audio key for this playback context; select another track" {
+		t.Fatalf("expected actionable subtitle, got %q", status.Item.Subtitle)
+	}
+	if status.Item.Playable {
+		t.Fatal("refused track must NOT be marked playable")
+	}
+
+	// Verify sources preserve unplayable status
+	sources, err := testAdapters.Fetch(context.Background(), "spotify", c, "")
+	if err != nil || len(sources) != 1 {
+		t.Fatalf("expected 1 source, got %v (err %v)", sources, err)
+	}
+	if sources[0].Item.Playable {
+		t.Fatal("source must preserve unplayable status when key is refused")
+	}
+	if sources[0].Item.Title != "Spotify audio unavailable" {
+		t.Fatalf("source item title mismatch: %q", sources[0].Item.Title)
+	}
+
+	// Reception: must not start playback when unplayable/stopped
+	source, recState, err := testAdapters.Reception(context.Background(), "spotify", c)
+	if err != nil || source != nil || recState.Item == nil || recState.Item.Playable {
+		t.Fatalf("reception must return nil source and unplayable state: source=%v state=%+v err=%v", source, recState, err)
+	}
+
+	// Verify JSON privacy
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawStr := string(raw)
+	for _, forbidden := range []string{"private", "secret", "uri", "token", "password"} {
+		if strings.Contains(rawStr, forbidden) {
+			t.Fatalf("forbidden text in status json: %s", rawStr)
+		}
+	}
+}
+
+func TestSpotifyStatusReportsStalledBufferingActionableState(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"stopped":false,"buffering":true,"track":null,"daemon":{"stalledBuffering":true,"failureCounts":{"audioKeyRefused":0}}}`)
+	}))
+	defer upstream.Close()
+
+	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("t", 32)}
+	status, err := testAdapters.SpotifyStatus(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Item == nil {
+		t.Fatal("expected non-nil item")
+	}
+	if status.Item.Title != "Spotify playback stalled" {
+		t.Fatalf("expected stalled title, got %q", status.Item.Title)
+	}
+	if status.Item.Subtitle != "Waiting for audio from Spotify" {
+		t.Fatalf("expected stalled subtitle, got %q", status.Item.Subtitle)
+	}
+	if status.Item.Playable {
+		t.Fatal("stalled buffering without track must NOT be marked playable")
+	}
+}
+
+func TestSpotifyStatusReportsTrackLoadFailureActionableState(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"stopped":false,"buffering":false,"track":null,"daemon":{"failureCounts":{"trackLoad":1}}}`)
+	}))
+	defer upstream.Close()
+
+	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("t", 32)}
+	status, err := testAdapters.SpotifyStatus(context.Background(), c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Item == nil {
+		t.Fatal("expected non-nil item")
+	}
+	if status.Item.Title != "Spotify track unavailable" {
+		t.Fatalf("expected track load failure title, got %q", status.Item.Title)
+	}
+	if status.Item.Subtitle != "Failed loading Spotify track; select another track" {
+		t.Fatalf("expected track load failure subtitle, got %q", status.Item.Subtitle)
+	}
+	if status.Item.Playable {
+		t.Fatal("track load failure must NOT be marked playable")
+	}
+}
+
+func TestSpotifyOldRefusalCountDoesNotMarkNewIdleSessionUnavailable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"stopped":true,"track":null,"daemon":{"failureCounts":{"audioKeyRefused":10},"consecutiveRefusals":0,"refusalLimited":false}}`)
+	}))
+	defer upstream.Close()
+
+	status, err := testAdapters.SpotifyStatus(context.Background(), Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("t", 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Item == nil || status.Item.Title == "Spotify audio unavailable" {
+		t.Fatalf("historical refusal count must not label idle session as current failure: %+v", status.Item)
+	}
+}

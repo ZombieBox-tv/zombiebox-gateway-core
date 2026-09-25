@@ -200,6 +200,9 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	}
 	if mode == "REMUX" || mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
+		if isAudioOnly(resolved, decision.metadata) {
+			plan.MIME = "audio/mp4"
+		}
 		plan.Seekable = false
 		plan.ResumeMS = 0
 		if mode == "TRANSCODE" {
@@ -366,7 +369,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			fail(w, 416, "conversion_not_seekable")
 			return
 		}
-		w.Header().Set("Content-Type", "video/mp4")
+		mime := "video/mp4"
+		if isAudioOnly(src, sess.metadata) {
+			mime = "audio/mp4"
+		}
+		w.Header().Set("Content-Type", mime)
 		if r.Method == "HEAD" {
 			return
 		}
@@ -532,4 +539,23 @@ type conversionWriter struct {
 func (w *conversionWriter) Write(p []byte) (int, error) {
 	w.started = true
 	return w.contextWriter.Write(p)
+}
+
+func isAudioOnly(source domain.Source, metadata *domain.Metadata) bool {
+	if source.Item.Kind == "audio" {
+		return true
+	}
+	if metadata != nil && len(metadata.Streams) > 0 {
+		hasAudio := false
+		for _, st := range metadata.Streams {
+			if st.Type == "video" {
+				return false
+			}
+			if st.Type == "audio" {
+				hasAudio = true
+			}
+		}
+		return hasAudio
+	}
+	return false
 }

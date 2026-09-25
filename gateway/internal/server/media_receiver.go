@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/media"
+	"zombiebox.local/gateway/internal/playback"
 	"zombiebox.local/gateway/internal/receivers/inbox"
 )
 
@@ -43,17 +45,88 @@ func (a receiverAdapter) Read(ctx context.Context, provider string) (*domain.Sou
 	return selected, status, nil
 }
 
-func (a receiverAdapter) Start(device string, source domain.Source) (domain.Plan, error) {
+func (a receiverAdapter) Start(ctx context.Context, device string, source domain.Source) (domain.Plan, error) {
 	s := a.server
 	s.mu.Lock()
+	for id, x := range s.sessions {
+		if time.Now().After(x.expires) {
+			x.cancel()
+			delete(s.sessions, id)
+		}
+	}
+	if len(s.sessions) >= 64 {
+		s.mu.Unlock()
+		return domain.Plan{}, inbox.ErrBusy
+	}
+	s.mu.Unlock()
+
+	var d domain.Device
+	if err := s.db.Get(ctx, "devices", device, &d); err != nil {
+		return domain.Plan{}, err
+	}
+
+	decision, err := s.playbackMode(ctx, source, d, "")
+	if err != nil {
+		return domain.Plan{}, err
+	}
+	mode := decision.mode
+	if media.ManifestKind(source) == "hls" && mode == "DIRECT_PLAY" && !playback.HasFreshHLSEvidence(d.Capabilities) {
+		mode = "REMUX"
+	}
+	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "TRANSCODE" {
+		return domain.Plan{}, errors.New("unsupported playback mode")
+	}
+	if (mode == "REMUX" || mode == "TRANSCODE") && ((source.Path != "" && s.deps.Media == nil) || (source.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(source)))) {
+		return domain.Plan{}, errors.New("conversion unavailable")
+	}
+
+	mime := source.MIME
+	if mode == "REMUX" || mode == "TRANSCODE" {
+		mime = "video/mp4"
+		if isAudioOnly(source, decision.metadata) {
+			mime = "audio/mp4"
+		}
+	}
+	item := source.Item
+	if isAudioOnly(source, decision.metadata) && item.Kind == "" {
+		item.Kind = "audio"
+	}
+
+	s.mu.Lock()
 	defer s.mu.Unlock()
+	for id, x := range s.sessions {
+		if time.Now().After(x.expires) {
+			x.cancel()
+			delete(s.sessions, id)
+		}
+	}
 	if len(s.sessions) >= 64 {
 		return domain.Plan{}, inbox.ErrBusy
 	}
 	id, ticket := randomID(16), randomID(24)
-	ctx, cancel := context.WithCancel(context.Background())
-	s.sessions[id] = &session{device: device, ticket: ticket, source: source, expires: time.Now().Add(24 * time.Hour), ctx: ctx, cancel: cancel, resources: map[string]string{}}
-	return domain.Plan{Version: 1, SessionID: id, Mode: "DIRECT_PLAY", URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: source.MIME, Live: true, Seekable: false, Item: source.Item}, nil
+	sessCtx, cancel := context.WithCancel(context.Background())
+	s.sessions[id] = &session{
+		device:    device,
+		ticket:    ticket,
+		source:    source,
+		mode:      mode,
+		metadata:  decision.metadata,
+		selection: domain.MediaSelection{AudioID: decision.audioID},
+		expires:   time.Now().Add(24 * time.Hour),
+		ctx:       sessCtx,
+		cancel:    cancel,
+		resources: map[string]string{},
+	}
+	return domain.Plan{
+		Version:   1,
+		SessionID: id,
+		Mode:      mode,
+		URL:       "/v1/streams/" + id + "?ticket=" + ticket,
+		MIME:      mime,
+		Live:      true,
+		Seekable:  false,
+		Item:      item,
+	}, nil
 }
 func (a receiverAdapter) Stop(id string) {
 	s := a.server

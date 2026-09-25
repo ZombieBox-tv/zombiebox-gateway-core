@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
-const spotifyStallThreshold = 15 * time.Second
+const (
+	spotifyStallThreshold         = 15 * time.Second
+	spotifyMaxConsecutiveRefusals = 3
+)
 
 var spotifyFailureNames = [...]string{
 	"audioKeyRefused",
@@ -41,13 +44,16 @@ func newSpotifyFailurePattern(category int, phrase string) spotifyFailurePattern
 // pattern progress and counters: no raw log line, track URI, account or token
 // can be retrieved from it. Unknown output is discarded.
 type SpotifyDaemonDiagnostics struct {
-	mu             sync.Mutex
-	patterns       []spotifyFailurePattern
-	lineCategories [len(spotifyFailureNames)]bool
-	counts         [len(spotifyFailureNames)]uint64
-	lineBytes      int
-	bufferingSince time.Time
-	clock          func() time.Time
+	mu                  sync.Mutex
+	patterns            []spotifyFailurePattern
+	lineCategories      [len(spotifyFailureNames)]bool
+	counts              [len(spotifyFailureNames)]uint64
+	lineBytes           int
+	bufferingSince      time.Time
+	consecutiveRefusals int
+	refusalLimited      bool
+	onRefusalLimit      func()
+	clock               func() time.Time
 }
 
 func NewSpotifyDaemonDiagnostics() *SpotifyDaemonDiagnostics {
@@ -85,6 +91,25 @@ func newSpotifyDaemonDiagnostics(clock func() time.Time) *SpotifyDaemonDiagnosti
 	return d
 }
 
+func (d *SpotifyDaemonDiagnostics) SetOnRefusalLimit(fn func()) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onRefusalLimit = fn
+}
+
+func (d *SpotifyDaemonDiagnostics) ResetRefusals() {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.consecutiveRefusals = 0
+	d.refusalLimited = false
+}
+
 func (d *SpotifyDaemonDiagnostics) Write(input []byte) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -119,21 +144,37 @@ func (d *SpotifyDaemonDiagnostics) Write(input []byte) (int, error) {
 }
 
 func (d *SpotifyDaemonDiagnostics) finishLine() {
+	var onLimit func()
+	keyRefused := d.lineCategories[0]
 	for i, matched := range d.lineCategories {
 		if matched && d.counts[i] < ^uint64(0) {
 			d.counts[i]++
 		}
 		d.lineCategories[i] = false
 	}
+	if keyRefused {
+		d.consecutiveRefusals++
+		if d.consecutiveRefusals >= spotifyMaxConsecutiveRefusals && !d.refusalLimited {
+			d.refusalLimited = true
+			if d.onRefusalLimit != nil {
+				onLimit = d.onRefusalLimit
+			}
+		}
+	}
 	for i := range d.patterns {
 		d.patterns[i].matched = 0
 	}
 	d.lineBytes = 0
+	if onLimit != nil {
+		go onLimit()
+	}
 }
 
 type spotifyDaemonHealth struct {
-	FailureCounts    map[string]uint64 `json:"failureCounts"`
-	StalledBuffering bool              `json:"stalledBuffering"`
+	FailureCounts       map[string]uint64 `json:"failureCounts"`
+	StalledBuffering    bool              `json:"stalledBuffering"`
+	RefusalLimited      bool              `json:"refusalLimited,omitempty"`
+	ConsecutiveRefusals int               `json:"consecutiveRefusals,omitempty"`
 }
 
 func (d *SpotifyDaemonDiagnostics) observe(bufferingWithoutTrack, audioActive bool) {
@@ -149,6 +190,10 @@ func (d *SpotifyDaemonDiagnostics) observeLocked(bufferingWithoutTrack, audioAct
 	now := d.clock()
 	if !bufferingWithoutTrack || audioActive {
 		d.bufferingSince = time.Time{}
+		if audioActive {
+			d.consecutiveRefusals = 0
+			d.refusalLimited = false
+		}
 	} else if d.bufferingSince.IsZero() {
 		d.bufferingSince = now
 	}
@@ -162,10 +207,14 @@ func (d *SpotifyDaemonDiagnostics) snapshot(bufferingWithoutTrack, audioActive b
 	defer d.mu.Unlock()
 	d.observeLocked(bufferingWithoutTrack, audioActive)
 	now := d.clock()
-	out := &spotifyDaemonHealth{FailureCounts: make(map[string]uint64, len(spotifyFailureNames))}
+	out := &spotifyDaemonHealth{
+		FailureCounts:       make(map[string]uint64, len(spotifyFailureNames)),
+		StalledBuffering:    !d.bufferingSince.IsZero() && now.Sub(d.bufferingSince) >= spotifyStallThreshold,
+		RefusalLimited:      d.refusalLimited,
+		ConsecutiveRefusals: d.consecutiveRefusals,
+	}
 	for i, name := range spotifyFailureNames {
 		out.FailureCounts[name] = d.counts[i]
 	}
-	out.StalledBuffering = !d.bufferingSince.IsZero() && now.Sub(d.bufferingSince) >= spotifyStallThreshold
 	return out
 }

@@ -37,6 +37,22 @@ func isFMP4(metadata domain.Metadata) bool {
 	return false
 }
 
+// HasFreshHLSEvidence validates that the device has non-stalled, passing probe
+// evidence for HLS under suite version 2 within the freshness window.
+func HasFreshHLSEvidence(caps domain.Capabilities) bool {
+	if caps.SuiteVersion != 2 || caps.CacheKey == "" {
+		return false
+	}
+	now := time.Now().Unix()
+	for _, p := range caps.Probes {
+		if p.ID == "hls-h264-aac" {
+			return p.Status == "PASS" && !p.Stalled && (p.PositionMS >= 500 || p.Completed) &&
+				p.TestedAt > now-7*24*60*60 && p.TestedAt <= now+300
+		}
+	}
+	return false
+}
+
 // nativeHLSCandidate validates that:
 // 1. The stream is an HLS manifest.
 // 2. The device has fresh, functional probe evidence for HLS (hls-h264-aac PASS).
@@ -51,21 +67,7 @@ func nativeHLSCandidate(metadata domain.Metadata, mime string, caps domain.Capab
 	if isFMP4(metadata) {
 		return false
 	}
-	if caps.SuiteVersion != 2 || caps.CacheKey == "" {
-		return false
-	}
-	now := time.Now().Unix()
-	hlsPass := false
-	for _, p := range caps.Probes {
-		if p.ID == "hls-h264-aac" {
-			if p.Status == "PASS" && !p.Stalled && (p.PositionMS >= 500 || p.Completed) &&
-				p.TestedAt > now-7*24*60*60 && p.TestedAt <= now+300 {
-				hlsPass = true
-			}
-			break
-		}
-	}
-	if !hlsPass {
+	if !HasFreshHLSEvidence(caps) {
 		return false
 	}
 	status := func(id string) string {
