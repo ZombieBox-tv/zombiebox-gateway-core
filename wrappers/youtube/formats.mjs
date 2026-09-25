@@ -1,73 +1,103 @@
 export async function getAvailableVariants(info, player, validate = async () => true) {
   if (!info || typeof info.chooseFormat !== "function") return [];
   const tiers = ["1080p", "720p", "480p", "360p"];
-  const available = [];
   const checked = new Map();
 
-  const isValid = async (format) => {
-    if (!format) return false;
+  const isValid = (format) => {
+    if (!format) return Promise.resolve(false);
     const identity = Number.isInteger(format.itag) ? format.itag : format;
     if (checked.has(identity)) return checked.get(identity);
-    try {
-      const url = typeof format.decipher === "function" ? await format.decipher(player) : "";
-      if (!url) {
-        checked.set(identity, false);
+    const promise = (async () => {
+      try {
+        const url = typeof format.decipher === "function" ? await format.decipher(player) : "";
+        if (!url) return false;
+        return Boolean(await validate(url, format));
+      } catch {
         return false;
       }
-      const ok = Boolean(await validate(url, format));
-      checked.set(identity, ok);
-      return ok;
-    } catch {
-      checked.set(identity, false);
-      return false;
+    })();
+    checked.set(identity, promise);
+    return promise;
+  };
+
+  let audioPromise = null;
+  const getHasValidAudio = () => {
+    if (!audioPromise) {
+      audioPromise = (async () => {
+        for (const quality of ["bestefficiency", "best"]) {
+          try {
+            const audio = info.chooseFormat({
+              type: "audio",
+              format: "mp4",
+              codec: "mp4a",
+              quality,
+            });
+            if (audio && audio.has_audio && !audio.has_video) {
+              if (await isValid(audio)) {
+                return true;
+              }
+            }
+          } catch {}
+        }
+        return false;
+      })();
+    }
+    return audioPromise;
+  };
+
+  const checkTier = async (quality) => {
+    try {
+      let hasCombined = false;
+      try {
+        const combined = info.chooseFormat({
+          type: "video+audio",
+          format: "mp4",
+          codec: "avc1",
+          quality,
+        });
+        if (combined && combined.has_audio && combined.has_video) {
+          hasCombined = await isValid(combined);
+        }
+      } catch {}
+
+      if (hasCombined) {
+        return quality;
+      }
+
+      let video = null;
+      try {
+        video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
+      } catch {}
+
+      if (video && video.has_video && !video.has_audio) {
+        const hasAudio = await getHasValidAudio();
+        if (hasAudio && (await isValid(video))) {
+          return quality;
+        }
+      }
+    } catch {}
+
+    return null;
+  };
+
+  const results = new Array(tiers.length);
+  let nextIndex = 0;
+  const concurrency = 2;
+
+  const worker = async () => {
+    while (nextIndex < tiers.length) {
+      const idx = nextIndex++;
+      results[idx] = await checkTier(tiers[idx]);
     }
   };
 
-  let hasValidAudio = false;
-  for (const quality of ["bestefficiency", "best"]) {
-    try {
-      const audio = info.chooseFormat({ type: "audio", format: "mp4", codec: "mp4a", quality });
-      if (audio && audio.has_audio && !audio.has_video) {
-        if (await isValid(audio)) {
-          hasValidAudio = true;
-          break;
-        }
-      }
-    } catch {}
+  const workers = [];
+  for (let i = 0; i < Math.min(concurrency, tiers.length); i++) {
+    workers.push(worker());
   }
+  await Promise.all(workers);
 
-  for (const quality of tiers) {
-    let hasCombined = false;
-    try {
-      const combined = info.chooseFormat({
-        type: "video+audio",
-        format: "mp4",
-        codec: "avc1",
-        quality,
-      });
-      if (combined && combined.has_audio && combined.has_video) {
-        hasCombined = await isValid(combined);
-      }
-    } catch {}
-
-    if (hasCombined) {
-      available.push(quality);
-      continue;
-    }
-
-    if (!hasValidAudio) continue;
-
-    try {
-      const video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
-      if (video && video.has_video && !video.has_audio) {
-        if (await isValid(video)) {
-          available.push(quality);
-        }
-      }
-    } catch {}
-  }
-
-  return available;
+  return results.filter(Boolean);
 }
 
 // Prefer the highest validated H.264 source up to 1080p. At the same resolution,

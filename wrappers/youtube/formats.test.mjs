@@ -259,3 +259,181 @@ test("resolveFormats with targetQuality returns requested tier or errors", async
     /video_unavailable/,
   );
 });
+
+test("tier checks overlap within the bound of at most two simultaneous checks", async () => {
+  let activeChecks = 0;
+  let maxActiveChecks = 0;
+  const started = [];
+
+  let releaseFirstBatch;
+  const firstBatchWait = new Promise((resolve) => {
+    releaseFirstBatch = resolve;
+  });
+
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "video+audio") {
+        return {
+          itag:
+            options.quality === "1080p"
+              ? 37
+              : options.quality === "720p"
+                ? 22
+                : options.quality === "480p"
+                  ? 18
+                  : 36,
+          has_video: true,
+          has_audio: true,
+          decipher: async () => `https://r.googlevideo.com/${options.quality}`,
+        };
+      }
+      throw new Error("no format");
+    },
+  };
+
+  const validate = async (url) => {
+    activeChecks++;
+    maxActiveChecks = Math.max(maxActiveChecks, activeChecks);
+    started.push(url);
+
+    if (activeChecks === 2 && started.length === 2) {
+      releaseFirstBatch();
+    } else if (started.length <= 2) {
+      await firstBatchWait;
+    }
+
+    activeChecks--;
+    return true;
+  };
+
+  const variants = await getAvailableVariants(info, {}, validate);
+
+  assert.equal(maxActiveChecks, 2, "tier checks overlap and reach exactly 2 simultaneous checks");
+  assert.deepEqual(variants, ["1080p", "720p", "480p", "360p"]);
+});
+
+test("output remains ordered [1080p, 720p, 480p, 360p] even when lower tiers complete first", async () => {
+  let release1080;
+  const p1080 = new Promise((resolve) => {
+    release1080 = resolve;
+  });
+  const completionOrder = [];
+
+  const info = {
+    chooseFormat(options) {
+      return {
+        itag:
+          options.quality === "1080p"
+            ? 37
+            : options.quality === "720p"
+              ? 22
+              : options.quality === "480p"
+                ? 18
+                : 36,
+        has_video: true,
+        has_audio: true,
+        decipher: async () => options.quality,
+      };
+    },
+  };
+
+  const validate = async (url) => {
+    if (url === "1080p") {
+      await p1080;
+    }
+    completionOrder.push(url);
+    if (completionOrder.length === 3) {
+      release1080();
+    }
+    return true;
+  };
+
+  const variants = await getAvailableVariants(info, {}, validate);
+
+  assert.deepEqual(completionOrder, ["720p", "480p", "360p", "1080p"]);
+  assert.deepEqual(variants, ["1080p", "720p", "480p", "360p"]);
+});
+
+test("a bad high tier cannot suppress a valid lower tier", async () => {
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") {
+        return {
+          itag: 140,
+          has_audio: true,
+          has_video: false,
+          decipher: async () => "https://r.googlevideo.com/aac",
+        };
+      }
+      if (options.quality === "1080p") {
+        return {
+          itag: 137,
+          has_video: true,
+          has_audio: false,
+          decipher: async () => {
+            throw new Error("upstream_decipher_failure");
+          },
+        };
+      }
+      if (options.quality === "720p") {
+        return {
+          itag: 136,
+          has_video: true,
+          has_audio: false,
+          decipher: async () => "https://r.googlevideo.com/720p",
+        };
+      }
+      if (options.quality === "480p") {
+        throw new Error("corrupted_format_manifest");
+      }
+      if (options.quality === "360p") {
+        return {
+          itag: 18,
+          has_video: true,
+          has_audio: true,
+          decipher: async () => "https://r.googlevideo.com/360p",
+        };
+      }
+      throw new Error("missing");
+    },
+  };
+
+  const variants = await getAvailableVariants(info, {}, async () => true);
+  assert.deepEqual(variants, ["720p", "360p"]);
+});
+
+test("shared validated AAC work is performed only once across adaptive tiers", async () => {
+  let audioChecks = 0;
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") {
+        return {
+          itag: 140,
+          has_audio: true,
+          has_video: false,
+          decipher: async () => "https://r.googlevideo.com/aac-shared",
+        };
+      }
+      if (options.type === "video") {
+        return {
+          itag: options.quality === "1080p" ? 137 : options.quality === "720p" ? 136 : 135,
+          has_video: true,
+          has_audio: false,
+          decipher: async () => `https://r.googlevideo.com/video-${options.quality}`,
+        };
+      }
+      throw new Error("no combined");
+    },
+  };
+
+  const validate = async (url) => {
+    if (url.includes("aac")) {
+      audioChecks++;
+    }
+    return true;
+  };
+
+  const variants = await getAvailableVariants(info, {}, validate);
+  assert.equal(audioChecks, 1, "AAC audio was only validated once across all adaptive tiers");
+  assert.deepEqual(variants, ["1080p", "720p", "480p", "360p"]);
+});

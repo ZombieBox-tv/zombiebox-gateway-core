@@ -488,3 +488,93 @@ test("same itag from another client gets its own range validation", async () => 
   assert.ok(checked.includes("IOS-720"));
   assert.ok(result.variants.includes("720p"));
 });
+
+test("auto resolve discovers ordered variants with bounded tier overlap and shared AAC", async () => {
+  let activeTierValidations = 0;
+  let maxActiveTierValidations = 0;
+  const validatedUrls = [];
+
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      return {
+        chooseFormat(options) {
+          if (client === "ANDROID") {
+            if (options.quality === "360p" && options.type === "video+audio") {
+              return {
+                itag: 18,
+                has_audio: true,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/stream-360",
+              };
+            }
+            throw new Error("no android hd");
+          }
+          if (client === "IOS") {
+            if (options.type === "audio") {
+              return {
+                itag: 140,
+                has_audio: true,
+                has_video: false,
+                decipher: async () => "https://r.googlevideo.com/ios-aac",
+              };
+            }
+            if (options.type === "video") {
+              return {
+                itag: options.quality === "1080p" ? 137 : options.quality === "720p" ? 136 : 135,
+                has_audio: false,
+                has_video: true,
+                decipher: async () => `https://r.googlevideo.com/ios-video-${options.quality}`,
+              };
+            }
+            if (options.type === "video+audio" && options.quality === "360p") {
+              return {
+                itag: 18,
+                has_audio: true,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/stream-360",
+              };
+            }
+          }
+          throw new Error("unsupported");
+        },
+      };
+    },
+  };
+
+  const validate = async (url) => {
+    activeTierValidations++;
+    maxActiveTierValidations = Math.max(maxActiveTierValidations, activeTierValidations);
+    validatedUrls.push(url);
+    await new Promise((r) => setImmediate(r));
+    activeTierValidations--;
+    return true;
+  };
+
+  const result = await resolveVideo(yt, "dQw4w9WgXcQ", validate);
+
+  assert.equal(result.url, "https://r.googlevideo.com/stream-360");
+  assert.equal(result.mimeType, "video/mp4");
+  assert.deepEqual(result.variants, ["1080p", "720p", "480p", "360p"]);
+  assert.ok(maxActiveTierValidations <= 2, `max active was ${maxActiveTierValidations}`);
+  const aacChecks = validatedUrls.filter((u) => u.includes("ios-aac")).length;
+  assert.equal(aacChecks, 1);
+  const stream360Checks = validatedUrls.filter(
+    (u) => u === "https://r.googlevideo.com/stream-360",
+  ).length;
+  assert.equal(stream360Checks, 1);
+});
+
+test("upstream error on all clients throws rather than returning empty result", async () => {
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo() {
+      throw new Error("sign_in_required_upstream_bot_detection");
+    },
+  };
+
+  await assert.rejects(
+    resolveVideo(yt, "dQw4w9WgXcQ", async () => true),
+    /sign_in_required_upstream_bot_detection/,
+  );
+});
