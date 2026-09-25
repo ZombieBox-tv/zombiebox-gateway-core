@@ -1,5 +1,16 @@
 # zombiebox-gateway-core: component work
 
+## dev.63 live audio delivery and Spotify refusal containment
+
+Fragment audio-only live AAC into bounded one-second fMP4 units and flush each
+gateway stream write so the selected Client receives headers and media promptly.
+The real-FFmpeg host integration measures first-byte delivery and verifies AAC
+output; the selected Vizio still needs a fresh Apple Music sound/timeline test.
+Keep the video conversion path unchanged. Spotify now records stop outcomes and
+reissues a bounded stop when its pinned daemon refuses audio keys across Connect
+reconnections. It reports unplayable state instead of false playback; it does not
+resolve the upstream key refusal or establish sound. No product gate closes.
+
 ## dev.61 capability-aware media and receiver triage
 
 Prefer native MPEG-TS HLS only when the current device's functional HLS and

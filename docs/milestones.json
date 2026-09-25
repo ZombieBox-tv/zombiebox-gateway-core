@@ -3,6 +3,7 @@
   "repository": "zombiebox-gateway-core",
   "productRegistry": "workspace:docs/milestones.json",
   "notes": [
+    "Dev.63: Audio-only live HLS conversion emits bounded fMP4 fragments and flushes gateway stream writes; real-FFmpeg host integration verifies early AAC bytes but Vizio/Apple Music sound and timeline remain unverified. Spotify records bounded stop outcomes and contains repeated audio-key refusals across Connect reconnections without claiming playable audio. No product milestone closes.",
     "Dev.62: AirPlay receiver sessions now honor fresh device HLS evidence and choose a bounded Gateway conversion for unsupported native HLS; audio-only output uses audio/mp4. Spotify diagnostics stop a repeated audio-key-refusal skip cascade after three failures, distinguish playability from discovery, and forward an allowlisted private status. Go race, architecture, format and wrapper checks pass. Neither AirPlay nor Spotify sound is physically verified; Spotify's pinned daemon still lacks confirmed support for the refused key path. No product milestone closes.",
     "Dev.61: Functional-probe-gated native MPEG-TS HLS planning with Gateway fallback, higher validated YouTube renditions, quality-session fencing, IPTV setup state, AirPlay audio readiness/timestamp candidate, and private Spotify daemon categories. Host/race checks pass; receiver sound and physical playback remain unverified. No product milestone closes.",
     "Dev.60: Gateway-time media probe manifest and authenticated Client version refresh, rejection of undated PASS evidence, fresh 720p probe over low-RAM hint, retryable YouTube-related busy response, and Spotify early audio headers plus private bounded flow counters. Race-enabled source tests pass; physical quality switching, related relevance and Spotify sound remain unverified. No product milestone closes.",
@@ -134,6 +135,6 @@
       "remoteURL": "https://github.com/ZombieBox-tv/zombiebox-gateway-core/milestone/10"
     }
   ],
-  "developmentCheckpoint": "v0.1.0-dev.62",
+  "developmentCheckpoint": "v0.1.0-dev.63",
   "remote": "https://github.com/ZombieBox-tv/zombiebox-gateway-core"
 }

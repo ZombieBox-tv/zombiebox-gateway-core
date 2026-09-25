@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"net/http"
 	"sync"
 	"time"
 )
@@ -8,6 +9,8 @@ import (
 const (
 	spotifyStallThreshold         = 15 * time.Second
 	spotifyMaxConsecutiveRefusals = 3
+	spotifyCircuitCooldown        = 30 * time.Second
+	spotifyMinStopInterval        = 1 * time.Second
 )
 
 var spotifyFailureNames = [...]string{
@@ -52,6 +55,11 @@ type SpotifyDaemonDiagnostics struct {
 	bufferingSince      time.Time
 	consecutiveRefusals int
 	refusalLimited      bool
+	circuitOpenedAt     time.Time
+	lastStopAttemptAt   time.Time
+	stopAttempts        int
+	lastStopResult      string
+	lastStopHTTPStatus  int
 	onRefusalLimit      func()
 	clock               func() time.Time
 }
@@ -108,6 +116,28 @@ func (d *SpotifyDaemonDiagnostics) ResetRefusals() {
 	defer d.mu.Unlock()
 	d.consecutiveRefusals = 0
 	d.refusalLimited = false
+	d.circuitOpenedAt = time.Time{}
+}
+
+func (d *SpotifyDaemonDiagnostics) RecordStopResult(statusCode int, errStr string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastStopHTTPStatus = statusCode
+	if errStr != "" {
+		d.lastStopResult = errStr
+	} else {
+		switch statusCode {
+		case http.StatusOK:
+			d.lastStopResult = "ok"
+		case http.StatusNoContent:
+			d.lastStopResult = "no_session"
+		default:
+			d.lastStopResult = "http_error"
+		}
+	}
 }
 
 func (d *SpotifyDaemonDiagnostics) Write(input []byte) (int, error) {
@@ -153,9 +183,22 @@ func (d *SpotifyDaemonDiagnostics) finishLine() {
 		d.lineCategories[i] = false
 	}
 	if keyRefused {
+		now := d.clock()
 		d.consecutiveRefusals++
-		if d.consecutiveRefusals >= spotifyMaxConsecutiveRefusals && !d.refusalLimited {
+		if d.refusalLimited {
+			// Circuit breaker is already open. If key refusals continue to arrive
+			// (from overlapping in-flight loads or an auto-reconnect cascade),
+			// re-assert stop if paced interval has elapsed to prevent an unbounded cascade.
+			if d.onRefusalLimit != nil && (d.lastStopAttemptAt.IsZero() || now.Sub(d.lastStopAttemptAt) >= spotifyMinStopInterval) {
+				d.lastStopAttemptAt = now
+				d.stopAttempts++
+				onLimit = d.onRefusalLimit
+			}
+		} else if d.consecutiveRefusals >= spotifyMaxConsecutiveRefusals {
 			d.refusalLimited = true
+			d.circuitOpenedAt = now
+			d.lastStopAttemptAt = now
+			d.stopAttempts++
 			if d.onRefusalLimit != nil {
 				onLimit = d.onRefusalLimit
 			}
@@ -175,14 +218,30 @@ type spotifyDaemonHealth struct {
 	StalledBuffering    bool              `json:"stalledBuffering"`
 	RefusalLimited      bool              `json:"refusalLimited,omitempty"`
 	ConsecutiveRefusals int               `json:"consecutiveRefusals,omitempty"`
+	StopAttempts        int               `json:"stopAttempts,omitempty"`
+	LastStopResult      string            `json:"lastStopResult,omitempty"`
+	LastStopStatus      int               `json:"lastStopStatus,omitempty"`
 }
 
-func (d *SpotifyDaemonDiagnostics) observe(bufferingWithoutTrack, audioActive bool) {
+// An active attempt is evaluated against the refusal circuit. Reconnects during
+// cooldown keep the circuit open; later or explicitly requested attempts may retry.
+func (d *SpotifyDaemonDiagnostics) observePlayback(stopped, bufferingWithoutTrack, audioActive bool) {
 	if d == nil {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	now := d.clock()
+	if !stopped && d.refusalLimited {
+		// Playback transitioned from stopped to active while refusal limited.
+		// Only re-arm if the circuit cooldown has elapsed, indicating an intentional
+		// later retry rather than an immediate automatic reconnect cascade.
+		if !d.circuitOpenedAt.IsZero() && now.Sub(d.circuitOpenedAt) >= spotifyCircuitCooldown {
+			d.consecutiveRefusals = 0
+			d.refusalLimited = false
+			d.circuitOpenedAt = time.Time{}
+		}
+	}
 	d.observeLocked(bufferingWithoutTrack, audioActive)
 }
 
@@ -193,6 +252,11 @@ func (d *SpotifyDaemonDiagnostics) observeLocked(bufferingWithoutTrack, audioAct
 		if audioActive {
 			d.consecutiveRefusals = 0
 			d.refusalLimited = false
+			d.circuitOpenedAt = time.Time{}
+			// Real recovery: clear cumulative failure counters so stale errors do not linger.
+			for i := range d.counts {
+				d.counts[i] = 0
+			}
 		}
 	} else if d.bufferingSince.IsZero() {
 		d.bufferingSince = now
@@ -212,6 +276,9 @@ func (d *SpotifyDaemonDiagnostics) snapshot(bufferingWithoutTrack, audioActive b
 		StalledBuffering:    !d.bufferingSince.IsZero() && now.Sub(d.bufferingSince) >= spotifyStallThreshold,
 		RefusalLimited:      d.refusalLimited,
 		ConsecutiveRefusals: d.consecutiveRefusals,
+		StopAttempts:        d.stopAttempts,
+		LastStopResult:      d.lastStopResult,
+		LastStopStatus:      d.lastStopHTTPStatus,
 	}
 	for i, name := range spotifyFailureNames {
 		out.FailureCounts[name] = d.counts[i]

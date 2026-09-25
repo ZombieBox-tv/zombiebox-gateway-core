@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -95,7 +96,7 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 					if bridge != nil {
 						bridge.OnStopped()
 					}
-					diagnostics.observe(false, false)
+					diagnostics.observePlayback(true, false, false)
 				} else {
 					var st struct {
 						Stopped     bool `json:"stopped"`
@@ -126,7 +127,7 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 						}
 					}
 					audioActive := bridge != nil && bridge.diagnostic().Active
-					diagnostics.observe(!st.Stopped && st.Buffering && st.Track == nil, audioActive)
+					diagnostics.observePlayback(st.Stopped, !st.Stopped && st.Buffering && st.Track == nil, audioActive)
 					// Forward only the fields the gateway needs. The daemon's raw
 					// status also contains account, device and track identifiers.
 					safe := map[string]any{
@@ -155,6 +156,9 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 				if bridge != nil {
 					bridge.OnStopped()
 				}
+				if diagnostics != nil {
+					diagnostics.observePlayback(true, false, false)
+				}
 			} else if r.URL.Path == "/player/next" || r.URL.Path == "/player/prev" || r.URL.Path == "/player/seek" {
 				if bridge != nil {
 					bridge.ResetBuffer()
@@ -174,15 +178,36 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 	}
 	if c.Mode == "spotify" {
 		if diagnostics != nil {
+			var stopMu sync.Mutex
 			diagnostics.SetOnRefusalLimit(func() {
+				if !stopMu.TryLock() {
+					return
+				}
+				defer stopMu.Unlock()
+
 				stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer stopCancel()
 				req, err := http.NewRequestWithContext(stopCtx, http.MethodPost, daemonURL+"/player/stop", nil)
-				if err == nil {
-					res, doErr := client.Do(req)
-					if doErr == nil {
-						_ = res.Body.Close()
+				if err != nil {
+					diagnostics.RecordStopResult(0, "request_error")
+					return
+				}
+				res, doErr := client.Do(req)
+				if doErr != nil {
+					if errors.Is(doErr, context.DeadlineExceeded) || (stopCtx.Err() == context.DeadlineExceeded) {
+						diagnostics.RecordStopResult(0, "timeout")
+					} else {
+						diagnostics.RecordStopResult(0, "transport_error")
 					}
+					return
+				}
+				defer res.Body.Close()
+				diagnostics.RecordStopResult(res.StatusCode, "")
+				if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusNoContent {
+					if bridge != nil {
+						bridge.OnStopped()
+					}
+					diagnostics.observePlayback(true, false, false)
 				}
 			})
 		}
@@ -198,6 +223,9 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			}
 			w.Header().Set("Content-Type", "application/json")
 			audio := bridge.diagnostic()
+			if diagnostics != nil {
+				diagnostics.observePlayback(health.Stopped, health.BufferingWithoutTrack, audio.Active)
+			}
 			_ = json.NewEncoder(w).Encode(spotifyWorkerHealth{spotifyHealthResult: health, Audio: audio, Daemon: diagnostics.snapshot(health.BufferingWithoutTrack, audio.Active)})
 		})
 		mux.HandleFunc("GET /status", proxy)

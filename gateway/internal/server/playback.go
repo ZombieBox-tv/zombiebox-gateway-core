@@ -527,7 +527,11 @@ func (w contextWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(30 * time.Second))
-	return w.ResponseWriter.Write(p)
+	n, err := w.ResponseWriter.Write(p)
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
 }
 
 // Do not append a JSON error to a partially transmitted MP4.

@@ -18,6 +18,7 @@ type spotifyHealthResult struct {
 	AuthorizationRequired bool   `json:"authorizationRequired"`
 	AuthMode              string `json:"authMode,omitempty"`
 	BufferingWithoutTrack bool   `json:"bufferingWithoutTrack,omitempty"`
+	Stopped               bool   `json:"stopped,omitempty"`
 }
 
 // Spotify's pairing code endpoint contains a secret. Health only inspects its
@@ -35,6 +36,7 @@ func spotifyHealth(ctx context.Context, client *http.Client, upstream, stateDir 
 	_ = res.Body.Close()
 	if res.StatusCode == http.StatusOK {
 		health.AuthorizationRequired = true
+		health.Stopped = true
 		return health, nil
 	}
 	if res.StatusCode != http.StatusNoContent {
@@ -63,13 +65,17 @@ func spotifyHealth(ctx context.Context, client *http.Client, upstream, stateDir 
 			}
 			if json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&status) == nil && strings.TrimSpace(status.Username) != "" {
 				health.Ready = true
+				health.Stopped = status.Stopped
 				health.BufferingWithoutTrack = !status.Stopped && status.Buffering && status.Track == nil
 				return health, nil
 			}
+		} else if res.StatusCode == http.StatusNoContent {
+			health.Stopped = true
 		}
 	}
 	if health.AuthMode == "zeroconf" {
 		health.AuthorizationRequired = true
+		health.Stopped = true
 		return health, nil
 	}
 	return health, errors.New("Spotify session unavailable")

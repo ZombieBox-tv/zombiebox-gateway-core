@@ -270,6 +270,11 @@ func TestSpotifyStatusAugmentsDaemonDiagnosticsWithoutSecrets(t *testing.T) {
 			_, _ = io.WriteString(w, `{"stopped":false,"buffering":true,"track":null,"volume":75,"volume_steps":100,"username":"secret-account-name"}`)
 			return
 		}
+		if r.URL.Path == "/player/resume" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"stopped":false,"paused":false}`)
+			return
+		}
 		http.NotFound(w, r)
 	}))
 	defer upstream.Close()
@@ -349,5 +354,117 @@ func TestSpotifyStatusAugmentsDaemonDiagnosticsWithoutSecrets(t *testing.T) {
 	daemonField, ok := updatedMap["daemon"].(map[string]any)
 	if !ok || daemonField["refusalLimited"] != true {
 		t.Fatalf("refusalLimited missing or false in /status daemon field: %+v", updatedMap)
+	}
+	if daemonField["stopAttempts"] != float64(1) || daemonField["lastStopResult"] != "ok" || daemonField["lastStopStatus"] != float64(200) {
+		t.Fatalf("expected recorded stop diagnostics in daemon field: %+v", daemonField)
+	}
+
+	// Fresh auto-reconnect attempt while circuit open (cooldown window active):
+	// /status reflects that refusal limit remains active.
+	req = httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &updatedMap); err != nil {
+		t.Fatal(err)
+	}
+	daemonField = updatedMap["daemon"].(map[string]any)
+	if daemonField["refusalLimited"] != true {
+		t.Fatalf("refusalLimited must remain true during auto-reconnect cooldown: %+v", updatedMap)
+	}
+
+	// Manual retry via explicit user action: POST /player/resume
+	req = httptest.NewRequest("POST", "/player/resume", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 from /player/resume, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify /status after resume shows refusal limit cleared
+	req = httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &updatedMap); err != nil {
+		t.Fatal(err)
+	}
+	daemonField = updatedMap["daemon"].(map[string]any)
+	if daemonField["refusalLimited"] == true || (daemonField["consecutiveRefusals"] != nil && daemonField["consecutiveRefusals"] != float64(0)) {
+		t.Fatalf("refusalLimited and consecutiveRefusals must clear after manual resume: %+v", updatedMap)
+	}
+}
+
+func TestSpotifyStopCallbackHTTPTransportFailureAndResults(t *testing.T) {
+	stopFailed := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/player/stop" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"internal error"}`)
+			select {
+			case stopFailed <- struct{}{}:
+			default:
+			}
+			return
+		}
+		if r.URL.Path == "/status" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"stopped":false,"buffering":true,"track":null,"username":"secret-account"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("ZOMBIE_SPOTIFY_DAEMON_URL", upstream.URL)
+
+	dir := t.TempDir()
+	c := Config{Mode: "spotify", Token: strings.Repeat("k", 32), StateDir: dir}
+	diagnostics := NewSpotifyDaemonDiagnostics()
+	handler := HandlerWithSpotifyDiagnostics(context.Background(), c, diagnostics)
+
+	// Trigger 3 key refusals to hit limit
+	private := "spotify:track:private-uri secret-token"
+	for i := 0; i < 3; i++ {
+		diagnostics.Write([]byte("skipping track: Spotify refused the audio key (code 1) for this playback context: " + private + "\n"))
+	}
+
+	select {
+	case <-stopFailed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for worker to attempt /player/stop")
+	}
+
+	// Verify status records http_error without crashing or leaking secrets
+	req := httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	bodyStr := rec.Body.String()
+	for _, forbidden := range []string{private, "secret-account", "secret-token", "internal error"} {
+		if strings.Contains(bodyStr, forbidden) {
+			t.Fatalf("leaked secret or raw error in /status: %s", bodyStr)
+		}
+	}
+	var resMap map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resMap); err != nil {
+		t.Fatal(err)
+	}
+	daemonField, ok := resMap["daemon"].(map[string]any)
+	if !ok || daemonField["refusalLimited"] != true {
+		t.Fatalf("refusalLimited must be true despite transport failure: %+v", resMap)
+	}
+	if daemonField["lastStopResult"] != "http_error" || daemonField["lastStopStatus"] != float64(500) {
+		t.Fatalf("expected http_error status 500 recorded: %+v", daemonField)
 	}
 }

@@ -77,19 +77,25 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 	// TS AAC carries ADTS headers; copying to fragmented MP4 needs ASC.
 	// Manifests may contain TS. Never apply an AAC filter to MP3/other audio.
 	adtsAAC := false
+	liveAudio := false
 	if mode == "REMUX" && (bridge.kind != "" || strings.EqualFold(strings.TrimSpace(strings.Split(source.MIME, ";")[0]), "video/mp2t")) {
 		metadata, err := t.tools.probe(ctx, bridge.video, true, bridge.kind)
 		if err != nil {
 			return err
 		}
+		hasAudio, hasVideo := false, false
 		for _, stream := range metadata.Streams {
+			if stream.Type == "video" {
+				hasVideo = true
+			}
 			if stream.Type == "audio" && (selection.AudioID == nil || stream.Index == *selection.AudioID) {
+				hasAudio = true
 				adtsAAC = stream.Codec == "aac"
-				break
 			}
 		}
+		liveAudio = source.Live && hasAudio && !hasVideo
 	}
-	err = t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, mode, selection, output, bridge.kind)
+	err = t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, liveAudio, mode, selection, output, bridge.kind)
 	if err == nil && bridge.failedUpstream() {
 		return errors.New("remote input failed")
 	}

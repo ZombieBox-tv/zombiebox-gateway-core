@@ -100,10 +100,10 @@ func (t *Tools) ConvertSelected(ctx context.Context, path, mode string, selectio
 	if err != nil {
 		return err
 	}
-	return t.convert(ctx, input, "", false, false, mode, selection, output)
+	return t.convert(ctx, input, "", false, false, false, mode, selection, output)
 }
 
-func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, adtsAAC bool, mode string, selection domain.MediaSelection, output io.Writer, manifestKind ...string) error {
+func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, adtsAAC, liveAudio bool, mode string, selection domain.MediaSelection, output io.Writer, manifestKind ...string) error {
 	if !ValidQuality(selection.Quality) {
 		return errors.New("invalid media quality")
 	}
@@ -162,7 +162,12 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	} else {
 		args = append(args, videoEncoding(selection.Quality)...)
 	}
-	args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
+	args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof")
+	if liveAudio {
+		// Audio-only streams have no video keyframes to trigger a timely fragment.
+		args = append(args, "-frag_duration", "1000000")
+	}
+	args = append(args, "-f", "mp4", "pipe:1")
 	if err := t.runner.Run(ctx, t.ffmpeg, args, output); err != nil {
 		return toolError(ctx, "conversion_failed")
 	}
