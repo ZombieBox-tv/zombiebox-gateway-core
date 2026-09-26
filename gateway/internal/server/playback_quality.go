@@ -682,6 +682,7 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		cancel:            cancel,
 		selection:         selection,
 		resources:         map[string]string{},
+		rangeTrace:        &mediaTraceCounters{},
 		supersedes:        oldID,
 	}
 	oldSess.supersededBy = id

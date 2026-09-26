@@ -41,6 +41,7 @@ type session struct {
 	supersedes        string
 	supersededBy      string
 	hybridSpool       *hybridSpool
+	rangeTrace        *mediaTraceCounters
 }
 
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
@@ -243,7 +244,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	ticket := randomID(24)
 	expires := time.Now().Add(6 * time.Hour)
 	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{networkAdaptation: (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation), receiverID: receiverID, mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}}
+	s.sessions[id] = &session{networkAdaptation: (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation), receiverID: receiverID, mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}, rangeTrace: &mediaTraceCounters{}}
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS
@@ -309,7 +310,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		plan.Seekable = !resolved.Live
 		plan.ResumeMS = 0
 	}
-	if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" {
+	if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" && !knownLengthRemux {
 		log.Printf("media plan provider=%s mode=%s split=%t quality=%s resume_ms=%d known_length_remux=%t", resolved.Item.Provider, mode, resolved.AudioURL != "", req.Quality, resume, knownLengthRemux)
 	}
 	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
@@ -577,7 +578,13 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", mime)
 		w.Header().Set("Cache-Control", "private, no-store")
-		http.ServeContent(contextWriter{ResponseWriter: w, ctx: r.Context()}, r, "hybrid.mp4", spoolModTime, f)
+		writer := http.ResponseWriter(contextWriter{ResponseWriter: w, ctx: r.Context()})
+		if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" && knownLengthRemux {
+			observed := &mediaRangeResponseRecorder{ResponseWriter: writer}
+			writer = observed
+			defer traceKnownLengthResponse(sess, r, observed)
+		}
+		http.ServeContent(writer, r, "hybrid.mp4", spoolModTime, f)
 		return
 	}
 	if sess.mode == "REMUX" || sess.mode == "TRANSCODE" || sess.mode == "PCM_STREAM" {

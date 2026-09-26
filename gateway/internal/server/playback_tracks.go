@@ -207,6 +207,7 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 		cancel:            cancel,
 		selection:         selection,
 		resources:         map[string]string{},
+		rangeTrace:        &mediaTraceCounters{},
 	}
 	mime := "video/mp4"
 	if isAudioOnly(sess.source, sess.metadata) {

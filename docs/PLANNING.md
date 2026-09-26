@@ -1,5 +1,16 @@
 # zombiebox-gateway-core: component work
 
+## September 26 bounded YouTube range QA trace
+
+The known-length YouTube MP4 response can now report sampled status, byte
+count, Content-Length and Range shape when the existing `ZOMBIE_MEDIA_TRACE`
+QA flag is enabled. It records no URLs, tickets, authorization or raw Range
+values. The first eight responses and every 64th thereafter are logged, with
+separately bounded failure samples. Host `http.ServeContent` tests cover 206
+and 416 behavior through the observer; full Go vet/race, format and architecture
+checks pass. This diagnostic does not change the selected stream or verify
+1080p on the Vizio. It awaits a new gateway QA image and physical comparison.
+
 ## September 26 QA candidate, still unreleased
 
 The dev.103 QA gateway retains the existing named volumes. A selected 720p
