@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -810,7 +811,7 @@ func TestYouTubeHDQualitySelectionAndSwitching(t *testing.T) {
 			sources:  []domain.Source{src},
 		}
 	}
-	mediaStub := &qualityTestMedia{width: 640, height: 360, codec: "h264", profile: "Baseline"}
+	mediaStub := &dynamicRemoteMedia{qualityTestMedia: qualityTestMedia{width: 640, height: 360, codec: "h264", profile: "Baseline"}}
 	s.deps.Media = mediaStub
 	s.deps.RemoteMedia = mediaStub
 
@@ -1862,5 +1863,234 @@ func TestExplicitUnsupportedQualityRejected(t *testing.T) {
 	s.mu.Unlock()
 	if countNo1080 != 0 {
 		t.Fatalf("no session should be created on rejected quality, got %d", countNo1080)
+	}
+}
+
+type delayedDynamicRemoteMedia struct {
+	*dynamicRemoteMedia
+	delay time.Duration
+	calls int
+}
+
+func (m *delayedDynamicRemoteMedia) ProbeRemote(ctx context.Context, source domain.Source) (domain.Metadata, error) {
+	m.calls++
+	if m.delay > 0 {
+		timer := time.NewTimer(m.delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return domain.Metadata{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return m.dynamicRemoteMedia.ProbeRemote(ctx, source)
+}
+
+func startYouTubeQualityRefreshSession(t *testing.T, deviceID string, media Media, remoteMedia RemoteMedia, resolveFn func(context.Context, domain.Source) (domain.Source, error)) (*Server, string, domain.Plan) {
+	t.Helper()
+	s := testServer(t, nil, "")
+	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: "http://wrapper.local", Token: strings.Repeat("q", 32)}}); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, deviceID)
+	setDevicePassingProbes(t, s, deviceID, append(standardCapableProbes(), "http-progressive")...)
+	source := domain.Source{
+		Item:       domain.Item{ID: "youtube-quality-refresh", Provider: "youtube", Kind: "video", Playable: true},
+		URL:        "http://wrapper.local/resolve/quality-refresh",
+		MIME:       "application/x-zombie-youtube",
+		Variants:   []string{"360p"},
+		ResolveURL: "http://wrapper.local/resolve/quality-refresh",
+	}
+	s.deps.Catalog = &mockYouTubeCatalog{Catalog: s.deps.Catalog, source: source}
+	s.deps.Media = media
+	s.deps.RemoteMedia = remoteMedia
+	s.deps.Resolver = &mockYouTubeResolver{resolveFn: resolveFn}
+	s.mu.Lock()
+	s.searchResults[deviceID] = searchResult{
+		query:    "quality refresh",
+		revision: s.configRevision["youtube"],
+		fetched:  time.Now(),
+		sources:  []domain.Source{source},
+	}
+	s.mu.Unlock()
+
+	response := call(s, http.MethodPost, "/v1/playback", `{"itemId":"youtube-quality-refresh"}`, deviceID, token, "")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("initial playback returned %d: %s", response.Code, response.Body)
+	}
+	var plan domain.Plan
+	if err := json.Unmarshal(response.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	return s, token, plan
+}
+
+func TestYouTubeQualityMenuRefreshesAutoVariantsAndRequiresExactManualTier(t *testing.T) {
+	remoteMedia := &delayedDynamicRemoteMedia{dynamicRemoteMedia: &dynamicRemoteMedia{}}
+	var refreshDeadlineRemaining time.Duration
+	resolveFn := func(ctx context.Context, source domain.Source) (domain.Source, error) {
+		resolved := source
+		resolved.MIME = "video/mp4"
+		switch source.ResolveQuality {
+		case "":
+			resolved.URL = "https://r1.googlevideo.com/video-360-current"
+			resolved.Variants = []string{"360p"}
+		case "auto":
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return domain.Source{}, errors.New("quality inventory refresh has no deadline")
+			}
+			refreshDeadlineRemaining = time.Until(deadline)
+			resolved.URL = "https://r1.googlevideo.com/video-360-refreshed"
+			resolved.Variants = []string{"1080p", "720p", "360p", "9999p"}
+		case "720p":
+			resolved.URL = "https://r1.googlevideo.com/video-720-selected"
+			resolved.AudioURL = "https://r2.googlevideo.com/audio-720-selected"
+			resolved.Variants = []string{"1080p", "720p", "360p"}
+		case "1080p":
+			// Simulate the wrapper advertising an available tier but resolving a
+			// lower source after the user explicitly asks for 1080p.
+			resolved.URL = "https://r1.googlevideo.com/video-720-fallback"
+			resolved.AudioURL = "https://r2.googlevideo.com/audio-720-fallback"
+			resolved.Variants = []string{"1080p", "720p", "360p"}
+		default:
+			return domain.Source{}, errors.New("unexpected quality request")
+		}
+		return resolved, nil
+	}
+
+	s, token, plan := startYouTubeQualityRefreshSession(t, "quality-refresh-device", remoteMedia, remoteMedia, resolveFn)
+	s.mu.Lock()
+	active := s.sessions[plan.SessionID]
+	active.metadata = nil
+	activeURL := active.source.URL
+	activeQuality := active.selection.Quality
+	s.mu.Unlock()
+	if err := s.setQualityPreference(t.Context(), "quality-refresh-device", "youtube", "video", "1080p"); err != nil {
+		t.Fatal(err)
+	}
+	remoteMedia.delay = 75 * time.Millisecond
+
+	response := call(s, http.MethodGet, "/v1/playback/"+plan.SessionID+"/qualities", "", "quality-refresh-device", token, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("qualities returned %d: %s", response.Code, response.Body)
+	}
+	var inventory domain.QualityInventory
+	if err := json.Unmarshal(response.Body.Bytes(), &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if !playback.HasQuality(inventory, "720p") || !playback.HasQuality(inventory, "1080p") {
+		t.Fatalf("fresh Auto variants did not expose validated HD options: %+v", inventory.Options)
+	}
+	if playback.HasQuality(inventory, "9999p") {
+		t.Fatalf("resolver returned an unsupported variant that was advertised: %+v", inventory.Options)
+	}
+	if remoteMedia.calls < 2 {
+		t.Fatalf("expected metadata probing before refresh; ProbeRemote calls=%d", remoteMedia.calls)
+	}
+	if refreshDeadlineRemaining <= 0 || refreshDeadlineRemaining > youtubeQualityInventoryRefreshTimeout-50*time.Millisecond {
+		t.Fatalf("refresh did not inherit the remaining menu request budget after probing: %s", refreshDeadlineRemaining)
+	}
+	if got := s.getQualityPreference(t.Context(), "quality-refresh-device", "youtube", "video"); got != "1080p" {
+		t.Fatalf("inventory refresh changed the stored preference to %q", got)
+	}
+	s.mu.Lock()
+	stillActive := s.sessions[plan.SessionID]
+	unchanged := stillActive == active && stillActive.source.URL == activeURL && stillActive.selection.Quality == activeQuality && stillActive.supersededBy == "" && stillActive.ctx.Err() == nil
+	s.mu.Unlock()
+	if !unchanged {
+		t.Fatal("inventory refresh changed or replaced the active playback URL/session/quality")
+	}
+
+	selected := call(s, http.MethodPost, "/v1/playback/"+plan.SessionID+"/quality", `{"qualityId":"720p","positionMs":12000}`, "quality-refresh-device", token, "")
+	if selected.Code != http.StatusCreated {
+		t.Fatalf("manual 720p switch returned %d: %s", selected.Code, selected.Body)
+	}
+	var selectedPlan domain.Plan
+	if err := json.Unmarshal(selected.Body.Bytes(), &selectedPlan); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	selectedSession := s.sessions[selectedPlan.SessionID]
+	s.mu.Unlock()
+	if selectedSession == nil || selectedSession.selection.Quality != "720p" || !hasExactYouTubeQuality(*selectedSession.metadata, "720p") {
+		t.Fatalf("manual 720p did not retain its exact resolved tier: session=%+v", selectedSession)
+	}
+	if got := s.getQualityPreference(t.Context(), "quality-refresh-device", "youtube", "video"); got != "720p" {
+		t.Fatalf("successful manual tier did not update preference: %q", got)
+	}
+
+	assertQualitySelectionFailurePreservesSession(t, s, "quality-refresh-device", "youtube", token, selectedPlan.SessionID, "1080p", 15000)
+}
+
+func TestYouTubeQualityInventoryRefreshIsCancellationAwareAndBackedOff(t *testing.T) {
+	remoteMedia := &dynamicRemoteMedia{}
+	refreshEntered := make(chan struct{})
+	var refreshCalls int
+	resolveFn := func(ctx context.Context, source domain.Source) (domain.Source, error) {
+		resolved := source
+		resolved.MIME = "video/mp4"
+		if source.ResolveQuality == "" {
+			resolved.URL = "https://r1.googlevideo.com/video-360-current"
+			resolved.Variants = []string{"360p"}
+			return resolved, nil
+		}
+		if source.ResolveQuality == "auto" {
+			refreshCalls++
+			close(refreshEntered)
+			<-ctx.Done()
+			return domain.Source{}, ctx.Err()
+		}
+		return domain.Source{}, errors.New("unexpected quality request")
+	}
+	s, token, plan := startYouTubeQualityRefreshSession(t, "quality-refresh-cancel-device", remoteMedia, remoteMedia, resolveFn)
+	s.mu.Lock()
+	active := s.sessions[plan.SessionID]
+	activeURL := active.source.URL
+	activeQuality := active.selection.Quality
+	s.mu.Unlock()
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/v1/playback/"+plan.SessionID+"/qualities", nil).WithContext(requestCtx)
+	request.Header.Set("X-Zombie-Device", "quality-refresh-cancel-device")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	completed := make(chan struct{})
+	go func() {
+		s.ServeHTTP(response, request)
+		close(completed)
+	}()
+	select {
+	case <-refreshEntered:
+	case <-time.After(time.Second):
+		t.Fatal("quality inventory refresh did not start")
+	}
+	cancelAt := time.Now()
+	cancel()
+	select {
+	case <-completed:
+		if elapsed := time.Since(cancelAt); elapsed > 250*time.Millisecond {
+			t.Fatalf("cancelled resolver took %s to return", elapsed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("quality inventory refresh did not stop after request cancellation")
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refresh resolver calls = %d, want one cancelled attempt", refreshCalls)
+	}
+
+	second := call(s, http.MethodGet, "/v1/playback/"+plan.SessionID+"/qualities", "", "quality-refresh-cancel-device", token, "")
+	if second.Code != http.StatusOK {
+		t.Fatalf("cached qualities after cancellation returned %d: %s", second.Code, second.Body)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("cancelled refresh was retried inside its backoff window: %d calls", refreshCalls)
+	}
+	s.mu.Lock()
+	unchanged := s.sessions[plan.SessionID] == active && active.source.URL == activeURL && active.selection.Quality == activeQuality && active.supersededBy == "" && active.ctx.Err() == nil
+	s.mu.Unlock()
+	if !unchanged {
+		t.Fatal("cancelled inventory refresh changed or replaced active playback")
 	}
 }

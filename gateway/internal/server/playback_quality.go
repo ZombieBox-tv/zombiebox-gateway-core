@@ -19,6 +19,13 @@ const qualityPrefBucket = "quality_preferences"
 
 const youtubeQualityResolveAttempts = 2
 const youtubeQualityResolveRetryDelay = 200 * time.Millisecond
+const youtubeQualityInventoryRefreshTimeout = 9 * time.Second
+const youtubeQualityInventoryRefreshBackoff = 30 * time.Second
+
+// This marker shares the per-session resource lifetime but cannot collide with
+// a routed HLS resource key. It records the next time an expensive Auto
+// inventory refresh may be attempted, including after transient failures.
+const youtubeQualityInventoryRefreshMarker = "\x00internal:youtube-quality-inventory-refresh-until"
 
 type qualityPreference struct {
 	QualityID string `json:"qualityId"`
@@ -310,13 +317,167 @@ func (s *Server) resolveAndProbeYouTubeSource(ctx context.Context, base domain.S
 			}
 			continue
 		}
+		if manualQuality && !hasExactYouTubeQuality(meta, quality) {
+			traceYouTubeQualityAttempt(true, quality, "probe", attempt, "wrong_tier")
+			return domain.Source{}, domain.Metadata{}, false
+		}
 		traceYouTubeQualityAttempt(manualQuality, quality, "probe", attempt, "passed")
 		return resolved, meta, true
 	}
 	return domain.Source{}, domain.Metadata{}, false
 }
 
+func hasExactYouTubeQuality(metadata domain.Metadata, qualityID string) bool {
+	targetHeight, err := strconv.Atoi(strings.TrimSuffix(qualityID, "p"))
+	if err != nil || targetHeight <= 0 {
+		return false
+	}
+
+	actualHeight := 0
+	for _, stream := range metadata.Streams {
+		if stream.Type == "video" && stream.Height > actualHeight {
+			actualHeight = stream.Height
+		}
+	}
+	return actualHeight == targetHeight
+}
+
+func hasYouTubeHDQuality(inventory domain.QualityInventory) bool {
+	for _, option := range inventory.Options {
+		height, err := strconv.Atoi(strings.TrimSuffix(option.ID, "p"))
+		if err == nil && height >= 720 {
+			return true
+		}
+	}
+	return false
+}
+
+func deviceCanUseYouTubeHDInventory(device domain.Device) bool {
+	metadata := domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+		{Type: "audio", Codec: "aac"},
+	}}
+	source := domain.Source{
+		Item:     domain.Item{Provider: "youtube", Kind: "video"},
+		Variants: []string{"720p"},
+	}
+	return playback.HasQuality(playback.Qualities(metadata, source, device, "auto"), "720p")
+}
+
+func validYouTubeVariants(variants []string) []string {
+	seen := make(map[string]struct{}, len(variants))
+	valid := make([]string, 0, len(variants))
+	for _, variant := range variants {
+		if !isManualYouTubeQuality(variant) {
+			continue
+		}
+		if _, ok := seen[variant]; ok {
+			continue
+		}
+		seen[variant] = struct{}{}
+		valid = append(valid, variant)
+	}
+	return valid
+}
+
+func mergeYouTubeVariants(current, refreshed []string) []string {
+	merged := validYouTubeVariants(current)
+	seen := make(map[string]struct{}, len(merged)+len(refreshed))
+	for _, variant := range merged {
+		seen[variant] = struct{}{}
+	}
+	for _, variant := range validYouTubeVariants(refreshed) {
+		if _, ok := seen[variant]; ok {
+			continue
+		}
+		seen[variant] = struct{}{}
+		merged = append(merged, variant)
+	}
+	return merged
+}
+
+func sameYouTubeQualitySession(current, snapshot *session) bool {
+	return current != nil && snapshot != nil &&
+		current.ctx.Done() == snapshot.ctx.Done() &&
+		current.source.ResolveURL == snapshot.source.ResolveURL &&
+		current.source.URL == snapshot.source.URL &&
+		current.selection.Quality == snapshot.selection.Quality &&
+		current.supersededBy == "" && current.ctx.Err() == nil
+}
+
+// refreshYouTubeQualityVariants asks the existing resolver for fresh Auto
+// variants while preserving the active URL, metadata and selected quality.
+// Only the inventory is copied back, and only if this session is still active.
+func (s *Server) refreshYouTubeQualityVariants(ctx context.Context, sessionID string, snapshot *session) []string {
+	if snapshot == nil || snapshot.source.Item.Provider != "youtube" || snapshot.source.Item.Kind != "video" || snapshot.source.Live || snapshot.source.ResolveURL == "" || s.deps.Resolver == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	current := s.sessions[sessionID]
+	if !sameYouTubeQualitySession(current, snapshot) {
+		s.mu.Unlock()
+		return nil
+	}
+	if current.source.Variants != nil {
+		for _, variant := range current.source.Variants {
+			if height, err := strconv.Atoi(strings.TrimSuffix(variant, "p")); err == nil && height >= 720 {
+				s.mu.Unlock()
+				return nil
+			}
+		}
+	}
+	if current.resources == nil {
+		current.resources = map[string]string{}
+	}
+	now := time.Now()
+	if next, err := strconv.ParseInt(current.resources[youtubeQualityInventoryRefreshMarker], 10, 64); err == nil && now.Before(time.Unix(0, next)) {
+		s.mu.Unlock()
+		return nil
+	}
+	current.resources[youtubeQualityInventoryRefreshMarker] = strconv.FormatInt(now.Add(youtubeQualityInventoryRefreshBackoff).UnixNano(), 10)
+	base := current.source
+	sessionCtx := current.ctx
+	s.mu.Unlock()
+
+	refreshCtx, cancel := context.WithTimeout(ctx, youtubeQualityInventoryRefreshTimeout)
+	stopSessionCancellation := context.AfterFunc(sessionCtx, cancel)
+	defer stopSessionCancellation()
+	defer cancel()
+
+	resolved, err := s.deps.Resolver.Resolve(refreshCtx, freshYouTubeQualityRequest(base, "auto"))
+	if err != nil || refreshCtx.Err() != nil {
+		return nil
+	}
+	freshVariants := validYouTubeVariants(resolved.Variants)
+	hasHD := false
+	for _, variant := range freshVariants {
+		if height, parseErr := strconv.Atoi(strings.TrimSuffix(variant, "p")); parseErr == nil && height >= 720 {
+			hasHD = true
+			break
+		}
+	}
+	if !hasHD {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current = s.sessions[sessionID]
+	if !sameYouTubeQualitySession(current, snapshot) {
+		return nil
+	}
+	current.source.Variants = mergeYouTubeVariants(current.source.Variants, freshVariants)
+	return append([]string(nil), current.source.Variants...)
+}
+
 func (s *Server) playbackQualities(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	// The Client gives this request 12 seconds. Share a single smaller budget
+	// across metadata probing and the optional resolver refresh so a slow probe
+	// cannot start a fresh nine-second wait near the end of the request.
+	inventoryCtx, cancelInventory := context.WithTimeout(r.Context(), youtubeQualityInventoryRefreshTimeout)
+	defer cancelInventory()
+
 	sess := s.ownedMediaSession(r, d.ID)
 	if sess == nil {
 		fail(w, 404, "session_not_found")
@@ -334,9 +495,9 @@ func (s *Server) playbackQualities(w http.ResponseWriter, r *http.Request, d dom
 		var value domain.Metadata
 		var err error
 		if sess.source.Path != "" && s.deps.Media != nil {
-			value, err = s.deps.Media.Probe(r.Context(), sess.source.Path)
+			value, err = s.deps.Media.Probe(inventoryCtx, sess.source.Path)
 		} else if s.deps.RemoteMedia != nil && media.RemoteCandidate(sess.source) {
-			value, err = s.deps.RemoteMedia.ProbeRemote(r.Context(), sess.source)
+			value, err = s.deps.RemoteMedia.ProbeRemote(inventoryCtx, sess.source)
 		}
 		if err != nil {
 			respond(w, 200, domain.QualityInventory{
@@ -350,6 +511,12 @@ func (s *Server) playbackQualities(w http.ResponseWriter, r *http.Request, d dom
 	}
 
 	inventory := playback.Qualities(*metadata, sess.source, d, sess.selection.Quality)
+	if !hasYouTubeHDQuality(inventory) && deviceCanUseYouTubeHDInventory(d) {
+		if variants := s.refreshYouTubeQualityVariants(inventoryCtx, r.PathValue("session"), sess); variants != nil {
+			sess.source.Variants = variants
+			inventory = playback.Qualities(*metadata, sess.source, d, sess.selection.Quality)
+		}
+	}
 	respond(w, 200, inventory)
 }
 
