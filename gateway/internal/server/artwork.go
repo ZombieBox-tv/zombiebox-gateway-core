@@ -84,6 +84,12 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request, d domain.Device
 func artworkProfile(device domain.Device, size string) domain.ArtworkProfile {
 	registration := device.Registration
 	low := registration.Memory.PhysicalMB <= 768 || registration.Memory.ClassMB <= 96 || registration.Display.Width <= 960
+	if size == "audio" {
+		if low {
+			return domain.ArtworkAudioSmall
+		}
+		return domain.ArtworkAudioMedium
+	}
 	if size == "hero" {
 		if low {
 			return domain.ArtworkHeroSmall

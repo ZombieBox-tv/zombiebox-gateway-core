@@ -16,7 +16,7 @@ import (
 
 func TestPrivateArtworkIsReplacedByAuthenticatedDerivative(t *testing.T) {
 	var encoded bytes.Buffer
-	jpeg.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 640, 360)), nil)
+	jpeg.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 1200, 1200)), nil)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Plex-Token") != "private-token" {
 			t.Error("credential missing")
@@ -48,6 +48,12 @@ func TestPrivateArtworkIsReplacedByAuthenticatedDerivative(t *testing.T) {
 	if w.Code != 200 || err != nil || format != "jpeg" || c.Width > 320 || c.Height > 180 {
 		t.Fatal(w.Code, c, err)
 	}
+	audioURL := screen.Hero.Item.ImageURL + "&size=audio"
+	audio := call(s, "GET", audioURL, "", "artwork-device", token, "")
+	audioConfig, audioFormat, audioErr := image.DecodeConfig(bytes.NewReader(audio.Body.Bytes()))
+	if audio.Code != 200 || audioErr != nil || audioFormat != "jpeg" || audioConfig.Width != 600 || audioConfig.Height != 600 || len(audio.Body.Bytes()) > 256<<10 {
+		t.Fatalf("audio artwork response: %d %dx%d %s %d bytes %v", audio.Code, audioConfig.Width, audioConfig.Height, audioFormat, audio.Body.Len(), audioErr)
+	}
 	etag := w.Header().Get("ETag")
 	if etag == "" || w.Header().Get("Cache-Control") != "private, max-age=300" {
 		t.Fatal("missing cache validators")
@@ -71,15 +77,15 @@ func TestPrivateArtworkIsReplacedByAuthenticatedDerivative(t *testing.T) {
 
 func TestArtworkBudgetsUseRegistrationAndFiniteProfiles(t *testing.T) {
 	device := domain.Device{}
-	if artworkProfile(device, "hero") != domain.ArtworkHeroSmall {
+	if artworkProfile(device, "hero") != domain.ArtworkHeroSmall || artworkProfile(device, "audio") != domain.ArtworkAudioSmall {
 		t.Fatal("unknown device must use conservative budget")
 	}
 	device.Registration = domain.Registration{Memory: domain.Memory{PhysicalMB: 2048, ClassMB: 256}, Display: domain.Display{Width: 1920, Height: 1080}}
-	if artworkProfile(device, "hero") != domain.ArtworkHeroMedium || artworkProfile(device, "poster") != domain.ArtworkPosterMedium {
+	if artworkProfile(device, "hero") != domain.ArtworkHeroMedium || artworkProfile(device, "poster") != domain.ArtworkPosterMedium || artworkProfile(device, "audio") != domain.ArtworkAudioMedium || artworkProfile(device, "") != domain.ArtworkLandscapeMedium {
 		t.Fatal("standard device")
 	}
 	device.Registration.Memory.PhysicalMB = 512
-	if artworkProfile(device, "poster") != domain.ArtworkPosterSmall || artworkProfile(device, "100000x100000") != domain.ArtworkLandscapeSmall {
+	if artworkProfile(device, "poster") != domain.ArtworkPosterSmall || artworkProfile(device, "audio") != domain.ArtworkAudioSmall || artworkProfile(device, "100000x100000") != domain.ArtworkLandscapeSmall {
 		t.Fatal("low-memory allocation must remain bounded")
 	}
 }

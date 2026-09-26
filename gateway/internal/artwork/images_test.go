@@ -59,6 +59,34 @@ func TestRejectsNonImage(t *testing.T) {
 	}
 }
 
+func TestAudioDerivativeKeepsSquareArtWithinBudget(t *testing.T) {
+	picture := image.NewRGBA(image.Rect(0, 0, 1200, 1200))
+	for y := 0; y < picture.Bounds().Dy(); y++ {
+		for x := 0; x < picture.Bounds().Dx(); x++ {
+			picture.Set(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: uint8(x * y), A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, picture, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatal(err)
+	}
+	images := New(doFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(encoded.Bytes()))}, nil
+	}), nil)
+
+	data, err := images.Image(t.Context(), domain.Source{ArtworkURL: "http://fixture.invalid/album.jpg"}, domain.ArtworkAudioSmall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || format != "jpeg" || config.Width != 600 || config.Height != 600 {
+		t.Fatalf("unexpected audio derivative: %dx%d %s %v", config.Width, config.Height, format, err)
+	}
+	if len(data) > 256<<10 {
+		t.Fatalf("audio derivative exceeds encoded limit: %d bytes", len(data))
+	}
+}
+
 func TestCancelledFollowerDoesNotCancelSharedImage(t *testing.T) {
 	var encoded bytes.Buffer
 	_ = jpeg.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 32, 32)), nil)

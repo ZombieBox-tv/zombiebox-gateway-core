@@ -8,6 +8,8 @@ const (
 	ArtworkLandscapeMedium ArtworkProfile = "landscape-medium"
 	ArtworkPosterSmall     ArtworkProfile = "poster-small"
 	ArtworkPosterMedium    ArtworkProfile = "poster-medium"
+	ArtworkAudioSmall      ArtworkProfile = "audio-small"
+	ArtworkAudioMedium     ArtworkProfile = "audio-medium"
 	ArtworkHeroSmall       ArtworkProfile = "hero-small"
 	ArtworkHeroMedium      ArtworkProfile = "hero-medium"
 )

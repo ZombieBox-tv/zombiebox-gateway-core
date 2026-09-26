@@ -26,6 +26,10 @@ func profileBounds(profile domain.ArtworkProfile) (int, int, bool) {
 		width, height = 180, 270
 	case domain.ArtworkPosterMedium:
 		width, height = 320, 480
+	case domain.ArtworkAudioSmall:
+		width, height = 600, 600
+	case domain.ArtworkAudioMedium:
+		width, height = 800, 800
 	default:
 		return 0, 0, false
 	}
