@@ -273,6 +273,9 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		fail(w, 409, "quality_unavailable")
 		return
 	}
+	if (mode == "REMUX" || mode == "HYBRID") && (request.PositionMS > 0 || chosenQuality == "LOW" || (targetMetadata != nil && playback.RequiresTranscodeForQuality(*targetMetadata, chosenQuality))) {
+		mode = "TRANSCODE"
+	}
 
 	oldID := r.PathValue("session")
 	s.mu.Lock()
@@ -332,11 +335,21 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 	}
 	if mode == "TRANSCODE" || mode == "REMUX" {
 		plan.MIME = "video/mp4"
+		if isAudioOnly(targetSource, targetMetadata) {
+			plan.MIME = "audio/mp4"
+		}
 		plan.Seekable = false
 		plan.ResumeMS = 0
 		if mode == "TRANSCODE" {
 			plan.TimelineOffsetMS = request.PositionMS
 		}
+	} else if mode == "HYBRID" {
+		plan.MIME = "video/mp4"
+		if isAudioOnly(targetSource, targetMetadata) {
+			plan.MIME = "audio/mp4"
+		}
+		plan.Seekable = !targetSource.Live
+		plan.ResumeMS = 0
 	} else {
 		plan.Seekable = !targetSource.Live
 		plan.ResumeMS = request.PositionMS

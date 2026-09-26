@@ -583,6 +583,25 @@ func TestSelectedQualityModeAndPositionPreservation(t *testing.T) {
 	}
 }
 
+func TestSelectedQualityModeResumesHybridWithFullTranscode(t *testing.T) {
+	now := time.Now().Unix()
+	metadata := domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "h264", Profile: "Baseline", Width: 640, Height: 360},
+		{Type: "audio", Codec: "ac3"},
+	}}
+	device := domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{
+		{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+		{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+	}}}
+	source := domain.Source{MIME: "video/x-matroska"}
+	if mode, _ := SelectedQualityMode(metadata, source, device, "auto", 0, ""); mode != "HYBRID" {
+		t.Fatalf("expected verified audio-only conversion, got %s", mode)
+	}
+	if mode, _ := SelectedQualityMode(metadata, source, device, "auto", 5000, "HYBRID"); mode != "TRANSCODE" {
+		t.Fatalf("accurate resume must transcode the video, got %s", mode)
+	}
+}
+
 func TestSelectedQualityModeProbeEvidenceGates(t *testing.T) {
 	now := time.Now().Unix()
 	meta := domain.Metadata{

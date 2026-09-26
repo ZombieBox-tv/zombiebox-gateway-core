@@ -30,6 +30,10 @@ type Options struct {
 	MediaDir                                       string
 	PollWait                                       time.Duration
 	CatalogWait                                    time.Duration
+	HybridSpoolDir                                 string
+	HybridAggregateQuotaBytes                      int64
+	HybridMaxSpoolBytes                            int64
+	HybridMaxConversions                           int
 }
 type attempt struct {
 	count int
@@ -72,6 +76,7 @@ type Server struct {
 	configRevision     map[string]uint64
 	managed            map[string]bool
 	streams            chan struct{}
+	hybridSpools       *hybridSpoolManager
 }
 
 func New(db Persistence, opt Options, deps Dependencies) *Server {
@@ -120,6 +125,7 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 	s.mediaReceiverInbox = inbox.New(receiverAdapter{s}, receiverAdapter{s})
 	go s.reapMediaReceiver()
 	s.companions = companion.New(db, time.Now, randomID, func(target string) { s.events.publish(target, "companion.changed", nil) })
+	s.hybridSpools = newHybridSpoolManager(opt)
 	s.routes()
 	return s
 }

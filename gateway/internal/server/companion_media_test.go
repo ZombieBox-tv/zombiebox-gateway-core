@@ -109,7 +109,11 @@ func TestLegacyPhoneVideoContainersConvertThroughOwnedStream(t *testing.T) {
 	}
 }
 
-func phoneFileConversion(t *testing.T, format, video, audio string) {
+func TestPhoneVideoWithProvenH264AndAC3UsesHybrid(t *testing.T) {
+	phoneFileConversion(t, "mkv", "libx264", "ac3", true)
+}
+
+func phoneFileConversion(t *testing.T, format, video, audio string, verified ...bool) {
 	t.Helper()
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -145,6 +149,9 @@ func phoneFileConversion(t *testing.T, format, video, audio string) {
 	s.deps.Uploads = disk
 	s.deps.Media = media.New(ffmpeg, ffprobe)
 	tv := pair(t, s, "file-television")
+	if len(verified) > 0 && verified[0] {
+		setDevicePassingProbes(t, s, "file-television", "http-fmp4", "h264-720-high", "aac")
+	}
 	_ = call(s, "PUT", "/v1/device/preferences", `{"mode":"TV","uiLanguage":"en","subtitleMode":"auto","allowCasting":true}`, "file-television", tv, "")
 	inv, _ := s.companions.Invite(ctx, "file-television", "TV")
 	request, token, err := s.companions.Join(ctx, "127.0.0.1", companion.Join{Code: inv.Code, Name: "Phone"})
@@ -170,7 +177,12 @@ func phoneFileConversion(t *testing.T, format, video, audio string) {
 	if video != "" {
 		kind = "video"
 	}
-	if active.Plan.Mode != "TRANSCODE" || active.Plan.Live || active.Plan.Seekable || active.Plan.Item.Kind != kind {
+	wantMode := "TRANSCODE"
+	if len(verified) > 0 && verified[0] {
+		wantMode = "HYBRID"
+	}
+	wantSeekable := wantMode == "HYBRID"
+	if active.Plan.Mode != wantMode || active.Plan.Live || active.Plan.Seekable != wantSeekable || active.Plan.Item.Kind != kind {
 		t.Fatal(active.Plan)
 	}
 	w = call(s, "GET", active.Plan.URL, "", "", "", "")

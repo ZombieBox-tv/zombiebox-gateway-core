@@ -36,6 +36,7 @@ func main() {
 	stateCopy := flag.String("state-copy", "", "write a consistent private snapshot to a new file, then exit")
 	stateCheck := flag.Bool("state-check", false, "check existing state read-only without migration, then exit")
 	state := flag.String("state", ".local/gateway.db", "private SQLite database path")
+	hybridSpoolDir := flag.String("hybrid-spool-dir", "", "private HYBRID conversion spool directory (default: hybrid-spools beside state database)")
 	probes := flag.String("probe-dir", "", "directory of synthetic capability fixtures")
 	media := flag.String("media-dir", ".local/media", "directory containing local media")
 	config := flag.String("config", "", "optional private provider configuration JSON")
@@ -200,8 +201,13 @@ func main() {
 		ControlHTTP:     httpclient.Private(),
 		StreamHTTP:      httpclient.Streaming(),
 	}
+	spoolDir := *hybridSpoolDir
+	if spoolDir == "" {
+		spoolDir = filepath.Join(filepath.Dir(*state), "hybrid-spools")
+	}
 	app := server.New(db, server.Options{
 		ProbeDir:                 *probes,
+		HybridSpoolDir:           spoolDir,
 		ThreadfinURL:             *threadfin,
 		PairingCode:              pairing,
 		YouTubeOAuthClientID:     os.Getenv("ZOMBIE_YOUTUBE_OAUTH_CLIENT_ID"),

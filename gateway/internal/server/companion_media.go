@@ -153,6 +153,8 @@ func (s *Server) startCompanionMedia(ctx context.Context, g companion.Grant, med
 	if decision.mode == "REMUX" || decision.mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
 		plan.Seekable = false
+	} else if decision.mode == "HYBRID" {
+		plan.MIME = "video/mp4"
 	}
 	c := &castSession{id: castID, mediaID: asset.ID, mode: "MEDIA", sender: "companion-" + g.ID, receiver: target.ID, expires: expires}
 	s.casts[castID] = c

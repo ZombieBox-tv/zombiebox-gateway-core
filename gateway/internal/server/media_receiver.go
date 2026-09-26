@@ -73,15 +73,15 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 	if media.ManifestKind(source) == "hls" && mode == "DIRECT_PLAY" && !playback.HasFreshHLSEvidence(d.Capabilities) {
 		mode = "REMUX"
 	}
-	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "TRANSCODE" {
+	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "HYBRID" && mode != "TRANSCODE" {
 		return domain.Plan{}, errors.New("unsupported playback mode")
 	}
-	if (mode == "REMUX" || mode == "TRANSCODE") && ((source.Path != "" && s.deps.Media == nil) || (source.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(source)))) {
+	if (mode == "REMUX" || mode == "HYBRID" || mode == "TRANSCODE") && ((source.Path != "" && s.deps.Media == nil) || (source.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(source)))) {
 		return domain.Plan{}, errors.New("conversion unavailable")
 	}
 
 	mime := source.MIME
-	if mode == "REMUX" || mode == "TRANSCODE" {
+	if mode == "REMUX" || mode == "HYBRID" || mode == "TRANSCODE" {
 		mime = "video/mp4"
 		if isAudioOnly(source, decision.metadata) {
 			mime = "audio/mp4"

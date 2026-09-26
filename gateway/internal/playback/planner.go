@@ -38,6 +38,9 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 	if canRemux(metadata, mime, capabilities, status) {
 		return "REMUX"
 	}
+	if !isHLS(metadata.Format.Name, mime) && canHybrid(metadata, mime, capabilities, status) {
+		return "HYBRID"
+	}
 
 	// TRANSCODE fallback outputs H.264 Baseline 360p and AAC.
 	// Known failures for baseline H.264 or AAC require external player.
@@ -155,6 +158,30 @@ func canRemux(metadata domain.Metadata, mime string, capabilities domain.Capabil
 		}
 	}
 	return hasVideo || hasAudio
+}
+
+func canHybrid(metadata domain.Metadata, mime string, capabilities domain.Capabilities, status func(string) string) bool {
+	hasVideo, hasAudio, needsAudioEncode := false, false, false
+	for _, stream := range metadata.Streams {
+		if stream.Type == "video" {
+			// HYBRID is the video-copy path, so it requires fresh positive
+			// decoder evidence rather than the legacy REMUX fallback policy.
+			if stream.Codec != "h264" || !videoCandidate(stream, status) {
+				return false
+			}
+			hasVideo = true
+		}
+		if stream.Type == "audio" {
+			hasAudio = true
+			if stream.Codec == "aac" || stream.Codec == "mp3" {
+				continue
+			}
+			needsAudioEncode = true
+		}
+	}
+	// AAC output must have fresh, advancing decoder evidence. Missing, stale,
+	// or failed evidence remains on the full transcode fallback.
+	return hasVideo && hasAudio && needsAudioEncode && status("aac") == "PASS"
 }
 
 // videoCandidate validates that a video stream has fresh, positive PASS evidence

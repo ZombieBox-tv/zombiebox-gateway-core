@@ -175,6 +175,9 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 		fail(w, 409, "audio_track_unavailable")
 		return
 	}
+	if (mode == "REMUX" || mode == "HYBRID") && (request.PositionMS > 0 || sess.selection.Quality == "LOW" || (sess.metadata != nil && playback.RequiresTranscodeForQuality(*sess.metadata, sess.selection.Quality))) {
+		mode = "TRANSCODE"
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -203,14 +206,22 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 		selection:         selection,
 		resources:         map[string]string{},
 	}
+	mime := "video/mp4"
+	if isAudioOnly(sess.source, sess.metadata) {
+		mime = "audio/mp4"
+	}
+	seekable := false
+	if mode == "HYBRID" {
+		seekable = !sess.source.Live
+	}
 	plan := domain.Plan{
 		Version:          1,
 		SubtitleID:       sess.subtitleID,
 		SessionID:        id,
 		Mode:             mode,
 		URL:              "/v1/streams/" + id + "?ticket=" + ticket,
-		MIME:             "video/mp4",
-		Seekable:         false,
+		MIME:             mime,
+		Seekable:         seekable,
 		TimelineOffsetMS: request.PositionMS,
 		Item:             sess.source.Item,
 	}

@@ -40,7 +40,7 @@ func TestPreferredAudioPlanningAcrossLocalRemoteAndManifestSources(t *testing.T)
 		}{
 			{name: "discard incompatible alternate", firstCodec: "aac", secondCodec: "dts", language: "en", want: "REMUX", selected: 1},
 			{name: "preferred second AAC", firstCodec: "dts", secondCodec: "aac", language: "es", want: "REMUX", selected: 2},
-			{name: "preferred DTS", firstCodec: "aac", secondCodec: "dts", language: "es", want: "TRANSCODE", selected: 2},
+			{name: "preferred DTS", firstCodec: "aac", secondCodec: "dts", language: "es", want: "HYBRID", selected: 2},
 			{name: "compatible original", firstCodec: "aac", secondCodec: "aac", language: "en", want: "DIRECT_PLAY", selected: 1},
 			{name: "fragment failure", firstCodec: "dts", secondCodec: "aac", language: "es", failed: "http-fmp4", want: "EXTERNAL_PLAYER"},
 			{name: "AAC failure", firstCodec: "dts", secondCodec: "aac", language: "es", failed: "aac", want: "EXTERNAL_PLAYER"},
@@ -48,7 +48,7 @@ func TestPreferredAudioPlanningAcrossLocalRemoteAndManifestSources(t *testing.T)
 			{name: "vod HLS", firstCodec: "dts", secondCodec: "aac", language: "es", mime: "application/vnd.apple.mpegurl", want: "REMUX", selected: 2},
 			{name: "vod DASH", firstCodec: "dts", secondCodec: "aac", language: "es", mime: "application/dash+xml", want: "REMUX", selected: 2},
 			{name: "live has no stable selection", firstCodec: "dts", secondCodec: "aac", language: "es", mime: "application/vnd.apple.mpegurl", live: true, want: "TRANSCODE"},
-			{name: "split inputs have no single track namespace", firstCodec: "dts", secondCodec: "aac", language: "es", split: true, want: "TRANSCODE"},
+			{name: "split inputs have no single track namespace", firstCodec: "dts", secondCodec: "aac", language: "es", split: true, want: "HYBRID"},
 		} {
 			t.Run(tc.name+map[bool]string{true: "/local", false: "/remote"}[local], func(t *testing.T) {
 				first := domain.Stream{Index: 1, Type: "audio", Codec: tc.firstCodec}

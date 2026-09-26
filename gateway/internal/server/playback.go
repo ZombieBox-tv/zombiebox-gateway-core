@@ -36,6 +36,7 @@ type session struct {
 	resourceOrder     []string
 	supersedes        string
 	supersededBy      string
+	hybridSpool       *hybridSpool
 }
 
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
@@ -253,7 +254,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		resume = 0
 	}
 	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
-	if mode == "REMUX" && resume > 0 {
+	if (mode == "REMUX" || mode == "HYBRID") && (resume > 0 || req.Quality == "LOW" || (decision.metadata != nil && playback.RequiresTranscodeForQuality(*decision.metadata, req.Quality))) {
 		mode, plan.Mode, s.sessions[id].mode = "TRANSCODE", "TRANSCODE", "TRANSCODE"
 	}
 	if mode == "REMUX" || mode == "TRANSCODE" {
@@ -261,12 +262,23 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		if isAudioOnly(resolved, decision.metadata) {
 			plan.MIME = "audio/mp4"
 		}
+		if media.LiveAACRemux(resolved, decision.metadata, mode) {
+			plan.MIME = "audio/aac"
+		}
 		plan.Seekable = false
 		plan.ResumeMS = 0
 		if mode == "TRANSCODE" {
 			plan.TimelineOffsetMS = resume
 			s.sessions[id].selection.PositionMS = resume
 		}
+	}
+	if mode == "HYBRID" {
+		plan.MIME = "video/mp4"
+		if isAudioOnly(resolved, decision.metadata) {
+			plan.MIME = "audio/mp4"
+		}
+		plan.Seekable = !resolved.Live
+		plan.ResumeMS = 0
 	}
 	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
 	respond(w, 201, plan)
@@ -421,10 +433,74 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", src.MIME)
-	w.Header().Set("Cache-Control", "private, no-store")
+	if sess.mode == "HYBRID" {
+		if (src.Path != "" && s.deps.Media == nil) || (src.Path == "" && s.deps.RemoteMedia == nil) {
+			fail(w, 502, "conversion_unavailable")
+			return
+		}
+		spool := s.getOrStartHybridSpool(sess)
+		select {
+		case <-spool.done:
+		case <-r.Context().Done():
+			return
+		case <-sess.ctx.Done():
+			fail(w, 504, "conversion_timeout")
+			return
+		case <-time.After(maxHybridStartupWait):
+			fail(w, 504, "conversion_timeout")
+			return
+		}
+		if spool.err != nil {
+			if errors.Is(spool.err, media.ErrBusy) {
+				fail(w, 429, "media_busy")
+			} else if errors.Is(spool.err, ErrSpoolQuotaExceeded) {
+				fail(w, 507, "spool_quota_exceeded")
+			} else if errors.Is(spool.err, ErrSpoolLimitExceeded) {
+				fail(w, 507, "spool_limit_exceeded")
+			} else if errors.Is(spool.err, ErrSpoolStorageUnavailable) {
+				fail(w, 500, "spool_storage_unavailable")
+			} else if errors.Is(spool.err, context.Canceled) || errors.Is(spool.err, context.DeadlineExceeded) {
+				fail(w, 504, "conversion_timeout")
+			} else {
+				s.mu.Lock()
+				_ = s.revertFailedSessionQualityLocked(r.Context(), r.PathValue("session"), sess)
+				s.mu.Unlock()
+				fail(w, 502, "conversion_failed")
+			}
+			return
+		}
+		if err := spool.acquireReader(); err != nil {
+			fail(w, 500, "media_error")
+			return
+		}
+		defer spool.releaseReader()
+		spoolPath, spoolModTime, err := spool.readerInfo()
+		if err != nil {
+			fail(w, 500, "media_error")
+			return
+		}
+		f, err := os.Open(spoolPath)
+		if err != nil {
+			fail(w, 500, "media_error")
+			return
+		}
+		defer f.Close()
+		mime := "video/mp4"
+		if isAudioOnly(src, sess.metadata) {
+			mime = "audio/mp4"
+		}
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set("Cache-Control", "private, no-store")
+		http.ServeContent(contextWriter{ResponseWriter: w, ctx: r.Context()}, r, "hybrid.mp4", spoolModTime, f)
+		return
+	}
 	if sess.mode == "REMUX" || sess.mode == "TRANSCODE" {
 		if r.Header.Get("Range") != "" && r.Header.Get("Range") != "bytes=0-" {
 			fail(w, 416, "conversion_not_seekable")
+			return
+		}
+		if (src.Path != "" && s.deps.Media == nil) || (src.Path == "" && s.deps.RemoteMedia == nil) {
+			fail(w, 502, "conversion_unavailable")
 			return
 		}
 		mime := "video/mp4"
@@ -574,6 +650,9 @@ func (s *Server) Close() {
 	for id, x := range s.sessions {
 		x.cancel()
 		delete(s.sessions, id)
+	}
+	if s.hybridSpools != nil {
+		s.hybridSpools.Close()
 	}
 }
 

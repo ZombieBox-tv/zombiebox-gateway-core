@@ -422,7 +422,7 @@ func SelectedQualityMode(metadata domain.Metadata, source domain.Source, device 
 		}
 
 		mode := LocalModeSource(metadata, source, caps, "")
-		if positionMS > 0 && mode == "REMUX" {
+		if positionMS > 0 && (mode == "REMUX" || mode == "HYBRID") {
 			mode = "TRANSCODE"
 		}
 		return mode, ""

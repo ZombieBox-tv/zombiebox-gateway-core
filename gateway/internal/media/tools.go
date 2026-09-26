@@ -124,8 +124,11 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 		return ErrBusy
 	}
 	defer func() { <-t.jobs }()
-	if mode != "REMUX" && mode != "TRANSCODE" {
+	if mode != "REMUX" && mode != "TRANSCODE" && mode != "HYBRID" {
 		return errors.New("unsupported media mode")
+	}
+	if mode == "HYBRID" && liveAudio {
+		return errors.New("hybrid video is incompatible with audio-only output")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Hour)
 	defer cancel()
@@ -161,6 +164,10 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 		if adtsAAC && !liveAudio {
 			args = append(args, "-bsf:a", "aac_adtstoasc")
 		}
+	} else if mode == "HYBRID" {
+		// Copy video stream unchanged; transcode only audio to AAC.
+		// Fixed bounded profile: no libx264, no vf/r flags, no arbitrary client input.
+		args = append(args, "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100")
 	} else {
 		args = append(args, videoEncoding(selection.Quality)...)
 	}

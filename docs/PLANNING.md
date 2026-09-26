@@ -1,5 +1,21 @@
 # zombiebox-gateway-core: component work
 
+## Unreleased: probe-gated audio-only conversion
+
+When H.264 video and AAC output have fresh advancing playback probes, the
+planner can copy the video and encode only incompatible audio as bounded AAC in
+fragmented MP4. The same HYBRID response plan reaches ordinary playback,
+receivers and consented phone media; seeking or downscaling uses the existing
+full transcode path. Host FFmpeg verifies H.264 packet preservation and AAC
+output, and Go race tests cover planning, stream dispatch and receiver handoff.
+The Vizio API 13 played a 20-second H.264 High 720p + AC3 fixture through
+HYBRID on the dev.83 gateway QA image: the MP4 contained copied H.264 and
+AAC, reached 0:20, and device logs showed more than 400 presented video
+frames and decoded audio without a MediaPlayer error. ADB cannot capture the
+video plane or prove audible sound. Longer media and the 25-second synchronous
+spool preparation limit remain unverified; Spotify and AirPlay playback failures
+are still open. No product gate closes.
+
 ## dev.65 playback evidence and YouTube quality candidate
 
 Offer verified YouTube H.264/AAC renditions up to the device's measured decoder

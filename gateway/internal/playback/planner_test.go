@@ -1394,9 +1394,65 @@ func TestSafeFallbackHierarchyPreservesPipeline(t *testing.T) {
 		t.Fatalf("expected EXTERNAL_PLAYER when aac fails, got %s", got)
 	}
 
-	// 7. Incompatible audio codec (AC3): falls back to TRANSCODE
+	// 7. Audio-only conversion requires positive evidence for both H.264 video
+	// copying and AAC output; an unprobed receiver keeps the full transcode path.
 	if got := LocalMode(metaAC3, "video/mp4", domain.Capabilities{}, ""); got != "TRANSCODE" {
-		t.Fatalf("expected AC3 to fall back to TRANSCODE, got %s", got)
+		t.Fatalf("expected unprobed AC3 to select TRANSCODE, got %s", got)
+	}
+}
+
+func TestHybridPlannerRequiresFreshCopyAndAACEvidence(t *testing.T) {
+	now := time.Now().Unix()
+	metadata := domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "h264", Profile: "Baseline", Width: 640, Height: 360},
+		{Type: "audio", Codec: "opus"},
+	}}
+	probes := func(video, audio domain.Probe) domain.Capabilities {
+		return domain.Capabilities{Probes: []domain.Probe{video, audio}}
+	}
+	videoPass := domain.Probe{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now}
+	audioPass := domain.Probe{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now}
+	for _, tc := range []struct {
+		name string
+		caps domain.Capabilities
+		want string
+	}{
+		{"verified H264 and AAC", probes(videoPass, audioPass), "HYBRID"},
+		{"missing AAC probe", domain.Capabilities{Probes: []domain.Probe{videoPass}}, "TRANSCODE"},
+		{"stale AAC probe", probes(videoPass, domain.Probe{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now - 8*24*60*60}), "TRANSCODE"},
+		{"missing video probe", domain.Capabilities{Probes: []domain.Probe{audioPass}}, "TRANSCODE"},
+		{"stale video probe", probes(domain.Probe{ID: videoPass.ID, Status: "PASS", PositionMS: 1000, TestedAt: now - 8*24*60*60}, audioPass), "TRANSCODE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LocalMode(metadata, "video/mp4", tc.caps, ""); got != tc.want {
+				t.Fatalf("got %s want %s", got, tc.want)
+			}
+		})
+	}
+	if got := LocalMode(metadata, "video/mp4", domain.Capabilities{}, "HYBRID"); got != "TRANSCODE" {
+		t.Fatalf("requested HYBRID bypassed missing probe evidence: %s", got)
+	}
+	unsupported := domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "vp9", Width: 640, Height: 360},
+		{Type: "audio", Codec: "opus"},
+	}}
+	if got := LocalMode(unsupported, "video/webm", probes(videoPass, audioPass), ""); got != "TRANSCODE" {
+		t.Fatalf("incompatible video selected HYBRID: %s", got)
+	}
+}
+
+func TestHybridPlannerKeepsCopyableAACOnRemux(t *testing.T) {
+	now := time.Now().Unix()
+	metadata := domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "h264", Profile: "Baseline", Width: 640, Height: 360},
+		{Type: "audio", Codec: "aac"},
+	}}
+	caps := domain.Capabilities{Probes: []domain.Probe{
+		{ID: "h264-baseline-360", Status: "PASS", PositionMS: 1000, TestedAt: now},
+		{ID: "aac", Status: "PASS", PositionMS: 1000, TestedAt: now},
+	}}
+	if got := LocalMode(metadata, "video/mp4", caps, ""); got != "REMUX" {
+		t.Fatalf("copyable AAC must remain REMUX, got %s", got)
 	}
 }
 
