@@ -2,6 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveVideo } from "./resolve.mjs";
 
+function videoMetadata(options = {}) {
+  const tier =
+    typeof options.quality === "string" && /^\d{3,4}p$/.test(options.quality)
+      ? options.quality
+      : "360p";
+  return {
+    mime_type: 'video/mp4; codecs="avc1.64001f"',
+    height: Number.parseInt(tier, 10),
+    quality_label: tier,
+    fps: 30,
+  };
+}
+
 test("resolution falls back when the first client has no format data", async () => {
   const clients = [];
   const yt = {
@@ -15,6 +28,7 @@ test("resolution falls back when the first client has no format data", async () 
             itag: 18,
             has_audio: true,
             has_video: true,
+            ...videoMetadata(),
             decipher: async () => "IOS-stream",
           };
         },
@@ -23,10 +37,10 @@ test("resolution falls back when the first client has no format data", async () 
   };
   const result = await resolveVideo(yt, "aqz-KE-bpKQ", async () => true);
   assert.equal(result.mimeType, "video/mp4");
-  assert.deepEqual(clients, ["ANDROID", "IOS"]);
+  assert.deepEqual(clients, ["ANDROID", "IOS", "VISIONOS"]);
 });
 
-test("resolution stops after the first validated playable client", async () => {
+test("resolution keeps the first playable source while checking clients for variants", async () => {
   const clients = [];
   const yt = {
     session: { player: {} },
@@ -38,6 +52,7 @@ test("resolution stops after the first validated playable client", async () => {
             itag: 18,
             has_audio: true,
             has_video: true,
+            ...videoMetadata(),
             decipher: async () => "ANDROID-stream",
           };
         },
@@ -45,7 +60,7 @@ test("resolution stops after the first validated playable client", async () => {
     },
   };
   await resolveVideo(yt, "aqz-KE-bpKQ", async () => true);
-  assert.deepEqual(clients, ["ANDROID"]);
+  assert.deepEqual(clients, ["ANDROID", "IOS", "VISIONOS"]);
 });
 
 test("invalid Android media falls back to another client before returning", async () => {
@@ -62,6 +77,7 @@ test("invalid Android media falls back to another client before returning", asyn
             itag: client === "ANDROID" ? 18 : 22,
             has_audio: true,
             has_video: true,
+            ...videoMetadata(options),
             decipher: async () => `${client}-stream`,
           };
         },
@@ -88,6 +104,7 @@ test("selecting 720p resolves H.264 video and AAC audio from IOS when Android la
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "android-360",
               };
             }
@@ -98,6 +115,7 @@ test("selecting 720p resolves H.264 video and AAC audio from IOS when Android la
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-720-video",
             };
           }
@@ -118,8 +136,139 @@ test("selecting 720p resolves H.264 video and AAC audio from IOS when Android la
   assert.equal(result.url, "ios-720-video");
   assert.equal(result.audioUrl, "ios-aac-audio");
   assert.equal(result.mimeType, "video/mp4");
-  assert.deepEqual(result.variants, ["720p", "360p"]);
-  assert.deepEqual(clients, ["ANDROID", "IOS"]);
+  assert.equal(result.quality, "720p");
+  assert.equal(result.variants, undefined);
+  assert.deepEqual(clients, ["IOS"]);
+});
+
+test("manual 720p reaches VisionOS before a slow Android validation can consume the deadline", async () => {
+  const clients = [];
+  let androidValidationStarted = false;
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      clients.push(client);
+      return {
+        chooseFormat(options) {
+          if (
+            client === "ANDROID" &&
+            options.type === "video+audio" &&
+            options.quality === "720p"
+          ) {
+            return {
+              itag: 22,
+              has_audio: true,
+              has_video: true,
+              ...videoMetadata(options),
+              decipher: async () => "android-slow-720",
+            };
+          }
+          if (client === "VISIONOS" && options.type === "video" && options.quality === "720p") {
+            return {
+              itag: 136,
+              has_audio: false,
+              has_video: true,
+              ...videoMetadata(options),
+              decipher: async () => "visionos-720",
+            };
+          }
+          if (client === "VISIONOS" && options.type === "audio") {
+            return {
+              itag: 140,
+              has_audio: true,
+              has_video: false,
+              decipher: async () => "visionos-aac",
+            };
+          }
+          throw new Error("format unavailable");
+        },
+      };
+    },
+  };
+
+  const validate = async (url) => {
+    if (url === "android-slow-720") {
+      androidValidationStarted = true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return false;
+    }
+    return true;
+  };
+
+  const result = await resolveVideo(yt, "dQw4w9WgXcQ", validate, "720p", {
+    deadlineMs: 50,
+    manualClientBudgetMs: 50,
+  });
+
+  assert.equal(result.url, "visionos-720");
+  assert.equal(result.audioUrl, "visionos-aac");
+  assert.equal(result.quality, "720p");
+  assert.equal(result.variants, undefined);
+  assert.equal(androidValidationStarted, false);
+  assert.deepEqual(clients, ["IOS", "VISIONOS"]);
+});
+
+test("a manual client budget aborts its active range validation before trying VisionOS", async () => {
+  const clients = [];
+  let iosSignal;
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      clients.push(client);
+      return {
+        chooseFormat(options) {
+          if (client === "IOS" && options.type === "video+audio" && options.quality === "720p") {
+            return {
+              itag: 22,
+              has_audio: true,
+              has_video: true,
+              ...videoMetadata(options),
+              decipher: async () => "ios-stalled-720",
+            };
+          }
+          if (client === "VISIONOS" && options.type === "video" && options.quality === "720p") {
+            return {
+              itag: 136,
+              has_audio: false,
+              has_video: true,
+              ...videoMetadata(options),
+              decipher: async () => "visionos-720-after-timeout",
+            };
+          }
+          if (client === "VISIONOS" && options.type === "audio") {
+            return {
+              itag: 140,
+              has_audio: true,
+              has_video: false,
+              decipher: async () => "visionos-aac-after-timeout",
+            };
+          }
+          throw new Error("format unavailable");
+        },
+      };
+    },
+  };
+
+  const validate = async (url, _format, _fetchImpl, signal) => {
+    if (url === "ios-stalled-720") {
+      iosSignal = signal;
+      return new Promise((resolve) => {
+        signal.addEventListener("abort", () => resolve(false), { once: true });
+      });
+    }
+    return true;
+  };
+
+  const result = await resolveVideo(yt, "dQw4w9WgXcQ", validate, "720p", {
+    deadlineMs: 500,
+    manualClientBudgetMs: 20,
+  });
+
+  assert.equal(result.url, "visionos-720-after-timeout");
+  assert.equal(result.audioUrl, "visionos-aac-after-timeout");
+  assert.equal(result.quality, "720p");
+  assert.equal(iosSignal.aborted, true);
+  assert.deepEqual(clients, ["IOS", "VISIONOS"]);
 });
 
 test("auto resolve discovers HD variants across clients while keeping Android 360p source", async () => {
@@ -137,6 +286,7 @@ test("auto resolve discovers HD variants across clients while keeping Android 36
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "android-360",
               };
             }
@@ -147,6 +297,7 @@ test("auto resolve discovers HD variants across clients while keeping Android 36
               itag: 137,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-1080-video",
             };
           }
@@ -155,6 +306,7 @@ test("auto resolve discovers HD variants across clients while keeping Android 36
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-720-video",
             };
           }
@@ -177,6 +329,10 @@ test("auto resolve discovers HD variants across clients while keeping Android 36
   assert.equal(result.mimeType, "video/mp4");
   assert.deepEqual(result.variants, ["1080p", "720p", "360p"]);
   assert.deepEqual(clients, ["ANDROID", "IOS"]);
+
+  const explicitAuto = await resolveVideo(yt, "dQw4w9WgXcQ", async () => true, "auto");
+  assert.equal(explicitAuto.url, "android-360");
+  assert.deepEqual(explicitAuto.variants, ["1080p", "720p", "360p"]);
 });
 
 test("auto resolve omits HD variants when adaptive video fails range or origin validation", async () => {
@@ -191,6 +347,7 @@ test("auto resolve omits HD variants when adaptive video fails range or origin v
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "android-360",
               };
             }
@@ -201,6 +358,7 @@ test("auto resolve omits HD variants when adaptive video fails range or origin v
               itag: 137,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-1080-invalid",
             };
           }
@@ -209,6 +367,7 @@ test("auto resolve omits HD variants when adaptive video fails range or origin v
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-720-valid",
             };
           }
@@ -243,6 +402,7 @@ test("auto resolve omits HD variants when adaptive audio fails validation", asyn
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "android-360",
               };
             }
@@ -253,6 +413,7 @@ test("auto resolve omits HD variants when adaptive audio fails validation", asyn
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-720-video",
             };
           }
@@ -286,6 +447,7 @@ test("selecting HD throws audio_unavailable if audio is missing", async () => {
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "video-url",
             };
           }
@@ -311,6 +473,7 @@ test("selecting unavailable tier throws video_unavailable", async () => {
               itag: 18,
               has_audio: true,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "stream-360",
             };
           }
@@ -337,6 +500,7 @@ test("slow validators with shared deadline: baseline playback continues and inve
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "android-360",
               };
             }
@@ -347,6 +511,7 @@ test("slow validators with shared deadline: baseline playback continues and inve
               itag: 137,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-1080-slow",
             };
           }
@@ -355,6 +520,7 @@ test("slow validators with shared deadline: baseline playback continues and inve
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "ios-720-slow",
             };
           }
@@ -400,6 +566,7 @@ test("validations are deduplicated for the same signed URL", async () => {
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/stream-360",
               };
             }
@@ -410,6 +577,7 @@ test("validations are deduplicated for the same signed URL", async () => {
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "https://r.googlevideo.com/stream-720",
             };
           }
@@ -455,6 +623,7 @@ test("same itag from another client gets its own range validation", async () => 
               itag: 18,
               has_audio: true,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => "android-360",
             };
           }
@@ -463,6 +632,7 @@ test("same itag from another client gets its own range validation", async () => 
               itag: 136,
               has_audio: false,
               has_video: true,
+              ...videoMetadata(options),
               decipher: async () => `${client}-720`,
             };
           }
@@ -505,6 +675,7 @@ test("auto resolve discovers ordered variants with bounded tier overlap and shar
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/stream-360",
               };
             }
@@ -524,6 +695,7 @@ test("auto resolve discovers ordered variants with bounded tier overlap and shar
                 itag: options.quality === "1080p" ? 137 : options.quality === "720p" ? 136 : 135,
                 has_audio: false,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => `https://r.googlevideo.com/ios-video-${options.quality}`,
               };
             }
@@ -532,6 +704,7 @@ test("auto resolve discovers ordered variants with bounded tier overlap and shar
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/stream-360",
               };
             }
@@ -592,6 +765,7 @@ test("resolveVideo avoids redundant checks across clients for already discovered
                 itag: 18,
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/android-360",
               };
             }
@@ -604,6 +778,7 @@ test("resolveVideo avoids redundant checks across clients for already discovered
                 itag: 136,
                 has_audio: false,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/ios-720",
               };
             }
@@ -620,6 +795,7 @@ test("resolveVideo avoids redundant checks across clients for already discovered
                 itag: 134,
                 has_audio: false,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/ios-360",
               };
             }
@@ -651,6 +827,7 @@ test("resolveVideo rejects unprobed >30fps HD variants and falls back safely", a
                 quality_label: "360p",
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/android-360",
               };
             }
@@ -668,6 +845,7 @@ test("resolveVideo rejects unprobed >30fps HD variants and falls back safely", a
             if (options.type === "video" && options.quality === "1080p") {
               return {
                 itag: 299,
+                ...videoMetadata(options),
                 fps: 60,
                 quality_label: "1080p60",
                 has_audio: false,
@@ -678,6 +856,7 @@ test("resolveVideo rejects unprobed >30fps HD variants and falls back safely", a
             if (options.type === "video" && options.quality === "720p") {
               return {
                 itag: 298,
+                ...videoMetadata(options),
                 fps: 60,
                 quality_label: "720p60",
                 has_audio: false,
@@ -718,6 +897,7 @@ test("resolveVideo falls back to working 360p when iOS HD audio fails range vali
                 quality_label: "360p",
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/android-360",
               };
             }
@@ -743,6 +923,7 @@ test("resolveVideo falls back to working 360p when iOS HD audio fails range vali
                 quality_label: options.quality,
                 has_audio: false,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => `https://r.googlevideo.com/ios-${options.quality}`,
               };
             }
@@ -784,6 +965,7 @@ test("resolveVideo discovers HD variants from VISIONOS when iOS fails range vali
                 quality_label: "360p",
                 has_audio: true,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => "https://r.googlevideo.com/android-360",
               };
             }
@@ -809,6 +991,7 @@ test("resolveVideo discovers HD variants from VISIONOS when iOS fails range vali
                 quality_label: options.quality,
                 has_audio: false,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => `https://r.googlevideo.com/ios-${options.quality}`,
               };
             }
@@ -833,6 +1016,7 @@ test("resolveVideo discovers HD variants from VISIONOS when iOS fails range vali
                 quality_label: options.quality,
                 has_audio: false,
                 has_video: true,
+                ...videoMetadata(options),
                 decipher: async () => `https://r.googlevideo.com/visionos-${options.quality}-valid`,
               };
             }
@@ -863,6 +1047,7 @@ test("resolveVideo discovers HD variants from VISIONOS when iOS fails range vali
   assert.equal(hdResult.url, "https://r.googlevideo.com/visionos-1080p-valid");
   assert.equal(hdResult.audioUrl, "https://r.googlevideo.com/visionos-aac-valid");
   assert.equal(hdResult.mimeType, "video/mp4");
-  assert.deepEqual(hdResult.variants, ["1080p", "720p", "360p"]);
-  assert.deepEqual(clientsChecked, ["ANDROID", "IOS", "VISIONOS"]);
+  assert.equal(hdResult.quality, "1080p");
+  assert.equal(hdResult.variants, undefined);
+  assert.deepEqual(clientsChecked, ["IOS", "VISIONOS"]);
 });

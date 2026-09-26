@@ -1,10 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveFormats, getAvailableVariants } from "./formats.mjs";
-const format = (url, video, audio) => ({
+
+function inferTier(url) {
+  const match = String(url).match(/(?:^|[^0-9])(1080|720|480|360)p?(?:[^0-9]|$)/);
+  return match ? `${match[1]}p` : "360p";
+}
+
+const format = (url, video, audio, tier = inferTier(url), metadata = {}) => ({
   has_video: video,
   has_audio: audio,
+  ...(video
+    ? {
+        height: Number.parseInt(tier, 10),
+        quality_label: tier,
+        fps: 30,
+        mime_type: `video/mp4; codecs="avc1.64001f${audio ? ", mp4a.40.2" : ""}"`,
+      }
+    : { mime_type: "audio/mp4; codecs=mp4a.40.2" }),
   decipher: async () => url,
+  ...metadata,
 });
 test("combined stream wins over adaptive at the same resolution", async () => {
   const calls = [];
@@ -50,7 +65,7 @@ test("when baseline 360p is unavailable, auto falls back to validated adaptive H
         if (options.type === "video+audio" && options.quality === "360p")
           throw new Error("baseline missing");
         if (options.type === "video" && options.quality === "1080p")
-          return format("high-video", true, false);
+          return format("high-video", true, false, "1080p");
         if (options.type === "audio") return format("aac", false, true);
         throw new Error("missing");
       },
@@ -126,7 +141,7 @@ test("adaptive selection requires separate audio and bounds video resolution", a
         calls.push(options);
         if (options.type === "audio") return format("audio", false, true);
         if (options.type === "video" && options.quality === "480p")
-          return format("video", true, false);
+          return format("video", true, false, "480p");
         throw new Error("missing");
       },
     },
@@ -238,7 +253,7 @@ test("getAvailableVariants lists only tiers with video and available audio", asy
     chooseFormat(options) {
       if (options.type === "audio") return format("aac", false, true);
       if (options.type === "video" && (options.quality === "1080p" || options.quality === "720p")) {
-        return format("hd-video", true, false);
+        return format("hd-video", true, false, options.quality);
       }
       if (options.type === "video+audio" && options.quality === "360p") {
         return format("combined-360", true, true);
@@ -323,6 +338,72 @@ test("resolveFormats with targetQuality returns requested tier or errors", async
   });
 });
 
+test("manual selection rejects video without exact AVC, frame-rate, and tier metadata before validation", async () => {
+  const invalidFormats = [
+    format("lower-height", true, false, "720p", { height: 360 }),
+    format("conflicting-label", true, false, "720p", { height: 720, quality_label: "360p" }),
+    format("unmeasurable-tier", true, false, "720p", {
+      height: undefined,
+      quality_label: undefined,
+    }),
+    format("non-avc", true, false, "720p", { mime_type: 'video/webm; codecs="vp9"' }),
+    format("unknown-fps", true, false, "720p", { fps: undefined }),
+    format("high-fps", true, false, "720p", { fps: 60, quality_label: "720p60" }),
+  ];
+
+  for (const invalid of invalidFormats) {
+    const validations = [];
+    const info = {
+      chooseFormat(options) {
+        if (options.type === "audio") return format("aac", false, true);
+        if (options.quality === "720p" && options.type === "video+audio") {
+          return { ...invalid, has_audio: true };
+        }
+        if (options.type === "video" && options.quality === "720p") return invalid;
+        throw new Error("missing");
+      },
+    };
+
+    await assert.rejects(
+      resolveFormats(info, {}, async (url) => validations.push(url), "720p"),
+      /video_unavailable/,
+    );
+    assert.deepEqual(validations, [], `${invalid.quality_label} validated unexpectedly`);
+  }
+});
+
+test("available variants require measurable exact-tier AVC video before URL validation", async () => {
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") return format("aac", false, true);
+      if (options.type === "video+audio" && options.quality === "360p") {
+        return format("combined-360", true, true, "360p");
+      }
+      if (options.type !== "video") throw new Error("missing");
+      if (options.quality === "1080p") {
+        return format("video-1080-unknown", true, false, "1080p", {
+          height: undefined,
+          quality_label: undefined,
+        });
+      }
+      if (options.quality === "720p") return format("video-720-exact", true, false, "720p");
+      if (options.quality === "480p") return format("video-480-returned-360", true, false, "360p");
+      throw new Error("missing");
+    },
+  };
+  const validated = [];
+  const variants = await getAvailableVariants(info, {}, async (url) => {
+    validated.push(url);
+    return true;
+  });
+
+  assert.deepEqual(variants, ["720p", "360p"]);
+  assert.deepEqual(
+    validated.filter((url) => url.startsWith("video-")),
+    ["video-720-exact"],
+  );
+});
+
 test("tier checks overlap within the bound of at most two simultaneous checks", async () => {
   let activeChecks = 0;
   let maxActiveChecks = 0;
@@ -337,6 +418,7 @@ test("tier checks overlap within the bound of at most two simultaneous checks", 
     chooseFormat(options) {
       if (options.type === "video+audio") {
         return {
+          ...format(`https://r.googlevideo.com/${options.quality}`, true, true, options.quality),
           itag:
             options.quality === "1080p"
               ? 37
@@ -385,6 +467,7 @@ test("output remains ordered [1080p, 720p, 480p, 360p] even when lower tiers com
   const info = {
     chooseFormat(options) {
       return {
+        ...format(options.quality, true, true, options.quality),
         itag:
           options.quality === "1080p"
             ? 37
@@ -430,6 +513,7 @@ test("a bad high tier cannot suppress a valid lower tier", async () => {
       }
       if (options.quality === "1080p") {
         return {
+          ...format("https://r.googlevideo.com/1080p", true, false, "1080p"),
           itag: 137,
           has_video: true,
           has_audio: false,
@@ -440,6 +524,7 @@ test("a bad high tier cannot suppress a valid lower tier", async () => {
       }
       if (options.quality === "720p") {
         return {
+          ...format("https://r.googlevideo.com/720p", true, false, "720p"),
           itag: 136,
           has_video: true,
           has_audio: false,
@@ -451,6 +536,7 @@ test("a bad high tier cannot suppress a valid lower tier", async () => {
       }
       if (options.quality === "360p") {
         return {
+          ...format("https://r.googlevideo.com/360p", true, true, "360p"),
           itag: 18,
           has_video: true,
           has_audio: true,
@@ -479,6 +565,12 @@ test("shared validated AAC work is performed only once across adaptive tiers", a
       }
       if (options.type === "video") {
         return {
+          ...format(
+            `https://r.googlevideo.com/video-${options.quality}`,
+            true,
+            false,
+            options.quality,
+          ),
           itag: options.quality === "1080p" ? 137 : options.quality === "720p" ? 136 : 135,
           has_video: true,
           has_audio: false,

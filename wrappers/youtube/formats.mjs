@@ -1,13 +1,53 @@
 export const MAX_SAFE_FPS = 30;
 
+function labelFps(value) {
+  if (typeof value !== "string") return 0;
+  const match = /^\d{3,4}p\s*(\d{2,3})(?:\s*fps)?(?:\s|$)/i.exec(value.trim());
+  return match ? Number(match[1]) : 0;
+}
+
 export function isSafeFps(format) {
   if (!format) return false;
-  if (format.fps && format.fps > MAX_SAFE_FPS) return false;
+  const fps = Number(format.fps);
+  if (!Number.isFinite(fps) || fps <= 0 || fps > MAX_SAFE_FPS) return false;
   const label = typeof format.quality_label === "string" ? format.quality_label : "";
-  if (/(?:50|60)$/.test(label) || /(?:50|60)fps/i.test(label)) return false;
   const quality = typeof format.quality === "string" ? format.quality : "";
-  if (/(?:50|60)$/.test(quality) || /(?:50|60)fps/i.test(quality)) return false;
+  if (labelFps(label) > MAX_SAFE_FPS || labelFps(quality) > MAX_SAFE_FPS) return false;
   return true;
+}
+
+function hasAVCCodec(format) {
+  return (
+    typeof format?.mime_type === "string" && /\bavc1(?:\.[a-f0-9]+)?\b/i.test(format.mime_type)
+  );
+}
+
+function qualityLabelHeight(format) {
+  const label = typeof format?.quality_label === "string" ? format.quality_label.trim() : "";
+  const match = /^(\d{3,4})p(?:\s*(\d{2,3})(?:\s?fps)?)?$/i.exec(label);
+  return match ? Number(match[1]) : 0;
+}
+
+function matchesVideoTier(format, tier) {
+  const requestedHeight = Number.parseInt(tier, 10);
+  if (!Number.isInteger(requestedHeight) || requestedHeight <= 0) return false;
+
+  const height = Number(format?.height);
+  const rawHeight = format?.height;
+  const hasRawHeight = rawHeight !== undefined && rawHeight !== null && rawHeight !== "";
+  const hasHeight = Number.isSafeInteger(height) && height > 0;
+  const labelHeight = qualityLabelHeight(format);
+  if (hasRawHeight && !hasHeight) return false;
+  if (!hasHeight && labelHeight === 0) return false;
+  if (hasHeight && height !== requestedHeight) return false;
+  if (labelHeight && labelHeight !== requestedHeight) return false;
+  return true;
+}
+
+function isSupportedVideoTier(format, tier) {
+  return Boolean(
+    format?.has_video && hasAVCCodec(format) && isSafeFps(format) && matchesVideoTier(format, tier),
+  );
 }
 
 export const TIER_LABELS = Object.freeze({
@@ -82,7 +122,7 @@ export async function getAvailableVariants(
             codec: "avc1",
             quality,
           });
-          if (combined && combined.has_audio && combined.has_video && isSafeFps(combined)) {
+          if (combined && combined.has_audio && isSupportedVideoTier(combined, tier)) {
             hasCombined = await isValid(combined);
           }
         } catch {}
@@ -96,7 +136,7 @@ export async function getAvailableVariants(
           video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
         } catch {}
 
-        if (video && video.has_video && !video.has_audio && isSafeFps(video)) {
+        if (video && !video.has_audio && isSupportedVideoTier(video, tier)) {
           const hasAudio = await getHasValidAudio();
           if (!hasAudio) {
             return null;
@@ -181,7 +221,7 @@ export async function resolveFormats(
           codec: "avc1",
           quality,
         });
-        if (combined.has_audio && combined.has_video && isSafeFps(combined)) {
+        if (combined.has_audio && isSupportedVideoTier(combined, requestedTier)) {
           const url = await playable(combined);
           if (url) return { url, mimeType: "video/mp4" };
         }
@@ -195,7 +235,7 @@ export async function resolveFormats(
           codec: "avc1",
           quality,
         });
-        if (video.has_video && !video.has_audio && isSafeFps(video)) {
+        if (!video.has_audio && isSupportedVideoTier(video, requestedTier)) {
           const url = await playable(video);
           if (url) {
             adaptiveVideoFound = true;
@@ -217,7 +257,7 @@ export async function resolveFormats(
       codec: "avc1",
       quality: "360p",
     });
-    if (baseline?.has_audio && baseline?.has_video && isSafeFps(baseline)) {
+    if (baseline?.has_audio && isSupportedVideoTier(baseline, "360p")) {
       const baselineUrl = await playable(baseline);
       if (baselineUrl) return { url: baselineUrl, mimeType: "video/mp4" };
     }
@@ -236,7 +276,7 @@ export async function resolveFormats(
         codec: "avc1",
         quality,
       });
-      if (combined?.has_audio && combined?.has_video && isSafeFps(combined)) {
+      if (combined?.has_audio && isSupportedVideoTier(combined, quality)) {
         const url = await playable(combined);
         if (url) return { url, mimeType: "video/mp4" };
       }
@@ -251,7 +291,7 @@ export async function resolveFormats(
   for (const quality of ["720p", "480p", "360p", "1080p"]) {
     try {
       const video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
-      if (video?.has_video && !video?.has_audio && isSafeFps(video)) {
+      if (!video?.has_audio && isSupportedVideoTier(video, quality)) {
         const url = await playable(video);
         if (url) {
           adaptiveVideoFound = true;

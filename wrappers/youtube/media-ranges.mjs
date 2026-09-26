@@ -34,14 +34,16 @@ async function readExactSample(response, expectedBytes) {
   }
 }
 
-async function sample(url, start, end, total, fetchImpl) {
+async function sample(url, start, end, total, fetchImpl, abortSignal) {
   let current = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     if (!googleVideoURL(current)) return false;
+    const timeoutSignal = AbortSignal.timeout(2500);
+    const signal = abortSignal ? AbortSignal.any([timeoutSignal, abortSignal]) : timeoutSignal;
     const response = await fetchImpl(current, {
       headers: { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" },
       redirect: "manual",
-      signal: AbortSignal.timeout(2500),
+      signal,
     });
     try {
       if (response.status >= 300 && response.status < 400) {
@@ -78,7 +80,7 @@ async function sample(url, start, end, total, fetchImpl) {
 
 // A 206 for the first kilobyte alone is insufficient: some formats return 403
 // for subsequent bytes and FFmpeg otherwise reports a truncated remux as success.
-export async function validateMediaRanges(url, format, fetchImpl = fetch) {
+export async function validateMediaRanges(url, format, fetchImpl = fetch, abortSignal) {
   if (!googleVideoURL(url)) return false;
   const declaredValue = format.content_length;
   const urlValue = new URL(url).searchParams.get("clen");
@@ -104,13 +106,14 @@ export async function validateMediaRanges(url, format, fetchImpl = fetch) {
       total ? Math.min(total - 1, RANGE_SAMPLE_BYTES - 1) : RANGE_SAMPLE_BYTES - 1,
       total,
       fetchImpl,
+      abortSignal,
     );
     if (!total) return false;
     const starts = [Math.floor(total / 2), Math.max(0, total - RANGE_SAMPLE_BYTES)];
     for (const start of new Set(starts)) {
       if (start === 0) continue;
       const end = Math.min(total - 1, start + RANGE_SAMPLE_BYTES - 1);
-      if (!(await sample(url, start, end, total, fetchImpl))) return false;
+      if (!(await sample(url, start, end, total, fetchImpl, abortSignal))) return false;
     }
     return true;
   } catch {

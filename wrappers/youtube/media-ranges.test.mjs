@@ -91,6 +91,32 @@ test("a 403 after a valid first chunk rejects the format", async () => {
   );
 });
 
+test("an aborted validation signal cancels the active range request", async () => {
+  const controller = new AbortController();
+  let requestSignal;
+  const pendingFetch = (_, options) => {
+    requestSignal = options.signal;
+    return new Promise((_, reject) => {
+      requestSignal.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
+    });
+  };
+
+  const validation = validateMediaRanges(
+    mediaURL,
+    { content_length: 8192 },
+    pendingFetch,
+    controller.signal,
+  );
+  controller.abort();
+
+  assert.equal(await validation, false);
+  assert.equal(requestSignal.aborted, true);
+});
+
 test("only bounded HTTPS Googlevideo redirects are followed", async () => {
   const seen = [];
   const follow = (url, options) => {
