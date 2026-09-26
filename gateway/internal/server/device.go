@@ -67,15 +67,17 @@ func (s *Server) capabilities(w http.ResponseWriter, r *http.Request, d domain.D
 		return
 	}
 	seenProbes := map[string]bool{}
-	for _, p := range c.Probes {
+	for i := range c.Probes {
+		p := &c.Probes[i]
 		if p.TestedAt < 0 || p.TestedAt > time.Now().Add(5*time.Minute).Unix() {
 			fail(w, 400, "invalid_probe_time")
 			return
 		}
-		if (p.Status == "PASS" && p.Stalled) || seenProbes[p.ID] || p.FirstFrameMS < 0 || p.PositionMS < 0 || p.PrepareMS > 60000 || p.FirstFrameMS > 60000 || p.PositionMS > 60000 || p.ID == "" || len(p.ID) > 80 || p.PrepareMS < 0 || !(p.Status == "PASS" || p.Status == "FAIL" || p.Status == "UNKNOWN") {
+		if (p.Status == "PASS" && p.Stalled) || seenProbes[p.ID] || p.FirstFrameMS < 0 || p.PositionMS < 0 || p.PrepareMS > 60000 || p.FirstFrameMS > 60000 || p.PositionMS > 60000 || p.ID == "" || len(p.ID) > 80 || len(p.Detail) > 120 || p.PrepareMS < 0 || !(p.Status == "PASS" || p.Status == "FAIL" || p.Status == "UNKNOWN") {
 			fail(w, 400, "invalid_probe")
 			return
 		}
+		p.Detail = safeProbeDetail(p.Detail)
 		seenProbes[p.ID] = true
 	}
 	s.mu.Lock()

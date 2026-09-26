@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"zombiebox.local/gateway/internal/domain"
 )
 
 func TestProbeTicketsAreBoundedToFixedAssets(t *testing.T) {
@@ -234,5 +236,126 @@ func TestHTTPProgressiveAndAACADTSProbes(t *testing.T) {
 	u.RawQuery = q.Encode()
 	if w := call(s, "GET", u.String(), "", "", "", ""); w.Code != 403 {
 		t.Fatalf("expected 403 for tampered ticket, got %d", w.Code)
+	}
+}
+
+func TestProbeFailureDetailBoundedAndExported(t *testing.T) {
+	s := testServer(t, nil, "")
+	token := pair(t, s, "detail-probe-device")
+
+	// 1. Valid bounded failure detail (<= 120 chars) is accepted
+	validBody := `{"capabilitiesVersion":1,"deviceId":"detail-probe-device","probes":[{"id":"aac-adts","status":"UNKNOWN","prepareMs":0,"detail":"what=1,extra=-1004@prepare http=200,audio/aac"}]}`
+	if w := call(s, "PUT", "/v1/device/capabilities", validBody, "detail-probe-device", token, ""); w.Code != 200 {
+		t.Fatalf("expected 200 for valid probe detail, got %d: %s", w.Code, w.Body)
+	}
+
+	// 2. Detail is exported in /v1/diagnostics
+	diag := call(s, "GET", "/v1/diagnostics", "", "detail-probe-device", token, "")
+	if diag.Code != 200 {
+		t.Fatalf("expected 200 from diagnostics, got %d", diag.Code)
+	}
+	var report struct {
+		Probes []domain.Probe `json:"probes"`
+	}
+	if err := json.Unmarshal(diag.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Probes) != 1 || report.Probes[0].Detail != "what=1,extra=-1004@prepare http=200,audio/aac" {
+		t.Fatalf("unexpected probe in diagnostics: %+v", report.Probes)
+	}
+
+	// 3. Excessively long detail (> 120 chars) is rejected with 400
+	oversizedDetail := strings.Repeat("x", 121)
+	invalidBody := `{"capabilitiesVersion":1,"deviceId":"detail-probe-device","probes":[{"id":"aac-adts","status":"UNKNOWN","detail":"` + oversizedDetail + `"}]}`
+	if w := call(s, "PUT", "/v1/device/capabilities", invalidBody, "detail-probe-device", token, ""); w.Code != 400 {
+		t.Fatalf("expected 400 for oversized probe detail, got %d", w.Code)
+	}
+}
+
+func TestProbeFailureDetailDoesNotEchoUntrustedText(t *testing.T) {
+	if got := safeProbeDetail("what=1,extra=-1004@prepare http=200,token/secret"); got != "what=1,extra=-1004@prepare http=200" {
+		t.Fatalf("unexpected MIME-like detail: %q", got)
+	}
+	s := testServer(t, nil, "")
+	token := pair(t, s, "private-probe-device")
+	body := `{"capabilitiesVersion":1,"deviceId":"private-probe-device","probes":[{"id":"aac-adts","status":"UNKNOWN","detail":"https://example.invalid/?token=private-value"}]}`
+	if w := call(s, "PUT", "/v1/device/capabilities", body, "private-probe-device", token, ""); w.Code != 200 {
+		t.Fatalf("expected 200 with sanitized detail, got %d: %s", w.Code, w.Body)
+	}
+	diag := call(s, "GET", "/v1/diagnostics", "", "private-probe-device", token, "")
+	if diag.Code != 200 {
+		t.Fatalf("expected 200 from diagnostics, got %d", diag.Code)
+	}
+	if strings.Contains(diag.Body.String(), "private-value") || strings.Contains(diag.Body.String(), "example.invalid") {
+		t.Fatal("diagnostics echoed untrusted probe text")
+	}
+}
+
+func TestAudioOnlyMPEGTSProbeIsExtendedAndTyped(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	fixture := []byte("audio-only-mpegts-synthetic-fixture")
+	if err := os.WriteFile(filepath.Join(s.opt.ProbeDir, "mpegts-aac.ts"), fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "mpegts-aac-probe-device")
+
+	legacy := call(s, "GET", "/v1/probes", "", "mpegts-aac-probe-device", token, "")
+	if legacy.Code != 200 {
+		t.Fatalf("expected 200 for suite 1 manifest, got %d", legacy.Code)
+	}
+	var legacyManifest struct {
+		SuiteVersion int
+		Probes       []probeAsset
+	}
+	if err := json.Unmarshal(legacy.Body.Bytes(), &legacyManifest); err != nil {
+		t.Fatal(err)
+	}
+	if legacyManifest.SuiteVersion != 1 {
+		t.Fatalf("expected suiteVersion 1, got %d", legacyManifest.SuiteVersion)
+	}
+	for _, probe := range legacyManifest.Probes {
+		if probe.ID == "mpegts-aac" {
+			t.Fatal("mpegts-aac playback probe must be absent from suite 1")
+		}
+	}
+
+	extended := call(s, "GET", "/v1/probes?suite=2", "", "mpegts-aac-probe-device", token, "")
+	if extended.Code != 200 {
+		t.Fatalf("expected 200 for suite 2 manifest, got %d", extended.Code)
+	}
+	var extendedManifest struct {
+		SuiteVersion int
+		Probes       []probeAsset
+	}
+	if err := json.Unmarshal(extended.Body.Bytes(), &extendedManifest); err != nil {
+		t.Fatal(err)
+	}
+	if extendedManifest.SuiteVersion != 2 {
+		t.Fatalf("expected suiteVersion 2, got %d", extendedManifest.SuiteVersion)
+	}
+	var audioOnly *probeAsset
+	for i := range extendedManifest.Probes {
+		if extendedManifest.Probes[i].ID == "mpegts-aac" {
+			audioOnly = &extendedManifest.Probes[i]
+			break
+		}
+	}
+	if audioOnly == nil {
+		t.Fatal("mpegts-aac probe missing from suite 2 manifest")
+	}
+	if audioOnly.Video || audioOnly.Kind != "playback" {
+		t.Fatalf("expected audio-only playback probe, got %+v", *audioOnly)
+	}
+
+	response := call(s, "GET", audioOnly.URL, "", "", "", "")
+	if response.Code != 200 {
+		t.Fatalf("expected 200 for mpegts-aac stream, got %d: %s", response.Code, response.Body)
+	}
+	if got := response.Header().Get("Content-Type"); got != "video/mp2t" {
+		t.Fatalf("expected Content-Type video/mp2t, got %s", got)
+	}
+	if response.Body.String() != string(fixture) {
+		t.Fatalf("mpegts-aac body mismatch: expected %q, got %q", string(fixture), response.Body.String())
 	}
 }

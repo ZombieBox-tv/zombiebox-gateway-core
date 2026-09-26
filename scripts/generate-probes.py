@@ -21,6 +21,7 @@ expected = [
     "high-1080.mp4",
     "aac.m4a",
     "aac.adts",
+    "mpegts-aac.ts",
     "baseline.ts",
     "fragmented.mp4",
 ]
@@ -100,6 +101,7 @@ for suffix, size, profile, level in video:
 for name, options in [
     ("aac.m4a", ["-vn", "-c:a", "copy"]),
     ("aac.adts", ["-vn", "-c:a", "copy", "-f", "adts"]),
+    ("mpegts-aac.ts", ["-vn", "-c:a", "copy", "-f", "mpegts"]),
     ("baseline.ts", ["-c", "copy", "-f", "mpegts"]),
     (
         "fragmented.mp4",

@@ -54,7 +54,13 @@ func (s *Server) diagnostics(w http.ResponseWriter, r *http.Request, device doma
 		"gateway": map[string]any{"apiVersion": 1, "os": runtime.GOOS, "arch": runtime.GOARCH, "goVersion": runtime.Version(), "localMedia": s.deps.Media != nil, "remoteMedia": s.deps.RemoteMedia != nil},
 		"client":  map[string]any{"version": device.Registration.ClientVersion, "platform": device.Registration.Platform, "display": device.Registration.Display, "memory": device.Registration.Memory},
 		"probes":  probes, "modules": modules, "activePlayback": active, "recentFailures": failures,
-		"limitations": []string{"Module state is not account or media acceptance.", "Absent functional probe evidence remains UNKNOWN.", "URLs, credentials, installation IDs, fingerprints, titles and session tickets are excluded."},
+		"limitations": []string{
+			"Module state is not account or media acceptance.",
+			"Absent functional probe evidence remains UNKNOWN.",
+			"Decoder probe PASS confirms decoded playback and timeline progress; it does not confirm physical 1080p display output.",
+			"AAC (M4A) PASS does not imply ADTS stream or HLS transport support.",
+			"URLs, credentials, installation IDs, fingerprints, titles and session tickets are excluded.",
+		},
 	}
 	if hardware := device.Registration.Hardware; hardware != nil {
 		report["hardware"] = map[string]any{"cores": hardware.CPUCores, "physicalMb": hardware.PhysicalMB, "storageFreeMb": hardware.StorageFreeMB, "glesVersion": hardware.GLES, "network": hardware.Network, "gatewayLatencyMs": hardware.GatewayLatencyMS, "decoderCount": len(hardware.Decoders), "encoderCount": len(hardware.Encoders), "decoders": hardware.Decoders, "encoders": hardware.Encoders, "displays": hardware.Displays, "inventoryLimited": hardware.InventoryLimited, "nativeDial": hardware.NativeDIAL, "multicast": hardware.Multicast}

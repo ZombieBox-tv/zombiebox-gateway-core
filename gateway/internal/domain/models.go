@@ -50,6 +50,7 @@ type Probe struct {
 	Stalled      bool   `json:"droppedOrStalled,omitempty"`
 	ID           string `json:"id"`
 	Status       string `json:"status"`
+	Detail       string `json:"detail,omitempty"`
 	PrepareMS    int    `json:"prepareMs"`
 }
 type Capabilities struct {

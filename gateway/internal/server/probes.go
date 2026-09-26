@@ -36,6 +36,7 @@ var probeAssets = []probeAsset{
 	{ID: "http-fmp4", File: "fragmented.mp4", Video: true},
 	{ID: "http-progressive", File: "baseline-360.mp4", Video: true, Kind: "playback"},
 	{ID: "aac-adts", File: "aac.adts", Kind: "playback"},
+	{ID: "mpegts-aac", File: "mpegts-aac.ts", Kind: "playback"},
 	{ID: "seek", File: "baseline-360.mp4", Video: true, Kind: "seek"},
 	{ID: "pause-resume", File: "baseline-360.mp4", Video: true, Kind: "pause-resume"},
 	{ID: "surface-reattach", File: "baseline-360.mp4", Video: true, Kind: "surface-reattach"},
@@ -135,6 +136,9 @@ func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				fail(w, 404, "probe_unavailable")
 				return
+			}
+			if strings.HasSuffix(asset.File, ".ts") {
+				w.Header().Set("Content-Type", "video/mp2t")
 			}
 			if asset.ID == "aac-adts" || strings.HasSuffix(asset.File, ".adts") || strings.HasSuffix(asset.File, ".aac") {
 				w.Header().Set("Content-Type", "audio/aac")
