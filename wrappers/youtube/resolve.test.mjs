@@ -70,7 +70,7 @@ test("invalid Android media falls back to another client before returning", asyn
   };
   const result = await resolveVideo(yt, "dQw4w9WgXcQ", (url) => url !== "ANDROID-stream");
   assert.deepEqual(result, { url: "IOS-stream", mimeType: "video/mp4", variants: ["360p"] });
-  assert.deepEqual(clients, ["ANDROID", "IOS"]);
+  assert.deepEqual(clients, ["ANDROID", "IOS", "VISIONOS"]);
 });
 
 test("selecting 720p resolves H.264 video and AAC audio from IOS when Android lacks HD", async () => {
@@ -766,4 +766,103 @@ test("resolveVideo falls back to working 360p when iOS HD audio fails range vali
     resolveVideo(yt, "k8T1HORsVRs", rangeValidator, "1080p"),
     /audio_unavailable/,
   );
+});
+
+test("resolveVideo discovers HD variants from VISIONOS when iOS fails range validation with 403", async () => {
+  const clientsChecked = [];
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      clientsChecked.push(client);
+      return {
+        chooseFormat(options) {
+          if (client === "ANDROID") {
+            if (options.quality === "360p" && options.type === "video+audio") {
+              return {
+                itag: 18,
+                fps: 30,
+                quality_label: "360p",
+                has_audio: true,
+                has_video: true,
+                decipher: async () => "https://r.googlevideo.com/android-360",
+              };
+            }
+            throw new Error("no android hd");
+          }
+          if (client === "IOS") {
+            if (options.type === "audio") {
+              return {
+                itag: 140,
+                has_audio: true,
+                has_video: false,
+                content_length: "7415606",
+                decipher: async () => "https://r.googlevideo.com/ios-aac-403-tail",
+              };
+            }
+            if (
+              options.type === "video" &&
+              (options.quality === "1080p" || options.quality === "720p")
+            ) {
+              return {
+                itag: options.quality === "1080p" ? 137 : 136,
+                fps: 30,
+                quality_label: options.quality,
+                has_audio: false,
+                has_video: true,
+                decipher: async () => `https://r.googlevideo.com/ios-${options.quality}`,
+              };
+            }
+          }
+          if (client === "VISIONOS") {
+            if (options.type === "audio") {
+              return {
+                itag: 140,
+                has_audio: true,
+                has_video: false,
+                content_length: "7415606",
+                decipher: async () => "https://r.googlevideo.com/visionos-aac-valid",
+              };
+            }
+            if (
+              options.type === "video" &&
+              (options.quality === "1080p" || options.quality === "720p")
+            ) {
+              return {
+                itag: options.quality === "1080p" ? 137 : 136,
+                fps: 30,
+                quality_label: options.quality,
+                has_audio: false,
+                has_video: true,
+                decipher: async () => `https://r.googlevideo.com/visionos-${options.quality}-valid`,
+              };
+            }
+          }
+          throw new Error("missing");
+        },
+      };
+    },
+  };
+
+  const rangeValidator = async (url) => {
+    if (url.includes("403-tail")) return false;
+    return true;
+  };
+
+  // 1. Auto mode: Android 360p combined stream is returned as baseline for immediate playback,
+  // but VISIONOS populates the validated HD variants in the menu after iOS fails validation:
+  const autoResult = await resolveVideo(yt, "k8T1HORsVRs", rangeValidator);
+  assert.equal(autoResult.url, "https://r.googlevideo.com/android-360");
+  assert.equal(autoResult.audioUrl, undefined);
+  assert.equal(autoResult.mimeType, "video/mp4");
+  assert.deepEqual(autoResult.variants, ["1080p", "720p", "360p"]);
+  assert.deepEqual(clientsChecked, ["ANDROID", "IOS", "VISIONOS"]);
+
+  // 2. Manual 1080p selection: resolves validated 1080p video + AAC audio from VISIONOS:
+  clientsChecked.length = 0;
+  const hdResult = await resolveVideo(yt, "k8T1HORsVRs", rangeValidator, "1080p");
+  assert.equal(hdResult.url, "https://r.googlevideo.com/visionos-1080p-valid");
+  assert.equal(hdResult.audioUrl, "https://r.googlevideo.com/visionos-aac-valid");
+  assert.equal(hdResult.mimeType, "video/mp4");
+  assert.deepEqual(hdResult.variants, ["1080p", "720p", "360p"]);
+  assert.deepEqual(clientsChecked, ["ANDROID", "IOS", "VISIONOS"]);
 });

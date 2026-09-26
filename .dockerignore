@@ -24,6 +24,10 @@
 !wrappers/youtube-receiver/*.mjs
 !wrappers/youtube-receiver/package*.json
 
+!wrappers/youtube-pot/
+!wrappers/youtube-pot/*.py
+!wrappers/youtube-pot/requirements.lock
+
 !docs/
 !docs/licenses/
 !docs/licenses/go-qrcode-LICENSE

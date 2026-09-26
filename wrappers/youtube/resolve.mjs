@@ -56,7 +56,7 @@ export async function resolveVideo(
 
   const discoveredVariants = new Set();
   let resolvedResult = null;
-  const clients = ["ANDROID", "IOS", "WEB"];
+  const clients = ["ANDROID", "IOS", "VISIONOS", "WEB"];
 
   for (const client of clients) {
     if (resolvedResult && Date.now() - startTime >= deadlineMs) {
@@ -108,9 +108,17 @@ export async function resolveVideo(
     }
 
     if (resolvedResult) {
+      if (targetQuality) {
+        break;
+      }
       // If we already discovered HD variants (both 1080p and 720p), or completed mobile clients, stop.
       const hasHD = discoveredVariants.has("1080p") && discoveredVariants.has("720p");
-      if (hasHD || client === "IOS" || client === "WEB" || Date.now() - startTime >= deadlineMs) {
+      if (
+        hasHD ||
+        client === "VISIONOS" ||
+        client === "WEB" ||
+        Date.now() - startTime >= deadlineMs
+      ) {
         break;
       }
     }
