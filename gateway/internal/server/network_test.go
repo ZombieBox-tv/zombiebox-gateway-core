@@ -62,6 +62,109 @@ func TestNetworkSampleIsBoundedPairedSingleUseAndExpires(t *testing.T) {
 	}
 }
 
+func TestNetworkQualitySkipsDowngradeForKnownLengthOnlyFMP4(t *testing.T) {
+	s := testServer(t, nil, "")
+	now := time.Now()
+	s.networkSamples["network-quality-device"] = networkSample{measured: now, kbps: 700}
+	decision := playbackDecision{
+		mode:     "DIRECT_PLAY",
+		metadata: &domain.Metadata{Streams: []domain.Stream{{Type: "video"}}},
+	}
+	knownLengthPass := domain.Probe{
+		ID: "http-fmp4", Status: "PASS", PositionMS: 1000, TestedAt: now.Unix(),
+	}
+	chunkedPrepareRejection := domain.Probe{
+		ID: "http-fmp4-chunked", Status: "UNKNOWN",
+		Detail: "what=0,extra=0@prepare http=200,video/mp4", TestedAt: now.Unix(),
+	}
+
+	capabilities := func(device domain.Device, probes ...domain.Probe) domain.Capabilities {
+		return domain.Capabilities{
+			SuiteVersion: devices.ProbeSuiteVersion,
+			DeviceID:     device.ID,
+			CacheKey:     devices.ProbeCacheKey(device),
+			Probes:       probes,
+		}
+	}
+	withEvidence := func(chunked domain.Probe) func(*domain.Device) {
+		return func(device *domain.Device) {
+			device.Capabilities = capabilities(*device, knownLengthPass, chunked)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		configure func(*domain.Device)
+		want      string
+	}{
+		{name: "other device keeps low-link adaptation", want: "LOW"},
+		{
+			name:      "fresh known-length pass and recorded chunked prepare rejection",
+			configure: withEvidence(chunkedPrepareRejection),
+			want:      "",
+		},
+		{
+			name: "fresh known-length pass and chunked failure",
+			configure: withEvidence(domain.Probe{
+				ID: "http-fmp4-chunked", Status: "FAIL", TestedAt: now.Unix(),
+			}),
+			want: "",
+		},
+		{
+			name: "fresh known-length pass and stalled chunked probe",
+			configure: withEvidence(domain.Probe{
+				ID: "http-fmp4-chunked", Status: "UNKNOWN", Stalled: true, TestedAt: now.Unix(),
+			}),
+			want: "",
+		},
+		{
+			name: "stale chunked rejection is ignored",
+			configure: withEvidence(domain.Probe{
+				ID: "http-fmp4-chunked", Status: "UNKNOWN",
+				Detail: chunkedPrepareRejection.Detail, TestedAt: now.Add(-8 * 24 * time.Hour).Unix(),
+			}),
+			want: "LOW",
+		},
+		{
+			name: "stale known-length pass is ignored",
+			configure: func(device *domain.Device) {
+				stalePass := knownLengthPass
+				stalePass.TestedAt = now.Add(-8 * 24 * time.Hour).Unix()
+				device.Capabilities = capabilities(*device, stalePass, chunkedPrepareRejection)
+			},
+			want: "LOW",
+		},
+		{
+			name: "wrong cache key is ignored",
+			configure: func(device *domain.Device) {
+				device.Capabilities = capabilities(*device, knownLengthPass, chunkedPrepareRejection)
+				device.Capabilities.CacheKey = "stale-cache-key"
+			},
+			want: "LOW",
+		},
+		{
+			name: "ambiguous unknown is ignored",
+			configure: withEvidence(domain.Probe{
+				ID: "http-fmp4-chunked", Status: "UNKNOWN",
+				Detail: "error@prepare http=200,video/mp4", TestedAt: now.Unix(),
+			}),
+			want: "LOW",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			device := domain.Device{ID: "network-quality-device"}
+			if test.configure != nil {
+				test.configure(&device)
+			}
+			if got := s.networkQuality(device, decision); got != test.want {
+				t.Fatalf("networkQuality() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 type networkMedia struct{ trackMedia }
 
 func (*networkMedia) Probe(context.Context, string) (domain.Metadata, error) {

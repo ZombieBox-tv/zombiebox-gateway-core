@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/playback"
 )
@@ -104,6 +105,9 @@ func (s *Server) networkQuality(d domain.Device, decision playbackDecision) stri
 	if time.Since(sample.measured) > 5*time.Minute || decision.mode == "EXTERNAL_PLAYER" {
 		return ""
 	}
+	if networkQualityHasKnownLengthOnlyFMP4(d, time.Now()) {
+		return ""
+	}
 	// Conversion must not bypass known failures of its output path.
 	for _, probe := range d.Capabilities.Probes {
 		if probe.Status == "FAIL" && (probe.ID == "http-fmp4" || probe.ID == "h264-baseline-360" || probe.ID == "aac") {
@@ -111,4 +115,28 @@ func (s *Server) networkQuality(d domain.Device, decision playbackDecision) stri
 		}
 	}
 	return playback.NetworkQuality(decision.metadata, sample.kbps)
+}
+
+// networkQualityHasKnownLengthOnlyFMP4 prevents a low network sample from
+// selecting chunked conversion when current device evidence accepts fMP4 only
+// with a known content length.
+func networkQualityHasKnownLengthOnlyFMP4(device domain.Device, now time.Time) bool {
+	caps := devices.CurrentCapabilities(device)
+	if caps.SuiteVersion != devices.ProbeSuiteVersion || caps.DeviceID != device.ID || caps.CacheKey == "" || caps.CacheKey != devices.ProbeCacheKey(device) {
+		return false
+	}
+
+	knownLengthStatus, knownLengthFresh := freshProbeOutcome(caps, "http-fmp4", now)
+	if !knownLengthFresh || knownLengthStatus != "PASS" {
+		return false
+	}
+
+	chunkedProbe := freshProbe(caps, "http-fmp4-chunked", now)
+	if chunkedProbe == nil {
+		return false
+	}
+	if chunkedProbe.Status == "FAIL" || chunkedProbe.Stalled {
+		return true
+	}
+	return chunkedProbe.Status == "UNKNOWN" && probeOutcome(chunkedProbe) == "UNKNOWN" && isRecordedChunkedPrepareRejection(chunkedProbe.Detail)
 }

@@ -262,6 +262,15 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: clientMode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
 	qualityRequiresTranscode := req.Quality == "LOW" || (decision.metadata != nil && playback.RequiresTranscodeForQuality(*decision.metadata, req.Quality))
 	knownLengthResume := mode == "REMUX" && resume > 0 && !qualityRequiresTranscode && supportsKnownLengthYouTubeSeek(d, resolved, decision.metadata, mode, time.Now())
+	if mode == "REMUX" && resume > 0 && !knownLengthResume && !qualityRequiresTranscode &&
+		isNativeYouTubeSplitQuality(resolved, decision.metadata, req.Quality) &&
+		requiresKnownLengthYouTubeRemux(d, resolved, decision.metadata, mode, time.Now()) {
+		// The receiver can play this exact native YouTube rendition from a
+		// known-length spool, but cannot seek within it. Start at zero instead
+		// of silently replacing the selected rendition with chunked TRANSCODE.
+		resume = 0
+		plan.ResumeMS = 0
+	}
 	if (mode == "REMUX" || mode == "HYBRID") && (resume > 0 || qualityRequiresTranscode) && !knownLengthResume {
 		mode, plan.Mode, s.sessions[id].mode = "TRANSCODE", "TRANSCODE", "TRANSCODE"
 	}

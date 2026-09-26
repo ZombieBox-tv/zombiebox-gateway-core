@@ -22,6 +22,7 @@ type knownLengthYouTubeRemote struct {
 	mu        sync.Mutex
 	mode      string
 	selection domain.MediaSelection
+	height    int
 	entered   chan struct{}
 	proceed   chan struct{}
 	block     bool
@@ -29,9 +30,17 @@ type knownLengthYouTubeRemote struct {
 	startOne  sync.Once
 }
 
-func (*knownLengthYouTubeRemote) ProbeRemote(context.Context, domain.Source) (domain.Metadata, error) {
+func (stub *knownLengthYouTubeRemote) ProbeRemote(context.Context, domain.Source) (domain.Metadata, error) {
+	height := stub.height
+	if height == 0 {
+		height = 720
+	}
+	width, profile := 1280, "Main"
+	if height > 720 {
+		width, profile = 1920, "High"
+	}
 	return domain.Metadata{Streams: []domain.Stream{
-		{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+		{Type: "video", Codec: "h264", Profile: profile, Width: width, Height: height},
 		{Type: "audio", Codec: "aac"},
 	}}, nil
 }
@@ -372,6 +381,90 @@ func TestYouTubeSavedProgressUsesKnownLengthYouTubeRemux(t *testing.T) {
 	s.mu.Unlock()
 	if sess == nil || !sess.knownLengthRemux || sess.selection.PositionMS != 0 {
 		t.Fatalf("saved resume position leaked into REMUX conversion selection: %+v", sess)
+	}
+}
+
+func TestInitialYouTubeSplitQualityRestartsAtZeroWithoutSeekEvidence(t *testing.T) {
+	for _, quality := range []string{"720p", "1080p"} {
+		for _, selection := range []string{"explicit", "preference"} {
+			t.Run(quality+"/"+selection, func(t *testing.T) {
+				deviceID := "known-length-initial-" + quality + "-" + selection
+				s, owner, _, stub := setupKnownLengthYouTubeServer(t, deviceID)
+				stub.height = 720
+				if quality == "1080p" {
+					stub.height = 1080
+					s.mu.Lock()
+					result := s.searchResults[deviceID]
+					source := result.sources[0]
+					source.Variants = []string{"1080p", "720p"}
+					result.sources[0] = source
+					s.searchResults[deviceID] = result
+					s.mu.Unlock()
+				}
+
+				var device domain.Device
+				if err := s.db.Get(t.Context(), "devices", deviceID, &device); err != nil {
+					t.Fatal(err)
+				}
+				for index := range device.Capabilities.Probes {
+					if device.Capabilities.Probes[index].ID == "http-fmp4-seek" {
+						device.Capabilities.Probes[index].Status = "FAIL"
+					}
+				}
+				if quality == "1080p" {
+					device.Capabilities.Probes = append(device.Capabilities.Probes, domain.Probe{
+						ID: "h264-1080-high", Status: "PASS", PositionMS: 1000, Completed: true, TestedAt: time.Now().Unix(),
+					})
+				}
+				if err := s.db.Put(t.Context(), "devices", deviceID, device); err != nil {
+					t.Fatal(err)
+				}
+
+				if selection == "preference" {
+					if err := s.setQualityPreference(t.Context(), deviceID, "youtube", "video", quality); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := s.db.Put(t.Context(), "progress:"+deviceID, "youtube-known-length", domain.Progress{
+					Item:       domain.Item{ID: "youtube-known-length", Provider: "youtube", Kind: "video", Playable: true},
+					PositionMS: 15000, DurationMS: 90000, State: "PAUSED",
+				}); err != nil {
+					t.Fatal(err)
+				}
+
+				body := `{"itemId":"youtube-known-length","networkAdaptation":false}`
+				if selection == "explicit" {
+					body = `{"itemId":"youtube-known-length","quality":"` + quality + `","networkAdaptation":false}`
+				}
+				created := call(s, http.MethodPost, "/v1/playback", body, deviceID, owner, "")
+				if created.Code != http.StatusCreated {
+					t.Fatalf("create playback: %d %s", created.Code, created.Body)
+				}
+				var plan domain.Plan
+				if err := json.Unmarshal(created.Body.Bytes(), &plan); err != nil {
+					t.Fatal(err)
+				}
+				if plan.Mode != "REMUX" || plan.Seekable || plan.ResumeMS != 0 || plan.TimelineOffsetMS != 0 {
+					t.Fatalf("native selected quality did not restart at zero via known-length REMUX: %+v", plan)
+				}
+
+				s.mu.Lock()
+				sess := s.sessions[plan.SessionID]
+				s.mu.Unlock()
+				if sess == nil || !sess.knownLengthRemux || sess.mode != "REMUX" || sess.selection.Quality != quality || sess.selection.PositionMS != 0 || sess.source.ResolveQuality != quality {
+					t.Fatalf("initial selected quality or restart position was lost: %+v", sess)
+				}
+
+				response := httptest.NewRecorder()
+				s.ServeHTTP(response, httptest.NewRequest(http.MethodGet, plan.URL, nil))
+				if response.Code != http.StatusOK || response.Header().Get("Content-Length") != "14" || response.Header().Get("Transfer-Encoding") == "chunked" {
+					t.Fatalf("initial selected quality did not use known-length delivery: status=%d length=%q transfer-encoding=%q", response.Code, response.Header().Get("Content-Length"), response.Header().Get("Transfer-Encoding"))
+				}
+				if stub.lastMode() != "REMUX" || stub.lastSelectionPosition() != 0 {
+					t.Fatalf("initial quality conversion changed mode or position: mode=%q position=%d", stub.lastMode(), stub.lastSelectionPosition())
+				}
+			})
+		}
 	}
 }
 
