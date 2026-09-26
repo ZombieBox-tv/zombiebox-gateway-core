@@ -299,6 +299,108 @@ func TestAirplayArtworkEvidenceAcceptsCurrentSessionEarlyCoverWithoutRewrite(t *
 	}
 }
 
+func TestAirplayArtworkEvidenceAssociatesOneEarlyCoverWhenPreviousTrackWasPending(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-30 * time.Second)
+	connection := "aaaaaaaaaaaaaaaa"
+	connectionPath := filepath.Join(dir, "receiver.dacp")
+	if err := os.WriteFile(connectionPath, []byte("id\nremote\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(connectionPath, base.Add(-3*time.Second), base.Add(-3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	metadataPath := filepath.Join(dir, "metadata.txt")
+	writeMetadata := func(title string, at time.Time) map[string]string {
+		t.Helper()
+		if err := os.WriteFile(metadataPath, []byte("Title: "+title+"\nArtist: Artist\nAlbum: Album\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(metadataPath, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return airplayMetadata(dir)
+	}
+	writeCover := func(value byte, at time.Time) {
+		t.Helper()
+		data := append([]byte("\x89PNG\r\n\x1a\n"), value)
+		if err := os.WriteFile(filepath.Join(dir, "coverart"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(dir, "coverart"), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	evidence := newAirplayArtworkEvidence()
+	trackA := writeMetadata("Track A", base)
+	writeCover('A', base.Add(time.Second))
+	if revision, _ := evidence.observe(dir, connection, trackA, base.Add(time.Second)); revision != "" {
+		t.Fatal("first track artwork skipped its candidate hold")
+	}
+
+	// The second image is seen while Track A's labels are still current. Track
+	// A's image has not yet passed its display hold, so it is not in the
+	// accepted-cover history when Track B's metadata arrives.
+	writeCover('B', base.Add(2*time.Second))
+	if revision, _ := evidence.observe(dir, connection, trackA, base.Add(2*time.Second)); revision != "" {
+		t.Fatal("new track image appeared under the previous labels")
+	}
+	trackB := writeMetadata("Track B", base.Add(3*time.Second))
+	if revision, _ := evidence.observe(dir, connection, trackB, base.Add(3*time.Second)); revision != "" {
+		t.Fatal("new track image skipped its bounded association hold")
+	}
+
+	revision, data := evidence.observe(dir, connection, trackB, base.Add(9*time.Second))
+	if len(revision) != 16 || string(data) != string(append([]byte("\x89PNG\r\n\x1a\n"), 'B')) {
+		t.Fatal("single pre-metadata cover was not associated with the new track after the hold")
+	}
+}
+
+func TestAirplayArtworkEvidenceDoesNotReusePreConnectionCoverOnLaterTrack(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-30 * time.Second)
+	connection := "aaaaaaaaaaaaaaaa"
+	connectionPath := filepath.Join(dir, "receiver.dacp")
+	if err := os.WriteFile(connectionPath, []byte("id\nremote\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(connectionPath, base, base); err != nil {
+		t.Fatal(err)
+	}
+	coverPath := filepath.Join(dir, "coverart")
+	if err := os.WriteFile(coverPath, []byte("\x89PNG\r\n\x1a\nA"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(coverPath, base.Add(-time.Second), base.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(dir, "metadata.txt")
+	writeMetadata := func(title string, at time.Time) map[string]string {
+		t.Helper()
+		if err := os.WriteFile(metadataPath, []byte("Title: "+title+"\nArtist: Artist\nAlbum: Album\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(metadataPath, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return airplayMetadata(dir)
+	}
+
+	evidence := newAirplayArtworkEvidence()
+	trackA := writeMetadata("Track A", base.Add(time.Second))
+	if revision, _ := evidence.observe(dir, connection, trackA, base.Add(time.Second)); revision != "" {
+		t.Fatal("pre-connection cover was associated with the first track")
+	}
+	trackB := writeMetadata("Track B", base.Add(3*time.Second))
+	for _, offset := range []time.Duration{3 * time.Second, 20 * time.Second} {
+		if revision, _ := evidence.observe(dir, connection, trackB, base.Add(offset)); revision != "" {
+			t.Fatal("pre-connection cover was reused for a later track")
+		}
+	}
+}
+
 func TestAirplayArtworkEvidenceReusesSameAlbumCoverAndRejectsUnrelatedStaleCover(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Now().Add(-40 * time.Second)

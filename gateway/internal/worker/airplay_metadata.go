@@ -188,10 +188,17 @@ type airplayArtworkEvidence struct {
 	album                 string
 	previousArtist        string
 	previousAlbum         string
+	previousMetadataWrite time.Time
 	firstMetadataWrite    time.Time
+	latestMetadataWrite   time.Time
 	hadPriorTrack         bool
 	previousAcceptedCover [32]byte
 	previousCoverKnown    bool
+	previousObservedCover [32]byte
+	previousObservedKnown bool
+	replacedCover         [32]byte
+	replacedCoverKnown    bool
+	replacedCoverTrack    string
 	lastAcceptedCover     [32]byte
 	lastAcceptedKnown     bool
 	pendingWithinTrack    bool
@@ -217,10 +224,17 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 		e.album = ""
 		e.previousArtist = ""
 		e.previousAlbum = ""
+		e.previousMetadataWrite = time.Time{}
 		e.firstMetadataWrite = time.Time{}
+		e.latestMetadataWrite = time.Time{}
 		e.hadPriorTrack = false
 		e.previousAcceptedCover = [32]byte{}
 		e.previousCoverKnown = false
+		e.previousObservedCover = [32]byte{}
+		e.previousObservedKnown = false
+		e.replacedCover = [32]byte{}
+		e.replacedCoverKnown = false
+		e.replacedCoverTrack = ""
 		e.lastAcceptedCover = [32]byte{}
 		e.lastAcceptedKnown = false
 		e.pendingWithinTrack = false
@@ -244,13 +258,29 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 			e.coverLastWrite = time.Time{}
 			e.lastAcceptedCover = [32]byte{}
 			e.lastAcceptedKnown = false
+			e.latestMetadataWrite = time.Time{}
 		}
 		priorConnection := e.connection == connection && e.track != ""
 		e.previousArtist = ""
 		e.previousAlbum = ""
+		e.previousMetadataWrite = time.Time{}
+		e.previousObservedCover = [32]byte{}
+		e.previousObservedKnown = false
 		if priorConnection {
 			e.previousArtist = e.artist
 			e.previousAlbum = e.album
+			e.previousMetadataWrite = e.latestMetadataWrite
+			// A pending cover can be replaced by the next song's image before
+			// its labels arrive. Preserve the image observed under these labels
+			// so a fresh, distinct candidate can be associated without relying
+			// on the previous song having already cleared the display hold.
+			if e.replacedCoverKnown && e.replacedCoverTrack == e.track {
+				e.previousObservedCover = e.replacedCover
+				e.previousObservedKnown = true
+			} else if e.coverKnown && (e.acceptedRevision != "" || e.coverLastWrite.After(e.firstMetadataWrite)) {
+				e.previousObservedCover = e.cover
+				e.previousObservedKnown = true
+			}
 		}
 		e.previousAcceptedCover = [32]byte{}
 		e.previousCoverKnown = false
@@ -271,8 +301,17 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 			e.coverFirstSeen = now
 		}
 		e.firstMetadataWrite = metadataInfo.ModTime()
+		e.latestMetadataWrite = metadataInfo.ModTime()
 		e.postMetadataWrites = 0
 		e.acceptedRevision = ""
+		e.replacedCover = [32]byte{}
+		e.replacedCoverKnown = false
+		e.replacedCoverTrack = ""
+	} else if metadataInfo.ModTime().After(e.latestMetadataWrite) {
+		// Keep the last identical-label rewrite as the boundary for recognizing
+		// a later pre-metadata artwork candidate. An image written before this
+		// boundary could still belong to the currently reported song.
+		e.latestMetadataWrite = metadataInfo.ModTime()
 	}
 	coverPath := filepath.Join(dir, "coverart")
 	before, err := os.Lstat(coverPath)
@@ -294,6 +333,11 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 	}
 	hash := sha256.Sum256(data)
 	if !e.coverKnown || hash != e.cover {
+		if e.coverKnown && (e.acceptedRevision != "" || e.coverLastWrite.After(e.firstMetadataWrite)) {
+			e.replacedCover = e.cover
+			e.replacedCoverKnown = true
+			e.replacedCoverTrack = e.track
+		}
 		if e.acceptedRevision != "" {
 			e.pendingWithinTrack = true
 		}
@@ -325,14 +369,22 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 		e.cover == e.previousAcceptedCover && e.album != "" && e.artist != "" &&
 		e.album == e.previousAlbum && e.artist == e.previousArtist
 	// Some Apple Music tracks send the real image seconds before their labels and
-	// do not repeat it. This bounded association is withheld when it could be
-	// the last accepted cover or precedes the current connection itself.
+	// do not repeat it. For a later track, the candidate must be new relative to
+	// the prior accepted or observed image and written after the prior labels.
+	// The first track still needs proof that the image belongs to this connection.
 	earlyCover := false
 	if !postMetadataCover && e.firstMetadataWrite.After(e.coverLastWrite) &&
-		e.firstMetadataWrite.Sub(e.coverLastWrite) <= airplayArtworkCandidateHold &&
-		(!e.hadPriorTrack || (e.previousCoverKnown && e.cover != e.previousAcceptedCover)) {
+		e.firstMetadataWrite.Sub(e.coverLastWrite) <= airplayArtworkCandidateHold {
 		if connectionInfo, err := os.Lstat(filepath.Join(dir, "receiver.dacp")); err == nil && connectionInfo.Mode().IsRegular() && e.coverLastWrite.After(connectionInfo.ModTime()) {
-			earlyCover = true
+			distinctFromPrior := false
+			if !e.hadPriorTrack {
+				distinctFromPrior = true
+			} else if e.previousCoverKnown {
+				distinctFromPrior = e.cover != e.previousAcceptedCover && e.coverLastWrite.After(e.previousMetadataWrite)
+			} else if e.previousObservedKnown {
+				distinctFromPrior = e.cover != e.previousObservedCover && e.coverLastWrite.After(e.previousMetadataWrite)
+			}
+			earlyCover = distinctFromPrior
 		}
 	}
 	if !postMetadataCover && !earlyCover && !sameAlbumReuse {
@@ -340,6 +392,9 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 	}
 	if e.acceptedRevision == "" {
 		changedFromPrevious := e.previousCoverKnown && e.cover != e.previousAcceptedCover
+		if !changedFromPrevious && e.previousObservedKnown {
+			changedFromPrevious = e.cover != e.previousObservedCover && e.coverLastWrite.After(e.previousMetadataWrite)
+		}
 		readyAt := e.coverFirstSeen
 		if earlyCover && e.firstMetadataWrite.After(readyAt) {
 			readyAt = e.firstMetadataWrite
