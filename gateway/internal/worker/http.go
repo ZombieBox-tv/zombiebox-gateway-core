@@ -271,18 +271,24 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			}{PIN: c.Pin})
 		})
 		mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
-			info, err := os.Stat(filepath.Join(c.StateDir, "hls", "index.m3u8"))
-			active := err == nil && time.Since(info.ModTime()) < 15*time.Second
-			audioActive := airplayHLSPlayable(filepath.Join(c.StateDir, "hls"), "audio.m3u8")
+			active, audioActive := airplayStreamActivity(c.StateDir)
 			w.Header().Set("Content-Type", "application/json")
 			status := map[string]any{"active": active, "audioActive": audioActive}
-			meta := airplayMetadata(c.StateDir)
-			if len(meta) > 0 {
-				status["metadata"] = meta
+			if active || audioActive {
+				if meta := airplayMetadata(c.StateDir); len(meta) > 0 {
+					status["metadata"] = meta
+				}
 			}
 			_ = json.NewEncoder(w).Encode(status)
 		})
-		mux.HandleFunc("GET /artwork", func(w http.ResponseWriter, r *http.Request) { airplayArtwork(c.StateDir, w, r) })
+		mux.HandleFunc("GET /artwork", func(w http.ResponseWriter, r *http.Request) {
+			active, audioActive := airplayStreamActivity(c.StateDir)
+			if !active && !audioActive {
+				http.NotFound(w, r)
+				return
+			}
+			airplayArtwork(c.StateDir, w, r)
+		})
 		mux.HandleFunc("GET /stream/{file}", func(w http.ResponseWriter, r *http.Request) {
 			name := r.PathValue("file")
 			if name != "index.m3u8" && name != "audio.m3u8" && !regexp.MustCompile(`^(segment|audio)[0-9]+\.ts$`).MatchString(name) {
@@ -306,6 +312,13 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func airplayStreamActivity(stateDir string) (video, audio bool) {
+	info, err := os.Stat(filepath.Join(stateDir, "hls", "index.m3u8"))
+	video = err == nil && time.Since(info.ModTime()) < 15*time.Second
+	audio = airplayHLSPlayable(filepath.Join(stateDir, "hls"), "audio.m3u8")
+	return video, audio
 }
 
 // airplayHLSPlayable validates that an HLS manifest contains at least one

@@ -131,13 +131,13 @@ func TestAirplayHLSReadinessAndMetadataOnly(t *testing.T) {
 		t.Fatalf("expected inactive and empty, got active=%v audioActive=%v meta=%v", active, audioActive, meta)
 	}
 
-	// 2. Metadata-only state: metadata.txt exists, but manifest is missing
+	// 2. Metadata-only state: metadata.txt exists, but neither stream is active.
 	if err := os.WriteFile(filepath.Join(dir, "metadata.txt"), []byte("Title: Song\nArtist: Singer\nAlbum: Record\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	active, audioActive, meta = getStatus()
-	if active || audioActive || meta["title"] != "Song" || meta["artist"] != "Singer" || meta["album"] != "Record" {
-		t.Fatalf("expected metadata-only state, got active=%v audioActive=%v meta=%v", active, audioActive, meta)
+	if active || audioActive || len(meta) != 0 {
+		t.Fatalf("expected inactive state without stale metadata, got active=%v audioActive=%v meta=%v", active, audioActive, meta)
 	}
 
 	// 3. Empty manifest: audio.m3u8 is 0 bytes
@@ -176,8 +176,8 @@ func TestAirplayHLSReadinessAndMetadataOnly(t *testing.T) {
 	if audioActive {
 		t.Fatal("status audioActive must be false on tiny manifest")
 	}
-	if meta["title"] != "Song" {
-		t.Fatalf("expected metadata preserved, got %v", meta)
+	if len(meta) != 0 {
+		t.Fatalf("inactive status must omit metadata, got %v", meta)
 	}
 
 	// 5. Atomic manifests:
@@ -243,6 +243,71 @@ func TestAirplayHLSReadinessAndMetadataOnly(t *testing.T) {
 	active, audioActive, meta = getStatus()
 	if !audioActive || meta["title"] != "Song" {
 		t.Fatalf("expected audioActive=true and metadata populated, got audioActive=%v meta=%v", audioActive, meta)
+	}
+}
+
+func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
+	dir := t.TempDir()
+	hlsDir := filepath.Join(dir, "hls")
+	if err := os.MkdirAll(hlsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.txt"), []byte("Title: Current Song\nArtist: Current Artist\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cover := []byte("\x89PNG\r\n\x1a\n")
+	if err := os.WriteFile(filepath.Join(dir, "coverart"), cover, 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.000000,\naudio0.ts\n"
+	if err := os.WriteFile(filepath.Join(hlsDir, "audio.m3u8"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hlsDir, "audio0.ts"), make([]byte, 16384), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := Config{Mode: "airplay", Token: strings.Repeat("t", 32), StateDir: dir, Pin: "1234"}
+	h := Handler(context.Background(), c)
+	request := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Header.Set("Authorization", "Bearer "+c.Token)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	readMetadata := func(response *httptest.ResponseRecorder) (bool, bool, map[string]string) {
+		t.Helper()
+		var status struct {
+			Active      bool              `json:"active"`
+			AudioActive bool              `json:"audioActive"`
+			Metadata    map[string]string `json:"metadata"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+			t.Fatalf("decode status: %v", err)
+		}
+		return status.Active, status.AudioActive, status.Metadata
+	}
+
+	active, audioActive, metadata := readMetadata(request("/status"))
+	if active || !audioActive || metadata["title"] != "Current Song" {
+		t.Fatalf("active audio status lost current metadata: active=%v audioActive=%v metadata=%v", active, audioActive, metadata)
+	}
+	artwork := request("/artwork")
+	if artwork.Code != http.StatusOK || string(artwork.Body.Bytes()) != string(cover) {
+		t.Fatalf("active stream artwork unavailable: code=%d body=%x", artwork.Code, artwork.Body.Bytes())
+	}
+
+	if err := os.Remove(filepath.Join(hlsDir, "audio.m3u8")); err != nil {
+		t.Fatal(err)
+	}
+	active, audioActive, metadata = readMetadata(request("/status"))
+	if active || audioActive || len(metadata) != 0 {
+		t.Fatalf("idle transition retained track metadata: active=%v audioActive=%v metadata=%v", active, audioActive, metadata)
+	}
+	artwork = request("/artwork")
+	if artwork.Code != http.StatusNotFound {
+		t.Fatalf("idle stream served stale artwork: code=%d body=%x", artwork.Code, artwork.Body.Bytes())
 	}
 }
 
