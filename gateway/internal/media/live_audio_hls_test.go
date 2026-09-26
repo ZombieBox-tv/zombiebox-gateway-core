@@ -3,8 +3,10 @@ package media
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,113 @@ import (
 
 	"zombiebox.local/gateway/internal/domain"
 )
+
+func TestPCMStreamStartsAtLastListedHLSSegment(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg required")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe required")
+	}
+
+	dir := t.TempDir()
+	frequencies := []int{440, 660, 880, 1320}
+	var playlist bytes.Buffer
+	playlist.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n")
+	for i, frequency := range frequencies {
+		name := fmt.Sprintf("audio%d.ts", i)
+		args := []string{
+			"-y", "-nostdin", "-v", "error",
+			"-f", "lavfi", "-i", fmt.Sprintf("sine=frequency=%d:sample_rate=44100", frequency),
+			"-t", "0.975", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+			"-f", "mpegts", filepath.Join(dir, name),
+		}
+		if out, err := exec.Command(ffmpeg, args...).CombinedOutput(); err != nil {
+			t.Fatalf("failed to generate segment %s: %v %s", name, err, out)
+		}
+		playlist.WriteString("#EXTINF:0.975,\n")
+		playlist.WriteString(name + "\n")
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/audio.m3u8" {
+			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+			_, _ = w.Write(playlist.Bytes())
+			return
+		}
+		name := filepath.Base(r.URL.Path)
+		if filepath.Ext(name) != ".ts" {
+			http.NotFound(w, r)
+			return
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp2t")
+		_, _ = w.Write(data)
+	}))
+	defer upstream.Close()
+
+	tools := New(ffmpeg, ffprobe)
+	remote := NewRemote(tools, upstream.Client())
+	source := domain.Source{URL: upstream.URL + "/audio.m3u8", MIME: "application/vnd.apple.mpegurl", Live: true}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := remote.ConvertRemote(ctx, source, "PCM_STREAM", domain.MediaSelection{}, writer)
+		_ = writer.CloseWithError(err)
+		done <- err
+	}()
+
+	// 8192 stereo PCM frames are enough to identify the opening tone while
+	// keeping the live conversion bounded and cancelling after the assertion.
+	pcm := make([]byte, 8192*2*2)
+	if _, err := io.ReadFull(reader, pcm); err != nil {
+		cancel()
+		reader.Close()
+		<-done
+		t.Fatalf("read initial PCM output: %v", err)
+	}
+	cancel()
+	_ = reader.Close()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("PCM conversion did not stop after cancellation")
+	}
+
+	gotFrequency := dominantPCMFrequency(pcm, []float64{440, 660, 880, 1320})
+	if gotFrequency != 1320 {
+		t.Fatalf("first PCM segment tone = %.0f Hz, want newest listed segment at 1320 Hz", gotFrequency)
+	}
+}
+
+func dominantPCMFrequency(pcm []byte, candidates []float64) float64 {
+	const sampleRate = 44100.0
+	frames := len(pcm) / 4
+	bestFrequency, bestPower := 0.0, -1.0
+	for _, frequency := range candidates {
+		var real, imaginary float64
+		for frame := 0; frame < frames; frame++ {
+			sample := float64(int16(binary.LittleEndian.Uint16(pcm[frame*4 : frame*4+2])))
+			window := 0.5 - 0.5*math.Cos(2*math.Pi*float64(frame)/float64(frames-1))
+			phase := 2 * math.Pi * frequency * float64(frame) / sampleRate
+			real += sample * window * math.Cos(phase)
+			imaginary += sample * window * math.Sin(phase)
+		}
+		power := real*real + imaginary*imaginary
+		if power > bestPower {
+			bestFrequency, bestPower = frequency, power
+		}
+	}
+	return bestFrequency
+}
 
 func TestLiveAudioHLSRemuxLatencyAndOutput(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")

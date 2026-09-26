@@ -156,6 +156,12 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	if selection.PositionMS > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(float64(selection.PositionMS)/1000, 'f', 3, 64))
 	}
+	if pcmStream {
+		// HLS live playlists are short windows. Start from the newest listed
+		// segment for PCM receiver streams instead of replaying FFmpeg's default
+		// three-segment live buffer.
+		args = append(args, "-live_start_index", "-1")
+	}
 	args = append(args, "-i", input)
 	audio := "0:a:0?"
 	if audioInput != "" {

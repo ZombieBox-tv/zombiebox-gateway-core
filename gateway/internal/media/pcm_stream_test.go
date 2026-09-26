@@ -82,7 +82,7 @@ func TestPCMStreamUsesExactLiveHLSAudioProfile(t *testing.T) {
 		"-threads", "2", "-protocol_whitelist", "http,tcp,pipe",
 		"-allowed_extensions", "ALL", "-extension_picky", "0",
 		"-format_whitelist", "mov,matroska,webm,mpegts,mp3,aac,flac,ogg,wav,hls,dash",
-		"-http_proxy", "", "-i", got[inputIndex+1],
+		"-http_proxy", "", "-live_start_index", "-1", "-i", got[inputIndex+1],
 		"-map", "0:1", "-vn", "-sn", "-dn", "-map_metadata", "-1",
 		"-c:a", "pcm_s16le", "-ac", "2", "-ar", "44100", "-f", "s16le", "pipe:1",
 	}
@@ -208,9 +208,9 @@ func TestLiveHLSRemuxStillUsesADTS(t *testing.T) {
 			t.Fatalf("existing ADTS remux option %q missing from %q", expected, got)
 		}
 	}
-	for _, forbidden := range []string{"pcm_s16le", "-f s16le"} {
+	for _, forbidden := range []string{"pcm_s16le", "-f s16le", "-live_start_index"} {
 		if strings.Contains(got, forbidden) {
-			t.Fatalf("REMUX unexpectedly selected PCM output: %q", got)
+			t.Fatalf("REMUX unexpectedly includes PCM-only option %q", forbidden)
 		}
 	}
 }
