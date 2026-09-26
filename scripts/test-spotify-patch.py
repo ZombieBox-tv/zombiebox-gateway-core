@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PREPARE = ROOT / "scripts/prepare-spotify-source.py"
 TEST = ROOT / "wrappers/spotify/patches/decoder_integration_test.go"
 KEY_REFUSAL_TEST = ROOT / "wrappers/spotify/patches/key_refusal_test.go"
+ZEROCONF_STAGE_TEST = ROOT / "wrappers/spotify/patches/zeroconf_stage_diagnostics_test.go"
 SOURCE = ROOT / "third_party/sources/go-librespot"
 
 ALSA_STUB = """//go:build android || darwin || js || windows || nintendosdk || !cgo
@@ -129,6 +130,24 @@ def main() -> None:
         (staged / "mp3/decoder_stub.go").write_text(MP3_STUB)
         shutil.copy2(KEY_REFUSAL_TEST, staged / "daemon/key_refusal_test.go")
         daemon_env = dict(environment, CGO_ENABLED="0")
+        shutil.copy2(ZEROCONF_STAGE_TEST, staged / "zeroconf/zeroconf_stage_diagnostics_test.go")
+        subprocess.run(
+            [
+                "go",
+                "test",
+                "-mod=readonly",
+                "-tags",
+                "test_unit",
+                "-p",
+                "2",
+                "./zeroconf",
+                "-run",
+                "TestZeroconfStageDiagnostics",
+            ],
+            cwd=staged,
+            env=daemon_env,
+            check=True,
+        )
         subprocess.run(
             [
                 "go",
