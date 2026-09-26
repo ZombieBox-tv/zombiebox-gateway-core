@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -171,6 +172,10 @@ func main() {
 			artworkCache = disk
 		}
 	}
+	var artworkWebPEncoder artwork.WebPEncoder
+	if ffmpegPath, err := exec.LookPath("ffmpeg"); err == nil {
+		artworkWebPEncoder = artwork.NewFFmpegWebPEncoder(ffmpegPath, mediatools.ExecRunner{})
+	}
 	var uploads server.MediaUploads
 	if *enableMedia {
 		disk, uploadErr := companionmedia.New(filepath.Join(filepath.Dir(*state), "companion-media"))
@@ -189,7 +194,7 @@ func main() {
 		AirPlayPairing:  adapters,
 		Browse:          adapters,
 		YouTubeReceiver: adapters,
-		Artwork:         artwork.New(httpclient.Metadata(), artworkCache),
+		Artwork:         artwork.NewWithWebPEncoder(httpclient.Metadata(), artworkCache, artworkWebPEncoder),
 		Catalog:         adapters,
 		Search:          adapters,
 		Resolver:        adapters,

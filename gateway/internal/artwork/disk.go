@@ -51,7 +51,7 @@ func (c *DiskCache) Get(key [32]byte) ([]byte, time.Time, bool) {
 	defer c.mu.Unlock()
 	path := c.path(key)
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 8 || info.Size() > (256<<10)+8 {
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 8 || info.Size() > maxDerivativeBytes+8 {
 		return nil, time.Time{}, false
 	}
 	file, err := os.Open(path)
@@ -59,13 +59,13 @@ func (c *DiskCache) Get(key [32]byte) ([]byte, time.Time, bool) {
 		return nil, time.Time{}, false
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, (256<<10)+9))
-	if err != nil || len(data) <= 8 || len(data) > (256<<10)+8 {
+	data, err := io.ReadAll(io.LimitReader(file, maxDerivativeBytes+9))
+	if err != nil || len(data) <= 8 || len(data) > maxDerivativeBytes+8 {
 		return nil, time.Time{}, false
 	}
 	expires := time.Unix(int64(binary.BigEndian.Uint64(data[:8])), 0)
 	now := time.Now()
-	if !now.Before(expires) || len(data) < 10 || data[8] != 0xff || data[9] != 0xd8 {
+	if !now.Before(expires) || encodedFormat(data[8:]) == "" {
 		_ = os.Remove(path)
 		return nil, time.Time{}, false
 	}
@@ -74,7 +74,7 @@ func (c *DiskCache) Get(key [32]byte) ([]byte, time.Time, bool) {
 }
 
 func (c *DiskCache) Put(key [32]byte, data []byte, expires time.Time) {
-	if len(data) == 0 || len(data) > 256<<10 || !time.Now().Before(expires) {
+	if len(data) == 0 || len(data) > maxDerivativeBytes || encodedFormat(data) == "" || !time.Now().Before(expires) {
 		return
 	}
 	c.mu.Lock()
@@ -128,7 +128,7 @@ func (c *DiskCache) prune(now time.Time) {
 		_, err = io.ReadFull(file, header[:])
 		_ = file.Close()
 		expires := time.Unix(int64(binary.BigEndian.Uint64(header[:])), 0)
-		if err != nil || !now.Before(expires) || info.Size() <= 8 || info.Size() > (256<<10)+8 {
+		if err != nil || !now.Before(expires) || info.Size() <= 8 || info.Size() > maxDerivativeBytes+8 {
 			_ = os.Remove(path)
 			continue
 		}

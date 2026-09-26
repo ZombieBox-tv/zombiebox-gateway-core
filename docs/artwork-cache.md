@@ -1,8 +1,11 @@
 # Processed artwork cache
 
 The gateway fetches provider artwork using its own credentials, accepts bounded
-JPEG/PNG inputs, resizes without stretching/upscaling and encodes JPEG at quality
-75. Only authenticated local `/v1/artwork/{id}` URLs reach the client. No provider
+JPEG/PNG inputs, and resizes without stretching/upscaling. It encodes JPEG within
+the 256-KiB budget (quality 88 down to 32). Android API 14+ clients may request
+lossy WebP when the optional FFmpeg encoder is available; an unsupported or failed
+WebP conversion returns JPEG with its actual MIME type. API 9–13 receive JPEG.
+Only authenticated local `/v1/artwork/{id}` URLs reach the client. No provider
 posters, thumbnails or Hero backgrounds are embedded in either APK.
 
 Two concurrent image jobs, a five-second request deadline, a four-MiB input limit,
@@ -19,8 +22,9 @@ optional image failure leaves the client's solid placeholder usable.
   does not renew expiry. Reads discard expired files; startup and writes prune
   expired/corrupt files and enforce the disk budget. There is no idle cleanup daemon.
 - Keys hash the source URL, all provider headers, semantic image revision, profile
-  and pipeline version. Credential/revision/profile changes cannot reuse an old
-  derivative. Files contain an expiry header and processed JPEG, never source URLs,
+  requested format and pipeline version. Credential/revision/profile/format changes
+  cannot reuse an old derivative. Files contain an expiry header and processed
+  JPEG or WebP, never source URLs,
   credentials or original images. Private content can remain until expiry/eviction;
   changing credentials prevents reuse but does not immediately erase old files.
 - The dedicated directory is mode 0700 and files are 0600. Writes use temporary
@@ -51,7 +55,8 @@ physical memory at most 768 MiB, memory class at most 96 MiB, or displays at mos
 These are bounding boxes, not exact stretched outputs. Views crop for their layout.
 The current Hero budgets are deliberately below the spec's larger 720/1080 asset
 targets until real-device decoding/memory evidence supports increasing them.
-The original aspect ratio is preserved. JPEG/PNG support does not imply WebP/AVIF.
+Audio cover art uses a separate 600 × 600 conservative or 800 × 800 standard
+maximum. The original aspect ratio is preserved. AVIF is not supported.
 
 Android additionally keeps a two-MiB encoded cache on low-memory devices and four
 MiB otherwise, expiring after five minutes. It survives Home rerenders but clears

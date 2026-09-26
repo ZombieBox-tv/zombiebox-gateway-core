@@ -54,6 +54,48 @@ func TestSpotifySemanticBoundary(t *testing.T) {
 	}
 }
 
+func TestAirPlayCommandMapsSemanticActionsToPrivateWorker(t *testing.T) {
+	var command atomic.Value
+	var requests atomic.Int32
+	privateToken := strings.Repeat("a", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/control" || r.Header.Get("Authorization") != "Bearer "+privateToken || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("unexpected private worker request: method=%s path=%s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+		if err != nil {
+			t.Error(err)
+		}
+		command.Store(string(body))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	config := Config{Enabled: true, URL: upstream.URL, Token: privateToken}
+	for _, test := range []struct {
+		action, want string
+	}{
+		{action: "playpause", want: `{"command":"playpause"}`},
+		{action: "next", want: `{"command":"nextitem"}`},
+		{action: "previous", want: `{"command":"previtem"}`},
+	} {
+		if err := testAdapters.AirPlayCommand(context.Background(), config, test.action); err != nil {
+			t.Fatalf("AirPlayCommand(%q): %v", test.action, err)
+		}
+		if got := command.Load().(string); got != test.want {
+			t.Fatalf("AirPlayCommand(%q) body = %s, want %s", test.action, got, test.want)
+		}
+	}
+	if testAdapters.AirPlayCommand(context.Background(), config, "../control") == nil || requests.Load() != 3 {
+		t.Fatal("invalid AirPlay action was forwarded")
+	}
+	if testAdapters.AirPlayCommand(context.Background(), Config{URL: upstream.URL, Token: privateToken}, "next") == nil || requests.Load() != 3 {
+		t.Fatal("disabled AirPlay configuration was forwarded")
+	}
+}
+
 func TestAirPlayIdleAndActive(t *testing.T) {
 	active := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +109,37 @@ func TestAirPlayIdleAndActive(t *testing.T) {
 		if err != nil || len(sources) != 2 || sources[0].Item.Playable != value || !sources[0].Live {
 			t.Fatalf("sources: %+v %v", sources, err)
 		}
+	}
+}
+
+func TestAirPlayArtworkAppearsOnlyWithAssociatedWorkerRevision(t *testing.T) {
+	revision := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("x", 32) {
+			t.Error("missing private bearer")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connected": true, "audioActive": true,
+			"connectionRevision": "aaaaaaaaaaaaaaaa",
+			"metadata":           map[string]string{"title": "Song", "artist": "Artist"},
+			"artworkRevision":    revision,
+		})
+	}))
+	defer upstream.Close()
+	config := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("x", 32)}
+	sources, err := testAdapters.AirPlay(context.Background(), config)
+	if err != nil || sources[1].ArtworkURL != "" {
+		t.Fatalf("pending artwork was exposed: %q %v", sources[1].ArtworkURL, err)
+	}
+	revision = "0123456789abcdef"
+	sources, err = testAdapters.AirPlay(context.Background(), config)
+	if err != nil || !strings.HasSuffix(sources[1].ArtworkURL, "/artwork?rev="+revision) {
+		t.Fatalf("associated artwork revision was lost: %q %v", sources[1].ArtworkURL, err)
+	}
+	revision = "fedcba9876543210"
+	sources, err = testAdapters.AirPlay(context.Background(), config)
+	if err != nil || !strings.HasSuffix(sources[1].ArtworkURL, "/artwork?rev="+revision) {
+		t.Fatalf("updated artwork reused an old revision: %q %v", sources[1].ArtworkURL, err)
 	}
 }
 
@@ -90,7 +163,7 @@ func TestSpotifyStatusTrackMappingAndTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status1 failed: %v", err)
 	}
-	if status1.State != "PLAYING" || status1.Item == nil || status1.Item.Title != "Track One" || status1.Item.Subtitle != "Artist A" || status1.Item.DurationMS != 180000 || status1.PositionMS != 5000 {
+	if status1.State != "PLAYING" || status1.Item == nil || status1.Item.Title != "Track One" || status1.Item.Subtitle != "Artist A" || status1.Item.DurationMS != 180000 || !status1.PositionKnown || status1.DurationMS != 180000 || status1.PositionMS != 5000 {
 		t.Fatalf("unexpected status1: %+v", status1)
 	}
 	if status1.ArtworkURL != "https://i.scdn.co/image/track1" || !strings.HasPrefix(status1.Item.ImageURL, "/v1/artwork/spotify-connect?rev=") {
@@ -103,7 +176,7 @@ func TestSpotifyStatusTrackMappingAndTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status2 failed: %v", err)
 	}
-	if status2.State != "PLAYING" || status2.Item == nil || status2.Item.Title != "Track Two" || status2.Item.Subtitle != "Artist B, Artist C" || status2.Item.DurationMS != 210000 || status2.PositionMS != 0 {
+	if status2.State != "PLAYING" || status2.Item == nil || status2.Item.Title != "Track Two" || status2.Item.Subtitle != "Artist B, Artist C" || status2.Item.DurationMS != 210000 || !status2.PositionKnown || status2.DurationMS != 210000 || status2.PositionMS != 0 {
 		t.Fatalf("unexpected status2: %+v", status2)
 	}
 	if status2.ArtworkURL != "https://image-cdn-ak.spotifycdn.com/image/track2" || !strings.HasPrefix(status2.Item.ImageURL, "/v1/artwork/spotify-connect?rev=") {
@@ -406,6 +479,85 @@ func TestAirPlayRevisionIsOpaqueAndConnectionScoped(t *testing.T) {
 	_, state, err = testAdapters.Reception(context.Background(), "airplay", c)
 	if err != nil || state.State != "STOPPED" {
 		t.Fatalf("a known disconnect retained stale track metadata: %+v %v", state, err)
+	}
+}
+
+func TestAirPlayMirroringTakesPriorityOverSimultaneousAudioAndRevisesOnReconnect(t *testing.T) {
+	revision := "0123456789abcdef"
+	videoActive := true
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active": videoActive, "audioActive": true, "connected": true,
+			"connectionKnown": true, "connectionRevision": revision,
+			"metadata": map[string]string{"title": "Audio track"},
+		})
+	}))
+	defer upstream.Close()
+	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("v", 32)}
+
+	first, state, err := testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || first == nil || first.Item.Kind != "video" || state.Item == nil || state.Item.Kind != "video" || state.PositionKnown {
+		t.Fatalf("simultaneous mirror and audio must select video: source=%+v state=%+v err=%v", first, state, err)
+	}
+	if first.URL != upstream.URL+"/stream/index.m3u8?rev="+revision {
+		t.Fatalf("video connection revision missing: %q", first.URL)
+	}
+
+	revision = "fedcba9876543210"
+	second, _, err := testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || second == nil || second.URL == first.URL {
+		t.Fatalf("new mirror connection reused old source: first=%q second=%+v err=%v", first.URL, second, err)
+	}
+
+	videoActive = false
+	audio, _, err := testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || audio == nil || audio.Item.Kind != "audio" {
+		t.Fatalf("audio-only session lost its route: source=%+v err=%v", audio, err)
+	}
+}
+
+func TestAirPlayReceptionMapsOnlyKnownSenderProgress(t *testing.T) {
+	progressKnown := true
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active":             false,
+			"audioActive":        true,
+			"connected":          true,
+			"connectionKnown":    true,
+			"connectionRevision": "0123456789abcdef",
+			"metadata":           map[string]string{"title": "Current song", "artist": "Artist", "album": "Album"},
+			"progressKnown":      progressKnown,
+			"positionMs":         123000,
+			"durationMs":         360000,
+			"positionAgeMs":      1750,
+		})
+	}))
+	defer upstream.Close()
+	config := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("p", 32)}
+
+	source, state, err := testAdapters.Reception(context.Background(), "airplay", config)
+	if err != nil || source == nil || state.State != "PLAYING" || !state.PositionKnown || state.PositionMS != 123000 || state.DurationMS != 360000 || state.PositionAgeMS != 1750 {
+		t.Fatalf("known sender progress was not mapped: source=%+v state=%+v err=%v", source, state, err)
+	}
+	if state.Item == nil || state.Item.DurationMS != 360000 {
+		t.Fatalf("measured duration was not attached to the semantic audio item: %+v", state.Item)
+	}
+
+	progressKnown = false
+	_, unknown, err := testAdapters.Reception(context.Background(), "airplay", config)
+	if err != nil || unknown.PositionKnown || unknown.DurationMS != 0 || unknown.PositionAgeMS != 0 {
+		t.Fatalf("unknown sender position was treated as a measured zero: %+v err=%v", unknown, err)
+	}
+	raw, err := json.Marshal(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["positionKnown"] != false {
+		t.Fatalf("semantic status did not expose explicit unknown timing: %s", raw)
 	}
 }
 

@@ -13,7 +13,9 @@ if str(WRAPPER_DIR) not in sys.path:
 
 from cooldown import CooldownTracker
 from resolver import (
+    MANUAL_QUALITIES,
     MAX_UPSTREAM_RESPONSE_BYTES,
+    QualityUnavailableError,
     fallback_to_upstream,
     resolve_video,
     run_bounded_command,
@@ -161,6 +163,8 @@ class ResolverTests(unittest.TestCase):
         self.assertIn("itag=140", res["audioUrl"])
         self.assertEqual(res["mimeType"], "video/mp4")
         self.assertEqual(res["variants"], ["720p"])
+        self.assertEqual(res["actualHeight"], 720)
+        self.assertEqual(res["actualQuality"], "720p")
 
     def test_extractor_403_activates_cooldown_and_falls_back(self):
         def mock_extractor(video_id, bgutil_url, timeout_sec):
@@ -193,47 +197,253 @@ class ResolverTests(unittest.TestCase):
         self.assertIn("fallback=true", res["url"])
         self.assertEqual(res["variants"], ["360p"])
 
-    def test_manual_hd_request_falls_back_to_baseline_without_forwarding_hd_quality(
+    def test_manual_exact_quality_403_fails_without_baseline_fallback(self):
+        for quality in sorted(MANUAL_QUALITIES):
+            with self.subTest(quality=quality):
+                tracker = CooldownTracker()
+
+                def mock_extractor(video_id, bgutil_url, timeout_sec):
+                    raise PermissionError("YouTube 403 Forbidden")
+
+                def forbidden_upstream_fetch(url, headers):
+                    self.fail("manual quality must not request the 360p baseline")
+
+                with self.assertRaises(QualityUnavailableError) as ctx:
+                    resolve_video(
+                        "dQw4w9WgXcQ",
+                        quality,
+                        self.config,
+                        tracker,
+                        extractor_func=mock_extractor,
+                        upstream_fetch_func=forbidden_upstream_fetch,
+                    )
+
+                self.assertTrue(tracker.is_in_cooldown())
+                self.assertEqual(str(ctx.exception), "Requested quality is unavailable")
+
+    def test_manual_exact_quality_in_cooldown_fails_without_extraction_or_fallback(
         self,
     ):
-        # Client requests 1080p, but PO resolver hits 403 or failure.
-        # Fallback to upstream MUST NOT pass ?quality=1080p, preserving baseline 360p.
-        captured_upstream_url = ""
+        for quality in sorted(MANUAL_QUALITIES):
+            with self.subTest(quality=quality):
+                tracker = CooldownTracker()
+                tracker.record_403(cooldown_seconds=300)
+
+                def forbidden_extractor(video_id, bgutil_url, timeout_sec):
+                    self.fail("cooldown should bypass yt-dlp")
+
+                def forbidden_upstream_fetch(url, headers):
+                    self.fail("manual quality must not request the 360p baseline")
+
+                with self.assertRaises(QualityUnavailableError):
+                    resolve_video(
+                        "dQw4w9WgXcQ",
+                        quality,
+                        self.config,
+                        tracker,
+                        extractor_func=forbidden_extractor,
+                        upstream_fetch_func=forbidden_upstream_fetch,
+                    )
+
+    def test_manual_exact_quality_extraction_error_is_sanitized(self):
+        signed_url = (
+            "https://rr1.googlevideo.com/videoplayback?signature=private-secret"
+        )
 
         def mock_extractor(video_id, bgutil_url, timeout_sec):
-            raise PermissionError("YouTube 403 Forbidden")
+            raise RuntimeError(f"extractor failed for {signed_url}")
 
-        def mock_upstream_fetch(url, headers):
-            nonlocal captured_upstream_url
-            captured_upstream_url = url
-            # Upstream baseline response
-            body = json.dumps(
-                {
-                    "url": "https://rr1.googlevideo.com/videoplayback?itag=18&baseline=true",
-                    "mimeType": "video/mp4",
-                    "variants": ["360p"],
-                }
-            ).encode("utf-8")
-            return 200, {}, body
+        def forbidden_upstream_fetch(url, headers):
+            self.fail("manual quality must not request the 360p baseline")
 
-        res = resolve_video(
+        with self.assertRaises(QualityUnavailableError) as ctx:
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "1080p",
+                self.config,
+                self.cooldown_tracker,
+                extractor_func=mock_extractor,
+                upstream_fetch_func=forbidden_upstream_fetch,
+            )
+
+        self.assertNotIn("googlevideo", str(ctx.exception))
+        self.assertNotIn("signature", str(ctx.exception))
+        self.assertNotIn("private-secret", str(ctx.exception))
+
+    def test_manual_exact_quality_with_no_validated_rendition_fails(self):
+        def mock_extractor(video_id, bgutil_url, timeout_sec):
+            return {"formats": []}
+
+        def forbidden_upstream_fetch(url, headers):
+            self.fail("manual quality must not request the 360p baseline")
+
+        with self.assertRaises(QualityUnavailableError):
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "1080p",
+                self.config,
+                self.cooldown_tracker,
+                extractor_func=mock_extractor,
+                upstream_fetch_func=forbidden_upstream_fetch,
+            )
+
+    def test_manual_exact_quality_with_unvalidated_rendition_fails(self):
+        signed_url = (
+            "https://rr1.googlevideo.com/videoplayback?itag=299&signature=private"
+        )
+
+        def mock_extractor(video_id, bgutil_url, timeout_sec):
+            return {
+                "formats": [
+                    {
+                        "format_id": "299",
+                        "url": signed_url,
+                        "vcodec": "avc1.640028",
+                        "acodec": "mp4a.40.2",
+                        "fps": 30,
+                        "height": 1080,
+                    }
+                ]
+            }
+
+        def invalid_range_fetch(url, headers):
+            self.assertEqual(url, signed_url)
+            return 200, {}, b"not a partial response"
+
+        def forbidden_upstream_fetch(url, headers):
+            self.fail("manual quality must not request the 360p baseline")
+
+        with self.assertRaises(QualityUnavailableError) as ctx:
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "1080p",
+                self.config,
+                self.cooldown_tracker,
+                extractor_func=mock_extractor,
+                range_fetch_func=invalid_range_fetch,
+                upstream_fetch_func=forbidden_upstream_fetch,
+            )
+
+        self.assertNotIn("googlevideo", str(ctx.exception))
+        self.assertNotIn("signature", str(ctx.exception))
+
+    def test_manual_exact_quality_range_403_activates_cooldown_without_fallback(self):
+        def mock_extractor(video_id, bgutil_url, timeout_sec):
+            return {
+                "formats": [
+                    {
+                        "format_id": "299",
+                        "url": "https://rr1.googlevideo.com/videoplayback?itag=299&clen=50000",
+                        "vcodec": "avc1.640028",
+                        "acodec": "mp4a.40.2",
+                        "fps": 30,
+                        "height": 1080,
+                        "filesize": 50000,
+                    }
+                ]
+            }
+
+        def forbidden_upstream_fetch(url, headers):
+            self.fail("manual quality must not request the 360p baseline")
+
+        with self.assertRaises(QualityUnavailableError):
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "1080p",
+                self.config,
+                self.cooldown_tracker,
+                extractor_func=mock_extractor,
+                range_fetch_func=lambda url, headers: (403, {}, b"Forbidden"),
+                upstream_fetch_func=forbidden_upstream_fetch,
+            )
+
+        self.assertTrue(self.cooldown_tracker.is_in_cooldown())
+
+    def test_manual_valid_720_survives_unrelated_1080_range_403(self):
+        def mock_extractor(video_id, bgutil_url, timeout_sec):
+            return {
+                "formats": [
+                    {
+                        "format_id": "299",
+                        "url": "https://rr1.googlevideo.com/videoplayback?itag=299&clen=50000",
+                        "vcodec": "avc1.640028",
+                        "acodec": "mp4a.40.2",
+                        "fps": 30,
+                        "height": 1080,
+                        "filesize": 50000,
+                    },
+                    {
+                        "format_id": "22",
+                        "url": "https://rr1.googlevideo.com/videoplayback?itag=22&clen=50000",
+                        "vcodec": "avc1.64001f",
+                        "acodec": "mp4a.40.2",
+                        "fps": 30,
+                        "height": 720,
+                        "filesize": 50000,
+                    },
+                ]
+            }
+
+        def mock_range_fetch(url, headers):
+            if "itag=299" in url:
+                return 403, {}, b"Forbidden"
+            start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+            return (
+                206,
+                {"content-range": f"bytes {start}-{end}/50000"},
+                b"x" * (end - start + 1),
+            )
+
+        result = resolve_video(
             "dQw4w9WgXcQ",
-            "1080p",
+            "720p",
             self.config,
             self.cooldown_tracker,
             extractor_func=mock_extractor,
-            upstream_fetch_func=mock_upstream_fetch,
+            range_fetch_func=mock_range_fetch,
         )
 
-        # Verify that quality=1080p was NOT appended to upstream request
-        self.assertNotIn("quality=1080p", captured_upstream_url)
-        self.assertEqual(
-            captured_upstream_url,
-            "http://youtube.upstream:8091/resolve/dQw4w9WgXcQ",
-        )
-        self.assertIsNotNone(res)
-        self.assertIn("baseline=true", res["url"])
-        self.assertEqual(res["variants"], ["360p"])
+        self.assertEqual(result["actualQuality"], "720p")
+        self.assertEqual(result["variants"], ["720p"])
+        self.assertFalse(self.cooldown_tracker.is_in_cooldown())
+
+    def test_manual_exact_quality_does_not_trust_quality_label_without_height(self):
+        def mock_extractor(video_id, bgutil_url, timeout_sec):
+            return {
+                "formats": [
+                    {
+                        "format_id": "299",
+                        "url": "https://rr1.googlevideo.com/videoplayback?itag=299&clen=50000",
+                        "vcodec": "avc1.640028",
+                        "acodec": "mp4a.40.2",
+                        "quality_label": "1080p",
+                        "fps": 30,
+                        "filesize": 50000,
+                    }
+                ]
+            }
+
+        def valid_range_fetch(url, headers):
+            start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+            return (
+                206,
+                {"content-range": f"bytes {start}-{end}/50000"},
+                b"x" * (end - start + 1),
+            )
+
+        def forbidden_upstream_fetch(url, headers):
+            self.fail("manual quality must not request the 360p baseline")
+
+        with self.assertRaises(QualityUnavailableError):
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "1080p",
+                self.config,
+                self.cooldown_tracker,
+                extractor_func=mock_extractor,
+                range_fetch_func=valid_range_fetch,
+                upstream_fetch_func=forbidden_upstream_fetch,
+            )
 
     def test_in_cooldown_bypasses_extractor_directly_to_fallback(self):
         self.cooldown_tracker.record_403(cooldown_seconds=300)
@@ -267,6 +477,46 @@ class ResolverTests(unittest.TestCase):
 
         self.assertFalse(extractor_called)
         self.assertIn("cooldown=true", res["url"])
+
+    def test_auto_and_unspecified_quality_keep_baseline_fallback(self):
+        for quality in ("auto", ""):
+            with self.subTest(quality=quality):
+                for failure in ("extractor", "rendition"):
+                    with self.subTest(failure=failure):
+
+                        def mock_extractor(video_id, bgutil_url, timeout_sec):
+                            if failure == "extractor":
+                                raise RuntimeError("temporary extraction failure")
+                            return {"formats": []}
+
+                        def mock_upstream_fetch(url, headers):
+                            self.assertEqual(
+                                url,
+                                "http://youtube.upstream:8091/resolve/dQw4w9WgXcQ",
+                            )
+                            return (
+                                200,
+                                {},
+                                json.dumps(
+                                    {
+                                        "url": "https://rr1.googlevideo.com/videoplayback?itag=18&baseline=true",
+                                        "mimeType": "video/mp4",
+                                        "variants": ["360p"],
+                                    }
+                                ).encode("utf-8"),
+                            )
+
+                        result = resolve_video(
+                            "dQw4w9WgXcQ",
+                            quality,
+                            self.config,
+                            CooldownTracker(),
+                            extractor_func=mock_extractor,
+                            upstream_fetch_func=mock_upstream_fetch,
+                        )
+
+                        self.assertIn("baseline=true", result["url"])
+                        self.assertEqual(result["variants"], ["360p"])
 
     def test_range_check_403_activates_cooldown_and_falls_back(self):
         def mock_extractor(video_id, bgutil_url, timeout_sec):

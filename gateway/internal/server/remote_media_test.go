@@ -44,6 +44,21 @@ func (remoteMediaStub) ConvertRemote(context.Context, domain.Source, string, dom
 	return nil
 }
 
+type liveMP3RemoteStub struct {
+	metadata   domain.Metadata
+	err        error
+	probeCalls int
+}
+
+func (stub *liveMP3RemoteStub) ProbeRemote(context.Context, domain.Source) (domain.Metadata, error) {
+	stub.probeCalls++
+	return stub.metadata, stub.err
+}
+
+func (*liveMP3RemoteStub) ConvertRemote(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error {
+	return nil
+}
+
 func TestAdaptivePlaybackNeverReturnsVideoOnlyOrIgnoresFailedFragmentProbe(t *testing.T) {
 	s := testServer(t, nil, t.TempDir())
 	s.deps.RemoteMedia = remoteMediaStub{}
@@ -146,6 +161,88 @@ func TestLiveTransportConvertsOnlyOnExplicitRetry(t *testing.T) {
 		if mode, err := s.playbackMode(t.Context(), source, domain.Device{}, requested); err != nil || mode.mode != requested {
 			t.Fatal(mode, err)
 		}
+	}
+}
+
+func TestLiveMP3EntersCapabilityPlanningUnlessDirectProbePasses(t *testing.T) {
+	s := testServer(t, nil, t.TempDir())
+	metadata := domain.Metadata{Streams: []domain.Stream{{Index: 0, Type: "audio", Codec: "mp3"}}}
+	metadata.Format.Name = "mp3"
+	source := domain.Source{
+		Item: domain.Item{ID: "spotify-live", Provider: "spotify", Kind: "audio"},
+		URL:  "https://spotify-worker.test/live",
+		MIME: "audio/mpeg",
+		Live: true,
+	}
+	now := time.Now().Unix()
+	probe := func(id, status string) domain.Probe {
+		return domain.Probe{ID: id, Status: status, PositionMS: 1000, TestedAt: now}
+	}
+	makeDevice := func(mp3, fmp4, pcm domain.Probe) domain.Device {
+		return domain.Device{Capabilities: domain.Capabilities{Probes: []domain.Probe{mp3, fmp4, pcm}}}
+	}
+	for _, test := range []struct {
+		name      string
+		device    domain.Device
+		want      string
+		wantErr   bool
+		wantProbe int
+	}{
+		{
+			name:      "MP3 PASS preserves direct relay without probing metadata",
+			device:    makeDevice(probe("mp3-chunked", "PASS"), probe("http-fmp4-chunked", "FAIL"), probe("audio-track-pcm-stream", "FAIL")),
+			want:      "DIRECT_PLAY",
+			wantProbe: 0,
+		},
+		{
+			name:      "fMP4 H264 AAC pass does not claim MP3 remux support",
+			device:    makeDevice(probe("mp3-chunked", "FAIL"), probe("http-fmp4-chunked", "PASS"), probe("audio-track-pcm-stream", "PASS")),
+			want:      "PCM_STREAM",
+			wantProbe: 1,
+		},
+		{
+			name:      "generic fMP4 pass alone does not establish a compatible MP3 route",
+			device:    makeDevice(probe("mp3-chunked", "FAIL"), probe("http-fmp4-chunked", "PASS"), probe("audio-track-pcm-stream", "UNKNOWN")),
+			want:      "EXTERNAL_PLAYER",
+			wantProbe: 1,
+		},
+		{
+			name:      "PCM PASS is selected after native tiers are unproven",
+			device:    makeDevice(probe("mp3-chunked", "UNKNOWN"), probe("http-fmp4-chunked", "UNKNOWN"), probe("audio-track-pcm-stream", "PASS")),
+			want:      "PCM_STREAM",
+			wantProbe: 1,
+		},
+		{
+			name:      "unknown routes do not manufacture a direct or PCM pass",
+			device:    makeDevice(probe("mp3-chunked", "UNKNOWN"), probe("http-fmp4-chunked", "UNKNOWN"), probe("audio-track-pcm-stream", "UNKNOWN")),
+			want:      "EXTERNAL_PLAYER",
+			wantProbe: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &liveMP3RemoteStub{metadata: metadata}
+			s.deps.RemoteMedia = stub
+			decision, err := s.playbackMode(t.Context(), source, test.device, "AUTO")
+			if (err != nil) != test.wantErr || decision.mode != test.want {
+				t.Fatalf("playback decision = %s, error=%v; want mode=%s error=%v", decision.mode, err, test.want, test.wantErr)
+			}
+			if stub.probeCalls != test.wantProbe {
+				t.Fatalf("ProbeRemote calls = %d, want %d", stub.probeCalls, test.wantProbe)
+			}
+		})
+	}
+
+	s.deps.RemoteMedia = nil
+	if decision, err := s.playbackMode(t.Context(), source, domain.Device{}, "AUTO"); err == nil || decision.mode == "DIRECT_PLAY" || decision.mode == "PCM_STREAM" {
+		t.Fatalf("missing evidence/adapter selected an unproven route: mode=%s err=%v", decision.mode, err)
+	}
+	if decision, err := s.playbackMode(t.Context(), source, makeDevice(probe("mp3-chunked", "PASS"), probe("http-fmp4-chunked", "UNKNOWN"), probe("audio-track-pcm-stream", "UNKNOWN")), "AUTO"); err != nil || decision.mode != "DIRECT_PLAY" {
+		t.Fatalf("fresh MP3 direct evidence should permit no-probe relay: mode=%s err=%v", decision.mode, err)
+	}
+
+	s.deps.RemoteMedia = &liveMP3RemoteStub{err: errors.New("probe unavailable")}
+	if decision, err := s.playbackMode(t.Context(), source, domain.Device{}, "AUTO"); err == nil || decision.mode == "DIRECT_PLAY" {
+		t.Fatalf("unprobed MP3 metadata failure silently became direct play: mode=%s err=%v", decision.mode, err)
 	}
 }
 

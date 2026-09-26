@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
@@ -43,18 +43,18 @@ func (t *RemoteTools) ProbeRemote(ctx context.Context, source domain.Source) (do
 	defer bridge.close()
 	metadata, err := t.tools.probe(ctx, bridge.video, true, bridge.kind)
 	if err != nil {
-		return metadata, err
+		return metadata, bridge.failureOr(err)
 	}
-	if bridge.failedUpstream() {
-		return metadata, errors.New("remote input failed")
+	if err := bridge.failureOr(nil); err != nil {
+		return metadata, err
 	}
 	if bridge.audio != "" {
 		audio, err := t.tools.probe(ctx, bridge.audio, true)
 		if err != nil {
-			return metadata, err
+			return metadata, bridge.failureOr(err)
 		}
-		if bridge.failedUpstream() {
-			return metadata, errors.New("remote input failed")
+		if err := bridge.failureOr(nil); err != nil {
+			return metadata, err
 		}
 		for _, stream := range audio.Streams {
 			if stream.Type == "audio" {
@@ -70,16 +70,16 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 		return errors.New("live input is not seekable")
 	}
 	pcmStream := mode == "PCM_STREAM"
-	if pcmStream && (!source.Live || ManifestKind(source) != "hls") {
-		return errors.New("PCM stream requires live HLS audio")
+	if pcmStream && (!source.Live || (ManifestKind(source) != "hls" && !IsLiveMP3Source(source))) {
+		return errors.New("PCM stream requires supported live audio")
 	}
 	bridge, err := t.bridge(ctx, source)
 	if err != nil {
 		return err
 	}
 	defer bridge.close()
-	if pcmStream && bridge.kind != "hls" {
-		return errors.New("PCM stream requires live HLS audio")
+	if pcmStream && bridge.kind != "hls" && !IsLiveMP3Source(source) {
+		return errors.New("PCM stream requires supported live audio")
 	}
 	// TS AAC carries ADTS headers; copying to fragmented MP4 needs ASC.
 	// Manifests may contain TS. Never apply an AAC filter to MP3/other audio.
@@ -90,13 +90,14 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 	if needsProbe {
 		metadata, err := t.tools.probe(ctx, bridge.video, true, bridge.kind)
 		if err != nil {
-			return err
+			return bridge.failureOr(err)
 		}
-		if pcmStream && bridge.failedUpstream() {
-			return errors.New("remote input failed")
+		if err := bridge.failureOr(nil); err != nil {
+			return err
 		}
 		hasAudio, hasVideo := false, false
 		selectedAudio := -1
+		selectedCodec := ""
 		for _, stream := range metadata.Streams {
 			if stream.Type == "video" {
 				hasVideo = true
@@ -104,9 +105,11 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 			if stream.Type == "audio" {
 				if selection.AudioID == nil && selectedAudio < 0 {
 					selectedAudio = stream.Index
+					selectedCodec = stream.Codec
 				}
 				if selection.AudioID != nil && stream.Index == *selection.AudioID {
 					selectedAudio = stream.Index
+					selectedCodec = stream.Codec
 				}
 				if selection.AudioID == nil || stream.Index == *selection.AudioID {
 					hasAudio = true
@@ -116,28 +119,108 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 		}
 		if pcmStream {
 			if hasVideo || selectedAudio < 0 {
-				return errors.New("PCM stream requires live audio-only HLS")
+				return errors.New("PCM stream requires live audio-only input")
+			}
+			if IsLiveMP3Source(source) && selectedCodec != "mp3" {
+				return errors.New("live MP3 source did not contain MP3 audio")
 			}
 			selection.AudioID = &selectedAudio
 		}
 		liveAudio = source.Live && hasAudio && adtsAAC && !hasVideo
 	}
 	err = t.tools.convert(ctx, bridge.video, bridge.audio, true, adtsAAC, liveAudio, mode, selection, output, bridge.kind)
-	if err == nil && bridge.failedUpstream() {
-		return errors.New("remote input failed")
-	}
-	return err
+	return bridge.failureOr(err)
 }
 
 type inputBridge struct {
 	video, audio string
 	kind         string
 	close        func()
-	failed       *atomic.Bool
+	failures     *upstreamFailureState
 }
 
-func (b inputBridge) failedUpstream() bool {
-	return b.failed != nil && b.failed.Load()
+func (b inputBridge) failureOr(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if b.failures != nil {
+		if failure := b.failures.failure(); failure != nil {
+			return failure
+		}
+	}
+	return err
+}
+
+type upstreamFailureState struct {
+	mu    sync.Mutex
+	first *ConversionFailure
+}
+
+func (s *upstreamFailureState) record(class string, status int) {
+	if s == nil {
+		return
+	}
+	switch class {
+	case ConversionFailureUpstreamHTTP, ConversionFailureUpstreamTimeout,
+		ConversionFailureUpstreamTransport, ConversionFailureUpstreamRange:
+	default:
+		class = ConversionFailureUpstreamTransport
+	}
+	if class != ConversionFailureUpstreamHTTP || status < 100 || status > 599 {
+		status = 0
+		if class == ConversionFailureUpstreamHTTP {
+			class = ConversionFailureUpstreamTransport
+		}
+	}
+	failure := newConversionFailure(class, 0, status)
+	s.mu.Lock()
+	if s.first == nil {
+		s.first = failure
+	}
+	s.mu.Unlock()
+}
+
+func (s *upstreamFailureState) failure() *ConversionFailure {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.first == nil {
+		return nil
+	}
+	copy := *s.first
+	return &copy
+}
+
+func upstreamErrorClass(err error, fallback string) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ConversionFailureUpstreamTimeout
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return ConversionFailureUpstreamTimeout
+	}
+	return fallback
+}
+
+type upstreamBodyReader struct {
+	io.Reader
+	readError error
+}
+
+func (r *upstreamBodyReader) Read(buffer []byte) (int, error) {
+	count, err := r.Reader.Read(buffer)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.readError = err
+	}
+	return count, err
+}
+
+func copyUpstreamBody(destination io.Writer, source io.Reader) error {
+	body := &upstreamBodyReader{Reader: source}
+	_, _ = io.Copy(destination, body)
+	return body.readError
 }
 
 func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBridge, error) {
@@ -163,7 +246,7 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 	ticket := hex.EncodeToString(bytes)
 	endpoint := "http://" + listener.Addr().String() + "/" + ticket
 	lifetime, cancel := context.WithCancel(ctx)
-	failed := &atomic.Bool{}
+	failures := &upstreamFailureState{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 		if len(parts) != 2 || subtle.ConstantTimeCompare([]byte(parts[0]), []byte(ticket)) != 1 || (r.Method != "GET" && r.Method != "HEAD") {
@@ -186,7 +269,7 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 				started, err := relayYouTubeOpenRange(w, r.WithContext(requestContext), t.http, target, headers)
 				if err != nil {
 					if requestContext.Err() == nil {
-						failed.Store(true)
+						failures.record(upstreamErrorClass(err, ConversionFailureUpstreamRange), 0)
 					}
 					if started {
 						panic(http.ErrAbortHandler)
@@ -198,6 +281,9 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 		}
 		request, err := http.NewRequestWithContext(requestContext, r.Method, target, nil)
 		if err != nil {
+			if requestContext.Err() == nil {
+				failures.record(ConversionFailureUpstreamTransport, 0)
+			}
 			http.Error(w, "unavailable", 502)
 			return
 		}
@@ -211,13 +297,16 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 		request.Header.Set("Accept-Encoding", "identity")
 		response, err := t.http.Do(request)
 		if err != nil {
+			if requestContext.Err() == nil {
+				failures.record(upstreamErrorClass(err, ConversionFailureUpstreamTransport), 0)
+			}
 			http.Error(w, "unavailable", 502)
 			return
 		}
 		defer response.Body.Close()
 		if response.StatusCode != 200 && response.StatusCode != 206 && response.StatusCode != 416 {
-			if source.Item.Provider == "youtube" && requestContext.Err() == nil {
-				failed.Store(true)
+			if requestContext.Err() == nil {
+				failures.record(ConversionFailureUpstreamHTTP, response.StatusCode)
 			}
 			http.Error(w, "unavailable", 502)
 			return
@@ -229,7 +318,9 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 		}
 		w.WriteHeader(response.StatusCode)
 		if r.Method != "HEAD" {
-			_, _ = io.Copy(w, response.Body)
+			if err := copyUpstreamBody(w, response.Body); err != nil && requestContext.Err() == nil {
+				failures.record(upstreamErrorClass(err, ConversionFailureUpstreamTransport), 0)
+			}
 		}
 	})
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
@@ -238,7 +329,7 @@ func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBr
 		cancel()
 		_ = server.Close()
 	}
-	bridge := inputBridge{video: endpoint + "/video", close: close, failed: failed}
+	bridge := inputBridge{video: endpoint + "/video", close: close, failures: failures}
 	if source.AudioURL != "" {
 		bridge.audio = endpoint + "/audio"
 	}
@@ -270,8 +361,11 @@ func RemoteCandidate(source domain.Source) bool {
 	if kind != "" && source.AudioURL != "" {
 		return false
 	}
-	if source.Live && kind == "" && (strings.ToLower(strings.TrimSpace(strings.Split(source.MIME, ";")[0])) != "video/mp2t" || source.AudioURL != "") {
-		return false
+	if source.Live && kind == "" {
+		mime := strings.ToLower(strings.TrimSpace(strings.SplitN(source.MIME, ";", 2)[0]))
+		if source.AudioURL != "" || (mime != "video/mp2t" && !IsLiveMP3Source(source)) {
+			return false
+		}
 	}
 	for _, raw := range []string{source.URL, source.AudioURL} {
 		if raw == "" {
@@ -283,4 +377,13 @@ func RemoteCandidate(source domain.Source) bool {
 		}
 	}
 	return source.URL != ""
+}
+
+// IsLiveMP3Source identifies an opaque live MPEG audio input eligible for
+// capability-backed conversion; manifests and split audio inputs are excluded.
+func IsLiveMP3Source(source domain.Source) bool {
+	if !source.Live || source.AudioURL != "" || ManifestKind(source) != "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(strings.SplitN(source.MIME, ";", 2)[0]), "audio/mpeg")
 }

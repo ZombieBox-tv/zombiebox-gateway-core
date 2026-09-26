@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-func TestYouTubeBrowseUsesExploreQueryForAnonymousRoot(t *testing.T) {
+func TestYouTubeBrowseUsesEmptyQueryForProviderHome(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/browse" || r.URL.Query().Get("q") != "popular" {
+		if r.URL.Path != "/browse" || r.URL.Query().Get("q") != "" || r.URL.Query().Get("parent") != "" {
 			t.Errorf("unexpected browse request: %s", r.URL.String())
 		}
 		fmt.Fprint(w, `{"items":[{"id":"aqz-KE-bpKQ","kind":"video","title":"Explore video"}],"nextOffset":-1}`)
@@ -20,7 +20,7 @@ func TestYouTubeBrowseUsesExploreQueryForAnonymousRoot(t *testing.T) {
 	defer upstream.Close()
 	page, err := testAdapters.Browse(context.Background(), "youtube", Config{URL: upstream.URL, Token: strings.Repeat("s", 32)}, "", "", 0)
 	if err != nil || len(page.Sources) != 1 || !page.Sources[0].Item.Playable {
-		t.Fatalf("anonymous YouTube root: %+v, %v", page, err)
+		t.Fatalf("YouTube provider Home: %+v, %v", page, err)
 	}
 }
 

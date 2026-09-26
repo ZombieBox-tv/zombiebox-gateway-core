@@ -57,6 +57,12 @@ type NowPlaying struct {
 	Item       *Item  `json:"item,omitempty"`
 	Volume     int    `json:"volume"`
 	PositionMS int64  `json:"positionMs"`
+	// PositionKnown distinguishes an observed start at zero from unavailable
+	// sender timing. PositionAgeMS is measured locally; clock epochs do not cross
+	// the worker/gateway boundary.
+	PositionKnown bool  `json:"positionKnown"`
+	DurationMS    int64 `json:"durationMs,omitempty"`
+	PositionAgeMS int64 `json:"positionAgeMs,omitempty"`
 }
 
 type AuthorizationPrompt struct {

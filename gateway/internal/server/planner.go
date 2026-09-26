@@ -29,13 +29,18 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 	if requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER" {
 		return playbackDecision{mode: requested}, nil
 	}
-	// Keep live direct relay in Auto; an explicit compatible retry may convert TS.
-	if source.Live && media.ManifestKind(source) == "" && (requested == "" || requested == "AUTO") {
+	// Keep unmanifested live relay in Auto, except opaque live MP3. MP3 uses
+	// capability evidence to choose direct, remux or the AudioTrack fallback.
+	if source.Live && media.ManifestKind(source) == "" && (requested == "" || requested == "AUTO") &&
+		(!media.IsLiveMP3Source(source) || playback.LiveMP3DirectProven(device.Capabilities)) {
 		return playbackDecision{mode: "DIRECT_PLAY"}, nil
 	}
 	if source.Path == "" {
 		if s.deps.RemoteMedia == nil || !media.RemoteCandidate(source) {
 			if source.AudioURL != "" || youtube {
+				return playbackDecision{}, errors.New("remote media unavailable")
+			}
+			if media.IsLiveMP3Source(source) {
 				return playbackDecision{}, errors.New("remote media unavailable")
 			}
 			return playbackDecision{mode: "DIRECT_PLAY"}, nil
@@ -44,7 +49,9 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 		if err != nil {
 			if requested == "" || requested == "AUTO" {
 				if source.AudioURL == "" && !youtube && media.ManifestKind(source) == "" {
-					return playbackDecision{mode: "DIRECT_PLAY"}, nil
+					if !media.IsLiveMP3Source(source) || playback.LiveMP3DirectProven(device.Capabilities) {
+						return playbackDecision{mode: "DIRECT_PLAY"}, nil
+					}
 				}
 			}
 			return playbackDecision{}, err

@@ -76,6 +76,22 @@ func (s *Service) Owned(owner string) bool {
 	return s.owner == owner && (s.provider == "spotify" || ((s.provider == "auto" || s.provider == "universal") && s.selection.current == "spotify"))
 }
 
+// OwnedAirPlay permits receiver controls only for an explicit AirPlay lease or
+// while auto/universal selection still owns a live AirPlay session.
+func (s *Service) OwnedAirPlay(owner string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expire()
+	if s.owner != owner {
+		return false
+	}
+	if s.provider == "airplay" {
+		return true
+	}
+	return (s.provider == "auto" || s.provider == "universal") &&
+		s.selection.current == "airplay" && s.plan != nil && s.plan.Item.Provider == "airplay"
+}
+
 func (s *Service) Release(owner string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -94,6 +94,67 @@ func TestPCMStreamUsesExactLiveHLSAudioProfile(t *testing.T) {
 	}
 }
 
+func TestPCMStreamConvertsLiveMP3WithoutHLSOptions(t *testing.T) {
+	runner := &pcmStreamRunner{metadata: `{"streams":[{"index":0,"codec_type":"audio","codec_name":"mp3"}]}`}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = io.WriteString(w, "continuous-mp3-fixture")
+	}))
+	t.Cleanup(upstream.Close)
+	source := domain.Source{URL: upstream.URL + "/live", MIME: "audio/mpeg", Live: true}
+	if !RemoteCandidate(source) {
+		t.Fatal("live audio/mpeg source should be eligible for bounded remote conversion")
+	}
+	remote := NewRemote(NewWithRunner("ffmpeg", "ffprobe", runner), upstream.Client())
+	if err := remote.ConvertRemote(t.Context(), source, "PCM_STREAM", domain.MediaSelection{}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	args := runner.args()
+	inputIndex := -1
+	for i, arg := range args {
+		if arg == "-i" {
+			inputIndex = i
+			break
+		}
+	}
+	if inputIndex < 0 || inputIndex+1 >= len(args) || !strings.HasPrefix(args[inputIndex+1], "http://127.0.0.1:") {
+		t.Fatalf("FFmpeg input did not stay behind the loopback bridge: %#v", args)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "-live_start_index") || strings.Contains(joined, ",hls,dash") {
+		t.Fatalf("raw MP3 conversion received HLS-only options: %#v", args)
+	}
+	for _, expected := range []string{"-format_whitelist mov,matroska,webm,mpegts,mp3,aac,flac,ogg,wav", "-map 0:0", "-c:a pcm_s16le", "-f s16le pipe:1"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("raw MP3 PCM conversion missing %q in %#v", expected, args)
+		}
+	}
+}
+
+func TestPCMStreamRejectsLiveMP3WithNonMP3OrVideoInventory(t *testing.T) {
+	for _, metadata := range []string{
+		`{"streams":[{"index":0,"codec_type":"audio","codec_name":"aac"}]}`,
+		`{"streams":[{"index":0,"codec_type":"audio","codec_name":"mp3"},{"index":1,"codec_type":"video","codec_name":"h264"}]}`,
+	} {
+		t.Run(metadata, func(t *testing.T) {
+			runner := &pcmStreamRunner{metadata: metadata}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "audio/mpeg")
+				_, _ = io.WriteString(w, "fixture")
+			}))
+			t.Cleanup(upstream.Close)
+			source := domain.Source{URL: upstream.URL + "/live", MIME: "audio/mpeg", Live: true}
+			remote := NewRemote(NewWithRunner("ffmpeg", "ffprobe", runner), upstream.Client())
+			if err := remote.ConvertRemote(t.Context(), source, "PCM_STREAM", domain.MediaSelection{}, io.Discard); err == nil {
+				t.Fatal("accepted incompatible live MP3 inventory")
+			}
+			if len(runner.args()) != 0 {
+				t.Fatal("started FFmpeg for incompatible live MP3 inventory")
+			}
+		})
+	}
+}
+
 func TestPCMStreamIsUnavailableForLocalConversion(t *testing.T) {
 	input := t.TempDir() + "/audio.aac"
 	if err := os.WriteFile(input, []byte("fixture"), 0600); err != nil {

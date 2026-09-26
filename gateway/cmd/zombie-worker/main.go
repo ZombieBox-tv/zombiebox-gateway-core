@@ -54,6 +54,8 @@ func run(path string) error {
 	defer cancel()
 	var commands []*exec.Cmd
 	var spotifyDiagnostics *worker.SpotifyDaemonDiagnostics
+	var airplayProgress *worker.AirPlayProgress
+	var mirror *mirrorBridge
 	if c.Mode == "spotify" {
 		spotifyDiagnostics = worker.NewSpotifyDaemonDiagnostics()
 		fifo := filepath.Join(c.StateDir, "audio.pcm")
@@ -84,20 +86,34 @@ func run(path string) error {
 		// RTP timestamps may restart when an AirPlay sender changes tracks. Build
 		// output timestamps from decoded samples so HLS segment durations remain
 		// monotonic. Packet loss/reconnect recovery still needs physical evidence.
-		commands = append(commands, exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,udp,rtp", "-localaddr", "127.0.0.1", "-listen_timeout", "-1", "-threads", "1", "-i", audioSDP, "-af", "asetpts=N/SR/TB", "-c:a", "aac", "-threads", "1", "-b:a", "128k", "-f", "hls", "-hls_time", "1", "-hls_list_size", "4", "-hls_flags", "delete_segments+omit_endlist+temp_file", "-hls_segment_filename", filepath.Join(hls, "audio%d.ts"), filepath.Join(hls, "audio.m3u8")))
-		// RTP is loopback-only. H.265 is deliberately not advertised to senders.
-		sdp := "v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Zombie AirPlay\nc=IN IP4 127.0.0.1\nt=0 0\nm=video 35010 RTP/AVP 96\na=rtpmap:96 H264/90000\na=fmtp:96 packetization-mode=1\nm=audio 35012 RTP/AVP 97\na=rtpmap:97 L16/44100/2\n"
-		sdpPath := filepath.Join(c.StateDir, "receiver.sdp")
-		if err = os.WriteFile(sdpPath, []byte(sdp), 0600); err != nil {
+		commands = append(commands, exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,udp,rtp", "-localaddr", "127.0.0.1", "-listen_timeout", "-1", "-threads", "1", "-i", audioSDP, "-af", "asetpts=N/SR/TB", "-c:a", "aac", "-threads", "1", "-b:a", "128k", "-f", "hls", "-hls_time", "0.6", "-hls_list_size", "4", "-hls_flags", "delete_segments+omit_endlist+temp_file", "-hls_segment_filename", filepath.Join(hls, "audio%d.ts"), filepath.Join(hls, "audio.m3u8")))
+		// The mirror bridge selects video-only or audio+video from observed RTP.
+		// Its loopback listeners remain bound while FFmpeg changes modes.
+		mirror, err = newMirrorBridge(hls, c.StateDir, "ffmpeg", airplayMirrorPorts)
+		if err != nil {
 			return err
 		}
-		commands = append(commands, exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,udp,rtp", "-localaddr", "127.0.0.1", "-listen_timeout", "-1", "-threads", "1", "-i", sdpPath, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "libx264", "-threads", "2", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "3.0", "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,format=yuv420p", "-r", "30", "-g", "30", "-b:v", "1000k", "-c:a", "aac", "-b:a", "128k", "-f", "hls", "-hls_time", "1", "-hls_list_size", "4", "-hls_flags", "delete_segments+omit_endlist+temp_file", "-hls_segment_filename", filepath.Join(hls, "segment%d.ts"), filepath.Join(hls, "index.m3u8")))
-		commands = append(commands, exec.CommandContext(ctx, "uxplay", "-md", filepath.Join(c.StateDir, "metadata.txt"), "-ca", filepath.Join(c.StateDir, "coverart"), "-dacp", dacpPath, "-n", "Zombie Box AirPlay", "-p", "35000", "-pin", c.Pin, "-s", "1280x720", "-fps", "30", "-vrtp", "pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=35010", "-artp", "pt=97 ! multiudpsink clients=127.0.0.1:35012,127.0.0.1:35014"))
+		defer mirror.closeSockets()
+		airplayProgress = worker.NewAirPlayProgress()
+		uxplay := exec.CommandContext(ctx, "uxplay", "-md", filepath.Join(c.StateDir, "metadata.txt"), "-ca", filepath.Join(c.StateDir, "coverart"), "-dacp", dacpPath, "-n", "Zombie Box AirPlay", "-p", "35000", "-pin", c.Pin, "-s", "1280x720", "-fps", "30", "-vrtp", "pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=35010", "-artp", "pt=97 ! multiudpsink clients=127.0.0.1:35012,127.0.0.1:35014")
+		// Parse only UxPlay's bounded progress record. Other stdout, including
+		// potentially sensitive upstream diagnostics, is discarded by the parser.
+		uxplay.Stdout = airplayProgress
+		commands = append(commands, uxplay)
 	}
 	var wg sync.WaitGroup
-	errors := make(chan error, len(commands)+1)
+	errors := make(chan error, len(commands)+2)
 	defer wg.Wait()
 	defer cancel()
+	if mirror != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if runErr := mirror.run(ctx); runErr != nil {
+				errors <- runErr
+			}
+		}()
+	}
 	for _, cmd := range commands {
 		// Upstream logs may contain pairing credentials; they remain off stdout.
 		cmd.WaitDelay = time.Second
@@ -116,7 +132,7 @@ func run(path string) error {
 			errors <- fmt.Errorf("%s exited: %v", filepath.Base(cmd.Path), err)
 		}(cmd)
 	}
-	httpServer := &http.Server{Addr: c.Listen, Handler: worker.HandlerWithSpotifyDiagnostics(ctx, c, spotifyDiagnostics), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+	httpServer := &http.Server{Addr: c.Listen, Handler: worker.HandlerWithAirPlayProgress(ctx, c, spotifyDiagnostics, airplayProgress), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() { errors <- httpServer.ListenAndServe() }()
 	var result error
 	select {

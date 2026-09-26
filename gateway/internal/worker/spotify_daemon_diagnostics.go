@@ -22,6 +22,15 @@ var spotifyFailureNames = [...]string{
 	"trackLoad",
 }
 
+const (
+	spotifyCategoryPairingAccepted = len(spotifyFailureNames) + iota
+	spotifyCategoryPairingRefused
+	spotifyCategoryPairingBadChecksum
+	spotifyCategoryPairingBusy
+	spotifyCategoryPairingRequestError
+	spotifyDiagnosticCategoryCount
+)
+
 type spotifyFailurePattern struct {
 	category int
 	phrase   string
@@ -49,8 +58,8 @@ func newSpotifyFailurePattern(category int, phrase string) spotifyFailurePattern
 type SpotifyDaemonDiagnostics struct {
 	mu                  sync.Mutex
 	patterns            []spotifyFailurePattern
-	lineCategories      [len(spotifyFailureNames)]bool
-	counts              [len(spotifyFailureNames)]uint64
+	lineCategories      [spotifyDiagnosticCategoryCount]bool
+	counts              [spotifyDiagnosticCategoryCount]uint64
 	lineBytes           int
 	bufferingSince      time.Time
 	consecutiveRefusals int
@@ -93,6 +102,11 @@ func newSpotifyDaemonDiagnostics(clock func() time.Time) *SpotifyDaemonDiagnosti
 		{4, "broken pipe"},
 		{4, "audio output"},
 		{5, "failed loading current track"},
+		{spotifyCategoryPairingAccepted, "accepted zeroconf from"},
+		{spotifyCategoryPairingRefused, "refused zeroconf from"},
+		{spotifyCategoryPairingBadChecksum, "zeroconf received request with bad checksum"},
+		{spotifyCategoryPairingBusy, "zeroconf is authenticating another user"},
+		{spotifyCategoryPairingRequestError, "failed handling zeroconf add user request"},
 	} {
 		d.patterns = append(d.patterns, newSpotifyFailurePattern(entry.category, entry.phrase))
 	}
@@ -214,13 +228,25 @@ func (d *SpotifyDaemonDiagnostics) finishLine() {
 }
 
 type spotifyDaemonHealth struct {
-	FailureCounts       map[string]uint64 `json:"failureCounts"`
-	StalledBuffering    bool              `json:"stalledBuffering"`
-	RefusalLimited      bool              `json:"refusalLimited,omitempty"`
-	ConsecutiveRefusals int               `json:"consecutiveRefusals,omitempty"`
-	StopAttempts        int               `json:"stopAttempts,omitempty"`
-	LastStopResult      string            `json:"lastStopResult,omitempty"`
-	LastStopStatus      int               `json:"lastStopStatus,omitempty"`
+	FailureCounts       map[string]uint64         `json:"failureCounts"`
+	Pairing             spotifyPairingDiagnostics `json:"pairing"`
+	StalledBuffering    bool                      `json:"stalledBuffering"`
+	RefusalLimited      bool                      `json:"refusalLimited,omitempty"`
+	ConsecutiveRefusals int                       `json:"consecutiveRefusals,omitempty"`
+	StopAttempts        int                       `json:"stopAttempts,omitempty"`
+	LastStopResult      string                    `json:"lastStopResult,omitempty"`
+	LastStopStatus      int                       `json:"lastStopStatus,omitempty"`
+}
+
+// spotifyPairingDiagnostics exposes only aggregate Zeroconf outcomes. The
+// daemon's source log lines include sender-provided device and account names,
+// so the parser records fixed categories and discards all raw text.
+type spotifyPairingDiagnostics struct {
+	Accepted     uint64 `json:"accepted"`
+	Refused      uint64 `json:"refused"`
+	BadChecksum  uint64 `json:"badChecksum"`
+	Busy         uint64 `json:"busy"`
+	RequestError uint64 `json:"requestError"`
 }
 
 // An active attempt is evaluated against the refusal circuit. Reconnects during
@@ -279,6 +305,13 @@ func (d *SpotifyDaemonDiagnostics) snapshot(bufferingWithoutTrack, audioActive b
 		StopAttempts:        d.stopAttempts,
 		LastStopResult:      d.lastStopResult,
 		LastStopStatus:      d.lastStopHTTPStatus,
+		Pairing: spotifyPairingDiagnostics{
+			Accepted:     d.counts[spotifyCategoryPairingAccepted],
+			Refused:      d.counts[spotifyCategoryPairingRefused],
+			BadChecksum:  d.counts[spotifyCategoryPairingBadChecksum],
+			Busy:         d.counts[spotifyCategoryPairingBusy],
+			RequestError: d.counts[spotifyCategoryPairingRequestError],
+		},
 	}
 	for i, name := range spotifyFailureNames {
 		out.FailureCounts[name] = d.counts[i]

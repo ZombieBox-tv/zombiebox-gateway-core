@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"zombiebox.local/gateway/internal/domain"
@@ -14,38 +16,45 @@ const qualityPrefBucket = "quality_preferences"
 
 type qualityPreference struct {
 	QualityID string `json:"qualityId"`
+	Provider  string `json:"provider"`
 	Kind      string `json:"kind"`
 	UpdatedAt int64  `json:"updatedAt"`
 }
 
-func (s *Server) getQualityPreference(ctx context.Context, deviceID, kind string) string {
-	if deviceID == "" || kind == "" {
+func qualityPreferenceID(provider, kind string) string {
+	return provider + ":" + kind
+}
+
+func (s *Server) getQualityPreference(ctx context.Context, deviceID, provider, kind string) string {
+	if deviceID == "" || provider == "" || kind == "" {
 		return ""
 	}
 	var pref qualityPreference
-	if err := s.db.Get(ctx, qualityPrefBucket+":"+deviceID, kind, &pref); err == nil {
+	if err := s.db.Get(ctx, qualityPrefBucket+":"+deviceID, qualityPreferenceID(provider, kind), &pref); err == nil {
 		return pref.QualityID
 	}
 	return ""
 }
 
-func (s *Server) setQualityPreference(ctx context.Context, deviceID, kind, qualityID string) error {
-	if deviceID == "" || kind == "" {
+func (s *Server) setQualityPreference(ctx context.Context, deviceID, provider, kind, qualityID string) error {
+	if deviceID == "" || provider == "" || kind == "" {
 		return nil
 	}
-	return s.db.Put(ctx, qualityPrefBucket+":"+deviceID, kind, qualityPreference{
+	return s.db.Put(ctx, qualityPrefBucket+":"+deviceID, qualityPreferenceID(provider, kind), qualityPreference{
 		QualityID: qualityID,
+		Provider:  provider,
 		Kind:      kind,
 		UpdatedAt: time.Now().Unix(),
 	})
 }
 
-func (s *Server) revertQualityPreference(ctx context.Context, deviceID, kind string) error {
-	if deviceID == "" || kind == "" {
+func (s *Server) revertQualityPreference(ctx context.Context, deviceID, provider, kind string) error {
+	if deviceID == "" || provider == "" || kind == "" {
 		return nil
 	}
-	return s.db.Put(ctx, qualityPrefBucket+":"+deviceID, kind, qualityPreference{
+	return s.db.Put(ctx, qualityPrefBucket+":"+deviceID, qualityPreferenceID(provider, kind), qualityPreference{
 		QualityID: "auto",
+		Provider:  provider,
 		Kind:      kind,
 		UpdatedAt: time.Now().Unix(),
 	})
@@ -63,17 +72,18 @@ func (s *Server) revertFailedSessionQualityLocked(ctx context.Context, id string
 	if kind == "" {
 		kind = "video"
 	}
+	provider := sess.source.Item.Provider
 	selected := sess.selection.Quality
 	if selected == "LOW" {
 		selected = "240p"
 	} else if selected == "STANDARD" {
 		selected = "360p"
 	}
-	preference := s.getQualityPreference(ctx, sess.device, kind)
+	preference := s.getQualityPreference(ctx, sess.device, provider, kind)
 	if preference == "" || preference == "auto" || preference != selected {
 		return nil
 	}
-	return s.revertQualityPreference(ctx, sess.device, kind)
+	return s.revertQualityPreference(ctx, sess.device, provider, kind)
 }
 
 func (s *Server) cleanupSupersededSessionsLocked(deviceID, activeOldID string) {
@@ -103,6 +113,28 @@ func isManualYouTubeSession(sess *session) bool {
 		return true
 	}
 	return false
+}
+
+func isNativeYouTubeSplitQuality(source domain.Source, metadata *domain.Metadata, qualityID string) bool {
+	if source.Item.Provider != "youtube" || source.Item.Kind != "video" || source.Live || source.Path != "" || source.URL == "" || source.AudioURL == "" || metadata == nil {
+		return false
+	}
+
+	height, err := strconv.Atoi(strings.TrimSuffix(qualityID, "p"))
+	if err != nil || height <= 0 {
+		return false
+	}
+
+	hasNativeH264, hasAAC := false, false
+	for _, stream := range metadata.Streams {
+		if stream.Type == "video" && stream.Codec == "h264" && stream.Height == height {
+			hasNativeH264 = true
+		}
+		if stream.Type == "audio" && stream.Codec == "aac" {
+			hasAAC = true
+		}
+	}
+	return hasNativeH264 && hasAAC
 }
 
 func (s *Server) probeRemoteMedia(ctx context.Context, src domain.Source) (domain.Metadata, bool) {
@@ -231,12 +263,11 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		return
 	}
 
-	originalSource := sess.source
-	originalMetadata := metadata
 	targetSource := sess.source
 	targetMetadata := metadata
 
 	if sess.source.Item.Provider == "youtube" && (len(sess.source.Variants) > 0 || sess.source.ResolveURL != "") {
+		provider := sess.source.Item.Provider
 		kind := sess.source.Item.Kind
 		if kind == "" {
 			kind = "video"
@@ -247,23 +278,10 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 				targetSource = target
 				targetMetadata = &meta
 			} else {
-				// Resolution or required remote media probe failed:
-				// Revert preference to Auto
-				_ = s.revertQualityPreference(r.Context(), d.ID, kind)
-				request.QualityID = "auto"
-
-				if isManualYouTubeSession(sess) {
-					autoSource, autoMeta, autoOK := s.resolveAndProbeYouTubeSource(r.Context(), originalSource, "auto")
-					if !autoOK {
-						fail(w, 502, "quality_unavailable")
-						return
-					}
-					targetSource = autoSource
-					targetMetadata = &autoMeta
-				} else {
-					targetSource = originalSource
-					targetMetadata = originalMetadata
-				}
+				// A manual selection must not silently turn into Auto. Fail before
+				// replacing the active session or changing its persisted preference.
+				fail(w, 502, "quality_resolution_failed")
+				return
 			}
 		} else if request.QualityID == "auto" {
 			if isManualYouTubeSession(sess) {
@@ -274,17 +292,36 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 				}
 				targetSource = autoSource
 				targetMetadata = &autoMeta
-				_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+				_ = s.revertQualityPreference(r.Context(), d.ID, provider, kind)
 			}
 		}
 	}
 
-	mode, chosenQuality := playback.SelectedQualityMode(*targetMetadata, targetSource, d, request.QualityID, request.PositionMS, sess.mode)
+	now := time.Now()
+	positionMS := request.PositionMS
+	mode, chosenQuality := playback.SelectedQualityMode(*targetMetadata, targetSource, d, request.QualityID, positionMS, sess.mode)
+	if positionMS > 0 && mode == "TRANSCODE" && request.QualityID != "" && request.QualityID != "auto" {
+		// The Vizio rejects chunked conversion output, but suite-2 evidence can
+		// prove that a native YouTube split-stream rendition can be remuxed
+		// with a known length. Preserve a non-zero position only when a fresh
+		// seek probe passes; otherwise start this manual quality at zero.
+		candidateMode, candidateQuality := playback.SelectedQualityMode(*targetMetadata, targetSource, d, request.QualityID, 0, sess.mode)
+		qualityRequiresTranscode := candidateQuality == "LOW" || (targetMetadata != nil && playback.RequiresTranscodeForQuality(*targetMetadata, candidateQuality))
+		if candidateMode == "REMUX" && !qualityRequiresTranscode && isNativeYouTubeSplitQuality(targetSource, targetMetadata, candidateQuality) && requiresKnownLengthYouTubeRemux(d, targetSource, targetMetadata, candidateMode, now) {
+			mode, chosenQuality = candidateMode, candidateQuality
+			if !supportsKnownLengthYouTubeSeek(d, targetSource, targetMetadata, candidateMode, now) {
+				positionMS = 0
+			}
+		}
+	}
 	if mode == "EXTERNAL_PLAYER" {
 		fail(w, 409, "quality_unavailable")
 		return
 	}
-	if (mode == "REMUX" || mode == "HYBRID") && (request.PositionMS > 0 || chosenQuality == "LOW" || (targetMetadata != nil && playback.RequiresTranscodeForQuality(*targetMetadata, chosenQuality))) {
+	knownLengthRemux := requiresKnownLengthYouTubeRemux(d, targetSource, targetMetadata, mode, now)
+	qualityRequiresTranscode := chosenQuality == "LOW" || (targetMetadata != nil && playback.RequiresTranscodeForQuality(*targetMetadata, chosenQuality))
+	knownLengthResume := mode == "REMUX" && positionMS > 0 && !qualityRequiresTranscode && supportsKnownLengthYouTubeSeek(d, targetSource, targetMetadata, mode, now)
+	if (mode == "REMUX" || mode == "HYBRID") && (positionMS > 0 || qualityRequiresTranscode) && !knownLengthResume {
 		mode = "TRANSCODE"
 	}
 
@@ -310,8 +347,13 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 	ctx, cancel := context.WithDeadline(context.Background(), oldSess.expires)
 	selection := oldSess.selection
 	selection.Quality = chosenQuality
-	selection.PositionMS = request.PositionMS
-	if oldSess.source.Live {
+	selection.PositionMS = positionMS
+	if targetSource.AudioURL != "" {
+		// Resolved split renditions have independent audio stream indexes.
+		// A track selected on the previous combined source cannot be reused.
+		selection.AudioID = nil
+	}
+	if targetSource.Live || mode == "REMUX" {
 		selection.PositionMS = 0
 	}
 
@@ -319,6 +361,7 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		networkAdaptation: oldSess.networkAdaptation,
 		adaptation:        oldSess.adaptation,
 		mode:              mode,
+		knownLengthRemux:  mode == "REMUX" && knownLengthRemux,
 		device:            d.ID,
 		ticket:            ticket,
 		expires:           oldSess.expires,
@@ -349,10 +392,13 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		if isAudioOnly(targetSource, targetMetadata) {
 			plan.MIME = "audio/mp4"
 		}
-		plan.Seekable = false
+		plan.Seekable = mode == "REMUX" && newSess.knownLengthRemux && supportsKnownLengthYouTubeSeek(d, targetSource, targetMetadata, mode, now) && !targetSource.Live
 		plan.ResumeMS = 0
+		if plan.Seekable {
+			plan.ResumeMS = positionMS
+		}
 		if mode == "TRANSCODE" {
-			plan.TimelineOffsetMS = request.PositionMS
+			plan.TimelineOffsetMS = positionMS
 		}
 	} else if mode == "HYBRID" {
 		plan.MIME = "video/mp4"
@@ -375,7 +421,8 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 	if kind == "" {
 		kind = "video"
 	}
-	if err := s.setQualityPreference(r.Context(), d.ID, kind, request.QualityID); err != nil {
+	provider := oldSess.source.Item.Provider
+	if err := s.setQualityPreference(r.Context(), d.ID, provider, kind, request.QualityID); err != nil {
 		s.mu.Lock()
 		if created := s.sessions[id]; created != nil {
 			created.cancel()

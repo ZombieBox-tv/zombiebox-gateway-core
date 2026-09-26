@@ -16,6 +16,9 @@ The author selected GPL-3.0-only for first-party project code; preserve its LICE
 
 - modernc.org/sqlite v1.38.2: BSD-3-Clause; Linux gateway dependency. See modernc-sqlite-LICENSE.txt and the locked source reference. SQLite itself is public-domain upstream code.
 - github.com/mattn/go-sqlite3 v1.14.32: MIT; Android/Termux gateway driver (CGO), not an APK dependency. See go-sqlite3-LICENSE.txt.
+- github.com/miekg/dns v1.1.73: BSD-3-Clause; bounded DNS packet encoding/parsing for IPv4 mDNS DACP service discovery. See ../docs/licenses/miekg-dns-LICENSE.
+- golang.org/x/net v0.57.0: BSD-3-Clause; IPv4 multicast interface selection for DACP service discovery. See ../docs/licenses/golang-x-net-LICENSE.
+- golang.org/x/sys v0.47.0: BSD-3-Clause; safe no-follow access to transient DACP credential files. See ../docs/licenses/golang-x-sys-LICENSE.
 - Go transitive dependency versions are locked by gateway/go.mod and go.sum. The distribution inventory must include their notices before a public binary release.
 
 - YouTube.js 18.0.0: MIT, optional Node wrapper dependency; see youtube-js-LICENSE.txt. npm dependencies and their licenses remain in the image's node_modules; package-lock.json pins exact transitive versions.

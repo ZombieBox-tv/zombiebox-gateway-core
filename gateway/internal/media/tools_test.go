@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,9 @@ func TestMain(m *testing.M) {
 		_, _ = os.Stdout.Write([]byte("ready"))
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
+	}
+	if os.Getenv("ZOMBIE_MEDIA_TEST_HELPER") == "exit" {
+		os.Exit(37)
 	}
 	os.Exit(m.Run())
 }
@@ -67,11 +71,57 @@ func TestCancellationReapsJobAndRejectsConcurrentWork(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
+		if ConversionFailureClass(err) != "" {
+			t.Fatalf("cancellation was converted into a media failure: %q", ConversionFailureClass(err))
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("child not reaped")
 	}
 	if len(tools.jobs) != 0 {
 		t.Fatal("capacity leaked")
+	}
+}
+
+func TestConversionFailurePreservesSafeFFmpegExitCode(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZOMBIE_MEDIA_TEST_HELPER", "exit")
+	input := filepath.Join(t.TempDir(), "input.mp4")
+	if err := os.WriteFile(input, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err = NewWithRunner(executable, executable, ExecRunner{}).Convert(t.Context(), input, "REMUX", io.Discard)
+	if ConversionFailureClass(err) != ConversionFailureFFmpegExit {
+		t.Fatalf("failure class = %q, err = %v", ConversionFailureClass(err), err)
+	}
+	if code, ok := ConversionFailureExitCode(err); !ok || code != 37 {
+		t.Fatalf("exit code = %d, present = %v", code, ok)
+	}
+	if status, ok := ConversionFailureHTTPStatus(err); ok || status != 0 {
+		t.Fatalf("unexpected upstream status: %d, present = %v", status, ok)
+	}
+	if err.Error() != "conversion_failed" {
+		t.Fatalf("failure text exposed detail: %q", err.Error())
+	}
+}
+
+func TestConversionFailureSanitizesInjectedRunnerError(t *testing.T) {
+	input := filepath.Join(t.TempDir(), "input.mp4")
+	if err := os.WriteFile(input, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runner := runFunc(func(context.Context, string, []string, io.Writer) error {
+		return errors.New("failed https://media.example/input?signature=private Bearer super-secret")
+	})
+	err := NewWithRunner("ffmpeg", "ffprobe", runner).Convert(t.Context(), input, "REMUX", io.Discard)
+	if ConversionFailureClass(err) != ConversionFailureFFmpeg {
+		t.Fatalf("failure class = %q, err = %v", ConversionFailureClass(err), err)
+	}
+	if strings.Contains(err.Error(), "media.example") || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("failure text leaked runner details: %q", err.Error())
 	}
 }
 

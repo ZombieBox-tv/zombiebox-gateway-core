@@ -85,6 +85,58 @@ func TestOwnershipMetadataDismissAndIdleRearm(t *testing.T) {
 	}
 }
 
+func TestAirPlayOwnershipFollowsExplicitAndSelectedLeases(t *testing.T) {
+	source := &domain.Source{
+		URL:  "http://receiver/audio",
+		Item: domain.Item{ID: "airplay-audio", Provider: "airplay", Kind: "audio"},
+	}
+	status := domain.NowPlaying{Provider: "airplay", State: "PLAYING", Item: &source.Item}
+	backend := backendFunc(func(_ context.Context, provider string) (*domain.Source, domain.NowPlaying, error) {
+		if provider == "airplay" {
+			return source, status, nil
+		}
+		return nil, domain.NowPlaying{Provider: provider, State: "STOPPED"}, nil
+	})
+	service := New(backend, &sessions{})
+	if err := service.Claim("explicit", "airplay"); err != nil {
+		t.Fatal(err)
+	}
+	if !service.OwnedAirPlay("explicit") || service.OwnedAirPlay("other") {
+		t.Fatal("explicit AirPlay owner was not isolated")
+	}
+	service.Release("explicit")
+
+	for _, provider := range []string{"auto", "universal"} {
+		if err := service.Claim(provider, provider); err != nil {
+			t.Fatal(err)
+		}
+		if service.OwnedAirPlay(provider) {
+			t.Fatalf("%s lease controlled AirPlay before sender selection", provider)
+		}
+		if _, err := service.Snapshot(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+		if !service.OwnedAirPlay(provider) {
+			t.Fatalf("selected AirPlay session was not controllable for %s", provider)
+		}
+
+		source = nil
+		status = domain.NowPlaying{Provider: "airplay", State: "STOPPED"}
+		if _, err := service.Snapshot(context.Background(), provider); err != nil {
+			t.Fatal(err)
+		}
+		if service.OwnedAirPlay(provider) {
+			t.Fatalf("stopped %s AirPlay session remained controllable", provider)
+		}
+		service.Release(provider)
+		source = &domain.Source{
+			URL:  "http://receiver/audio",
+			Item: domain.Item{ID: "airplay-audio", Provider: "airplay", Kind: "audio"},
+		}
+		status = domain.NowPlaying{Provider: "airplay", State: "PLAYING", Item: &source.Item}
+	}
+}
+
 func TestLeaseExpiryAndInputChangesReleaseStreams(t *testing.T) {
 	source := domain.Source{URL: "http://origin/one", Item: domain.Item{ID: "airplay-live"}}
 	streams := &sessions{}

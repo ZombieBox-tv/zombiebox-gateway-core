@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"net/url"
 	"strings"
 	"time"
 
@@ -51,11 +52,27 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 	return "TRANSCODE"
 }
 
-// LocalModeSource chooses an evidence-backed live audio transport separately
-// from the general fragmented-MP4 conversion path. Native HLS stays first,
-// followed by copied AAC in ADTS, then decoded PCM for a probed local player.
+// LocalModeSource chooses evidence-backed live audio transports separately
+// from the general fragmented-MP4 conversion path. Native HLS and probed
+// chunked MP3 stay first; live audio falls back to PCM only on a local PASS.
 func LocalModeSource(metadata domain.Metadata, source domain.Source, capabilities domain.Capabilities, requested string) string {
 	mode := LocalMode(metadata, source.MIME, capabilities, requested)
+	if isLiveMP3Audio(metadata, source) && (requested == "" || requested == "AUTO" || requested == "REMUX" || requested == "TRANSCODE") {
+		if requested == "REMUX" {
+			return mode
+		}
+		status := func(id string) string {
+			return probeStatus(capabilities, id, time.Now().Unix())
+		}
+		if requested != "TRANSCODE" && status("mp3-chunked") == "PASS" {
+			return "DIRECT_PLAY"
+		}
+		// The current fMP4 probe carries H.264/AAC and cannot certify MP3 in MP4.
+		if status("audio-track-pcm-stream") == "PASS" {
+			return "PCM_STREAM"
+		}
+		return "EXTERNAL_PLAYER"
+	}
 	if source.Live && isHLS(metadata.Format.Name, source.MIME) && (requested == "" || requested == "AUTO" || requested == "REMUX" || requested == "TRANSCODE") {
 		hasAudio := false
 		compatible := true
@@ -78,6 +95,33 @@ func LocalModeSource(metadata domain.Metadata, source domain.Source, capabilitie
 		}
 	}
 	return mode
+}
+
+// LiveMP3DirectProven reports whether the current device has recent advancing
+// evidence for playing a chunked MP3 stream without conversion.
+func LiveMP3DirectProven(capabilities domain.Capabilities) bool {
+	return probeStatus(capabilities, "mp3-chunked", time.Now().Unix()) == "PASS"
+}
+
+func isLiveMP3Audio(metadata domain.Metadata, source domain.Source) bool {
+	if !source.Live || source.AudioURL != "" || !strings.EqualFold(strings.TrimSpace(strings.SplitN(source.MIME, ";", 2)[0]), "audio/mpeg") {
+		return false
+	}
+	parsed, err := url.Parse(source.URL)
+	if err == nil {
+		path := strings.ToLower(parsed.Path)
+		if strings.HasSuffix(path, ".m3u8") || strings.HasSuffix(path, ".mpd") {
+			return false
+		}
+	}
+	hasAudio := false
+	for _, stream := range metadata.Streams {
+		if stream.Type == "video" || (stream.Type == "audio" && stream.Codec != "mp3") {
+			return false
+		}
+		hasAudio = hasAudio || stream.Type == "audio"
+	}
+	return hasAudio
 }
 
 func progressiveDirectCandidate(metadata domain.Metadata, mime string, capabilities domain.Capabilities, status func(string) string) bool {

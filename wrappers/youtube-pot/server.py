@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 from cooldown import CooldownTracker
 from media_ranges import _NO_REDIRECT_OPENER
-from resolver import resolve_video
+from resolver import QualityUnavailableError, resolve_video
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,6 +191,8 @@ def make_handler(config: Dict[str, Any], cooldown_tracker: CooldownTracker):
             try:
                 resolved = resolve_video(video_id, quality, config, cooldown_tracker)
                 self.reply_json(200, resolved)
+            except QualityUnavailableError:
+                self.reply_json(502, {"error": "quality_unavailable"})
             except Exception as exc:
                 logger.warning(
                     "Resolution failed for %s: %s",

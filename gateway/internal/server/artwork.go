@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"zombiebox.local/gateway/internal/artwork"
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -58,12 +60,36 @@ func (s *Server) artwork(w http.ResponseWriter, r *http.Request, d domain.Device
 		fail(w, 404, "artwork_unavailable")
 		return
 	}
-	data, err := s.deps.Artwork.Image(r.Context(), *source, artworkProfile(d, r.URL.Query().Get("size")))
+	profile := artworkProfile(d, r.URL.Query().Get("size"))
+	preferred := artwork.FormatJPEG
+	if r.URL.Query().Get("format") == string(artwork.FormatWebP) && d.Registration.Platform.AndroidAPI >= 14 {
+		preferred = artwork.FormatWebP
+	}
+	var data []byte
+	actual := artwork.FormatJPEG
+	var err error
+	if encoder, ok := s.deps.Artwork.(interface {
+		ImageAs(context.Context, domain.Source, domain.ArtworkProfile, artwork.ImageFormat) ([]byte, artwork.ImageFormat, error)
+	}); ok {
+		data, actual, err = encoder.ImageAs(r.Context(), *source, profile, preferred)
+	} else {
+		data, err = s.deps.Artwork.Image(r.Context(), *source, profile)
+	}
 	if err != nil {
 		fail(w, 404, "artwork_unavailable")
 		return
 	}
-	w.Header().Set("Content-Type", "image/jpeg")
+	contentType := ""
+	switch actual {
+	case artwork.FormatJPEG:
+		contentType = "image/jpeg"
+	case artwork.FormatWebP:
+		contentType = "image/webp"
+	default:
+		fail(w, 404, "artwork_unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.Header().Set("Vary", "Authorization")
 	sum := sha256.Sum256(data)

@@ -152,6 +152,10 @@ func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, boo
 	hasTrack := status.Track != nil && status.Track.Name != ""
 	if hasTrack {
 		out.PositionMS = max(0, status.Track.Position)
+		if !status.Stopped && status.Track.Position >= 0 {
+			out.PositionKnown = true
+			out.DurationMS = max(0, status.Track.Duration)
+		}
 		if status.Track.Cover != nil && *status.Track.Cover != "" {
 			coverURL := sanitizeSpotifyCoverURL(*status.Track.Cover)
 			if coverURL != "" {
@@ -304,19 +308,72 @@ func (a *Adapters) SpotifyCommand(ctx context.Context, c Config, command PlayerC
 	return nil
 }
 
+// AirPlayCommand sends only the player actions exposed by the client to the
+// authenticated private receiver worker. The worker owns DACP discovery and
+// credentials; neither is accepted from the public request.
+func (a *Adapters) AirPlayCommand(ctx context.Context, c Config, action string) error {
+	commands := map[string]string{
+		"playpause": "playpause",
+		"next":      "nextitem",
+		"previous":  "previtem",
+	}
+	command, ok := commands[action]
+	if !ok || !c.Enabled {
+		return errors.New("invalid AirPlay command")
+	}
+	headers, err := wrapperHeaders(c)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: command})
+	if err != nil {
+		return errors.New("invalid AirPlay command")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, strings.TrimRight(c.URL, "/")+"/control", bytes.NewReader(body))
+	if err != nil {
+		return errors.New("AirPlay control unavailable")
+	}
+	request.Header = headers
+	request.Header.Set("Content-Type", "application/json")
+	response, err := a.privateHTTP.Do(request)
+	if err != nil {
+		return errors.New("AirPlay control unavailable")
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, 4<<10+1))
+	if err != nil || len(data) > 4<<10 {
+		return errors.New("invalid AirPlay control response")
+	}
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
+		return errors.New("AirPlay command rejected")
+	}
+	return nil
+}
+
 func (a *Adapters) AirPlay(ctx context.Context, c Config) ([]Source, error) {
-	sources, _, _, _, err := a.airplaySources(ctx, c)
+	sources, _, _, _, _, err := a.airplaySources(ctx, c)
 	return sources, err
 }
 
-func (a *Adapters) airplaySources(ctx context.Context, c Config) ([]Source, bool, bool, bool, error) {
+type airplaySenderProgress struct {
+	Known      bool
+	PositionMS int64
+	DurationMS int64
+	AgeMS      int64
+}
+
+func (a *Adapters) airplaySources(ctx context.Context, c Config) ([]Source, bool, bool, bool, airplaySenderProgress, error) {
 	headers, err := wrapperHeaders(c)
 	if err != nil {
-		return nil, false, false, false, err
+		return nil, false, false, false, airplaySenderProgress{}, err
 	}
 	body, err := a.request(ctx, strings.TrimRight(c.URL, "/")+"/status", headers)
 	if err != nil {
-		return nil, false, false, false, err
+		return nil, false, false, false, airplaySenderProgress{}, err
 	}
 	var status struct {
 		Active             bool                                  `json:"active"`
@@ -324,12 +381,21 @@ func (a *Adapters) airplaySources(ctx context.Context, c Config) ([]Source, bool
 		Connected          bool                                  `json:"connected"`
 		ConnectionKnown    bool                                  `json:"connectionKnown"`
 		ConnectionRevision string                                `json:"connectionRevision"`
+		ArtworkRevision    *string                               `json:"artworkRevision"`
 		Metadata           struct{ Title, Artist, Album string } `json:"metadata"`
+		ProgressKnown      bool                                  `json:"progressKnown"`
+		PositionMS         int64                                 `json:"positionMs"`
+		DurationMS         int64                                 `json:"durationMs"`
+		PositionAgeMS      int64                                 `json:"positionAgeMs"`
 	}
 	if json.Unmarshal(body, &status) != nil {
-		return nil, false, false, false, errors.New("invalid receiver status")
+		return nil, false, false, false, airplaySenderProgress{}, errors.New("invalid receiver status")
 	}
 	audioActive := status.AudioActive && !(status.ConnectionKnown && !status.Connected)
+	progress := airplaySenderProgress{}
+	if status.ProgressKnown && status.Connected && status.Metadata.Title != "" && status.PositionMS >= 0 && status.DurationMS > 0 && status.DurationMS <= int64(24*time.Hour/time.Millisecond) && status.PositionMS <= status.DurationMS && status.PositionAgeMS >= 0 && status.PositionAgeMS <= 5000 {
+		progress = airplaySenderProgress{Known: true, PositionMS: status.PositionMS, DurationMS: status.DurationMS, AgeMS: status.PositionAgeMS}
+	}
 	item := domain.Item{ID: "airplay-live", Provider: "airplay", Kind: "video", Title: "AirPlay", Subtitle: "Start Screen Mirroring on your Apple device", Playable: status.Active}
 	audio := domain.Item{ID: "airplay-audio", Provider: "airplay", Kind: "audio", Title: "AirPlay audio", Subtitle: "Select Zombie Box as the audio output on your Apple device", Playable: audioActive}
 	artwork := ""
@@ -337,14 +403,26 @@ func (a *Adapters) airplaySources(ctx context.Context, c Config) ([]Source, bool
 		audio.Title = truncate(status.Metadata.Title, 500)
 		audio.Subtitle = truncate(status.Metadata.Artist, 500)
 		audio.Description = truncate(status.Metadata.Album, 500)
-		artworkRevision := airplayArtworkRevision(audio.Title, audio.Subtitle, audio.Description)
-		artwork = strings.TrimRight(c.URL, "/") + "/artwork?rev=" + artworkRevision
+		artworkRevision := ""
+		if status.ArtworkRevision == nil {
+			// Older worker versions used a label-only revision.
+			artworkRevision = airplayArtworkRevision(audio.Title, audio.Subtitle, audio.Description)
+		} else if validAirplayConnectionRevision(*status.ArtworkRevision) {
+			artworkRevision = *status.ArtworkRevision
+		}
+		if artworkRevision != "" {
+			artwork = strings.TrimRight(c.URL, "/") + "/artwork?rev=" + artworkRevision
+		}
 	}
 	audioURL := strings.TrimRight(c.URL, "/") + "/stream/audio.m3u8"
+	videoURL := strings.TrimRight(c.URL, "/") + "/stream/index.m3u8"
+	if validAirplayConnectionRevision(status.ConnectionRevision) {
+		videoURL += "?rev=" + status.ConnectionRevision
+	}
 	if revision := airplayTrackRevision(audio.Title, audio.Subtitle, audio.Description, status.ConnectionRevision); revision != "" {
 		audioURL += "?rev=" + revision
 	}
-	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/stream/index.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}, {Item: audio, ArtworkURL: artwork, ArtworkHeaders: headers, URL: audioURL, Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}}, status.Connected, audioActive, status.Metadata.Title != "", nil
+	return []Source{{Item: item, URL: videoURL, Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}, {Item: audio, ArtworkURL: artwork, ArtworkHeaders: headers, URL: audioURL, Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}}, status.Connected, audioActive, status.Metadata.Title != "", progress, nil
 }
 
 // Track revisions include a private connection epoch when UxPlay supplies one.

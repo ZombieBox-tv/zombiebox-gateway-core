@@ -8,7 +8,8 @@ This wrapper provides an optional Proof-of-Origin (PO) Token resolver for Full. 
 - **Strict Format Guardrails:** Enforces H.264 (`avc1`/`h264`) video at `<= 30 fps` and AAC (`mp4a`/`aac`) audio. Higher frame rates (50/60fps) and non-hardware-friendly codecs (VP9/AV1/Opus) are rejected.
 - **Range Verification:** Verifies 3-point HTTP byte ranges (head 0–1023, mid, tail) to guarantee streams are actually servable without 403 truncations.
 - **Truthful Variants:** Only formats with validated ranges and valid audio pairs are reported in `variants`.
-- **403 Cooldown & Single-Flight Lock:** Concurrency is locked to 1. If YouTube returns 403 or bot check, a 300s cooldown is activated during which requests bypass the token provider and fall back to the upstream 360p stream.
+- **Exact Manual Quality:** A manual `1080p`, `720p`, `480p`, or `360p` request either returns that validated tier or fails with HTTP 502 `{"error":"quality_unavailable"}`. It never reports baseline 360p as a successful manual HD selection. Successful results include numeric `actualHeight` and `actualQuality` when yt-dlp provides unambiguous height metadata; a label alone is not treated as proof.
+- **403 Cooldown & Single-Flight Lock:** Concurrency is locked to 1. If YouTube returns 403 or bot check, a 300s cooldown is activated. Auto and unspecified quality may use the upstream 360p baseline during cooldown, extraction failure, or rendition-validation failure. Manual exact-quality requests fail instead of changing quality silently.
 - **Zero Catalog Fork:** `/catalog` and `/browse` are transparently proxied to the upstream YouTube.js worker (`http://youtube:8091`).
 - **Internal Only:** Runs unexposed on the internal Docker bridge network without published host/LAN ports.
 

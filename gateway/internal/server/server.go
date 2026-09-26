@@ -77,6 +77,7 @@ type Server struct {
 	managed            map[string]bool
 	streams            chan struct{}
 	hybridSpools       *hybridSpoolManager
+	hybridStartupWait  time.Duration
 }
 
 func New(db Persistence, opt Options, deps Dependencies) *Server {
@@ -88,15 +89,16 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 		opt.CatalogWait = 5 * time.Second
 	}
 	s := &Server{
-		db:           db,
-		opt:          opt,
-		deps:         deps,
-		events:       newEvents(),
-		mux:          http.NewServeMux(),
-		attempts:     map[string]attempt{},
-		sessions:     map[string]*session{},
-		polls:        make(chan struct{}, 32),
-		catalogCache: map[string]catalogEntry{},
+		db:                db,
+		opt:               opt,
+		deps:              deps,
+		events:            newEvents(),
+		mux:               http.NewServeMux(),
+		attempts:          map[string]attempt{},
+		sessions:          map[string]*session{},
+		polls:             make(chan struct{}, 32),
+		catalogCache:      map[string]catalogEntry{},
+		hybridStartupWait: maxHybridStartupWait,
 	}
 	s.youtubeReceiver = youtubereceiver.New(deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
 	s.youtubeAccount = youtubeaccount.New(db, deps.ControlHTTP, opt.YouTubeOAuthClientID, opt.YouTubeOAuthClientSecret, youtubeaccount.GoogleEndpoints(), time.Now)

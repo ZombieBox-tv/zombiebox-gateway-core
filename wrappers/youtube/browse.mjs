@@ -37,6 +37,7 @@ export function browseItems(feed) {
 export async function browse(yt, parent, query, offset) {
   if (!validParent(parent) || !Number.isInteger(offset) || offset < 0 || offset > 360)
     throw Error("Invalid browse request");
+  const homeFeed = parent === "" && query === "";
   let feed;
   if (parent.startsWith("channel:"))
     feed = await (await yt.getChannel(parent.slice(8))).getVideos();
@@ -46,6 +47,7 @@ export async function browse(yt, parent, query, offset) {
     seen = new Set();
   for (let pages = 0; pages < 10; pages++) {
     for (const item of browseItems(feed)) {
+      if (homeFeed && item.kind !== "video") continue;
       const key = `${item.kind}:${item.id}`;
       if (!seen.has(key)) {
         seen.add(key);

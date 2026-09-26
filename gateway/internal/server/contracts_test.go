@@ -124,6 +124,7 @@ func TestWireContracts(t *testing.T) {
 	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"spotify": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}, "rebrowser": {Enabled: true, URL: worker.URL, Token: strings.Repeat("x", 32)}}); err != nil {
 		t.Fatal(err)
 	}
+	addLiveMP3DirectEvidence(t, s, "contract-device")
 	call(s, "PUT", "/v1/media-receiver", `{"provider":"auto"}`, "contract-device", token, "")
 	receiverState := call(s, "GET", "/v1/media-receiver", "", "contract-device", token, "")
 	if receiverState.Code != 200 {

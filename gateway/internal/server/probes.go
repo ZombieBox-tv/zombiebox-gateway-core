@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,6 +27,11 @@ type probeAsset struct {
 	Requires string `json:"requires,omitempty"`
 }
 
+const (
+	pacedMPEGTSProbeDuration = 3 * time.Second
+	pacedProbeChunkSize      = 16 << 10
+)
+
 var probeAssets = []probeAsset{
 	{ID: "h264-baseline-360", File: "baseline-360.mp4", Video: true},
 	{ID: "h264-baseline-480", File: "baseline-480.mp4", Video: true},
@@ -33,7 +40,10 @@ var probeAssets = []probeAsset{
 	{ID: "h264-1080-high", File: "high-1080.mp4", Video: true},
 	{ID: "aac", File: "aac.m4a"},
 	{ID: "mpegts-h264-aac", File: "baseline.ts", Video: true},
+	{ID: "mpegts-h264-aac-paced", File: "baseline.ts", Video: true, Kind: "playback"},
 	{ID: "http-fmp4", File: "fragmented.mp4", Video: true},
+	{ID: "http-fmp4-seek", File: "fragmented.mp4", Video: true, Kind: "seek-midstream"},
+	{ID: "http-fmp4-chunked", File: "fragmented.mp4", Video: true, Kind: "playback"},
 	{ID: "http-progressive", File: "baseline-360.mp4", Video: true, Kind: "playback"},
 	{ID: "aac-adts", File: "aac.adts", Kind: "playback"},
 	{ID: "mpegts-aac", File: "mpegts-aac.ts", Kind: "playback"},
@@ -127,12 +137,18 @@ func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer f.Close()
-			if asset.ID == "mpegts-aac-chunked" || asset.ID == "mp3-chunked" {
+			if asset.ID == "mpegts-h264-aac-paced" {
+				streamPacedProbe(r.Context(), w, f, "video/mp2t", pacedMPEGTSProbeDuration)
+				return
+			}
+			if asset.ID == "http-fmp4-chunked" || asset.ID == "mpegts-aac-chunked" || asset.ID == "mp3-chunked" {
 				contentType := "video/mp2t"
-				if asset.ID == "mp3-chunked" {
+				if asset.ID == "http-fmp4-chunked" {
+					contentType = "video/mp4"
+				} else if asset.ID == "mp3-chunked" {
 					contentType = "audio/mpeg"
 				}
-				streamChunkedProbe(w, f, contentType)
+				streamChunkedProbe(r.Context(), w, f, contentType)
 				return
 			}
 			if asset.Kind == "hls" {
@@ -161,7 +177,81 @@ func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 	fail(w, 404, "probe_unavailable")
 }
 
-func streamChunkedProbe(w http.ResponseWriter, f *os.File, contentType string) {
+// streamPacedProbe keeps a fixed Content-Length while sending the synthetic
+// fixture over a short window, exercising progressive playback without a live
+// provider URL or chunked transfer encoding.
+func streamPacedProbe(
+	ctx context.Context,
+	w http.ResponseWriter,
+	f *os.File,
+	contentType string,
+	duration time.Duration,
+) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		fail(w, http.StatusInternalServerError, "probe_stream_unavailable")
+		return
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 8<<20 || duration <= 0 {
+		fail(w, http.StatusNotFound, "probe_unavailable")
+		return
+	}
+
+	contentLength := info.Size()
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+
+	started := time.Now()
+	buffer := make([]byte, pacedProbeChunkSize)
+	var written int64
+	for written < contentLength {
+		if ctx.Err() != nil {
+			return
+		}
+		remaining := contentLength - written
+		chunk := buffer
+		if remaining < int64(len(chunk)) {
+			chunk = chunk[:remaining]
+		}
+		count, readErr := io.ReadFull(f, chunk)
+		if readErr != nil || count != len(chunk) {
+			return
+		}
+
+		written += int64(count)
+		deadline := started.Add(time.Duration(int64(duration) * written / contentLength))
+		if !waitForProbeDeadline(ctx, deadline) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		count, writeErr := w.Write(chunk)
+		if writeErr != nil || count != len(chunk) {
+			return
+		}
+		flusher.Flush()
+	}
+}
+
+func waitForProbeDeadline(ctx context.Context, deadline time.Time) bool {
+	delay := time.Until(deadline)
+	if delay <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
+	}
+}
+
+func streamChunkedProbe(ctx context.Context, w http.ResponseWriter, f *os.File, contentType string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		fail(w, http.StatusInternalServerError, "probe_stream_unavailable")
@@ -174,8 +264,14 @@ func streamChunkedProbe(w http.ResponseWriter, f *os.File, contentType string) {
 
 	buffer := make([]byte, 16<<10)
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		n, err := f.Read(buffer)
 		if n > 0 {
+			if ctx.Err() != nil {
+				return
+			}
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
 				return
 			}

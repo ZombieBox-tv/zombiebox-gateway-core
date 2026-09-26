@@ -1,5 +1,42 @@
 # zombiebox-gateway-core: component work
 
+## September 26 QA candidate, still unreleased
+
+The dev.103 QA gateway retains the existing named volumes. A selected 720p
+YouTube rendition on the Vizio API 13 now reaches a length-known MP4 spool
+whose probed streams are H.264 1280x720 and AAC 44.1 kHz stereo; the Client
+advanced to 2:08 and still displayed 720p as selected. The correction clears
+an audio stream index inherited from the previous combined rendition when
+switching to separate video and audio inputs. An earlier attempt on the same
+candidate reverted to Auto, so long-video startup and reliable quality
+switching remain open. Neither ADB audio nor video-plane capture proves
+audible sound or visible picture. A different YouTube music video exposed only
+Auto and 360p; 1080p on-device playback is still unverified.
+Separately, the running PO-token resolver returned an exact 1080p source and
+independent audio for a host sample; an eight-second copied MP4 probed as
+H.264 1920x1080 plus AAC stereo. That is host evidence only.
+
+The updated AirPlay timeline, artwork binding, DACP controls, receiver session
+handling and mirroring bridge have host checks but await a new iPad trial.
+Spotify Connect still needs a fresh phone attempt; an earlier upstream audio
+key refusal yielded no encoded audio. Two sampled IPTV HLS channels were
+online and contained H.264 720p/AAC segments, while the Vizio player remained
+at 0:00 on the gateway's chunked live output. A device-compatible continuous
+live delivery path is still needed. No product gate closes.
+
+## Dev.91 transport probe QA (in progress)
+
+The selected Vizio API 13 completed suite 2 with the same fragmented MP4
+bytes served by two HTTP framings. Known-length `http-fmp4` passed (202 ms
+prepare; 2,946 ms played); `http-fmp4-chunked` returned UNKNOWN at prepare
+(`what=0,extra=0`, HTTP 200 `video/mp4`). AudioTrack PCM passed with 2,345 ms
+of playback. The result supports a device transport incompatibility, not a
+general H.264 decoder failure. Finite YouTube split-source REMUX still needs
+a bounded, known-length delivery path and a real 720p device retest. AirPlay
+dev.91 adds candidate progress, DACP, artwork and shorter HLS segments; iPad
+control and audio latency remain physically unverified on this image. No
+product gate closes.
+
 ## Dev.90 AirPlay state QA (in progress)
 
 The local Full gateway and AirPlay worker dev.90 images now run with existing
@@ -7,11 +44,12 @@ volumes. Their receiver status reports connection presence separately from RTP
 activity, versions track stream sessions and clears stale sessions on
 disconnect. On the selected Vizio with signed Client dev.59, screenshots show
 three track changes with title changes and local timelines starting again.
-The AirPlay cover and metadata arrived in different orders during rapid skips;
-the receiver withheld artwork when it could not associate it safely. AudioTrack
-logged buffer underruns during the live PCM stream. Audible playback, pause
-latency and reconnection still need the iPad operator's result. No product gate
-closes from these screenshots.
+The author reported faster audible startup and functional pause, but sender
+pause/play lags 1–3 s and resume after minutes can take 3–7 s. A song selected
+near 2:00 on the iPad still starts at 0:00 on TV because sender progress is
+not yet transported. The AirPlay cover and metadata arrived in different
+orders during rapid skips; artwork was withheld when association was uncertain.
+AudioTrack logged buffer underruns. No product gate closes from this QA.
 
 ## Unreleased: live audio compatibility and private YouTube resolver
 

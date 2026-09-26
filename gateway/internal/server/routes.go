@@ -86,6 +86,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/player/spotify/authorization", s.auth(s.spotifyAuthorization))
 	s.mux.HandleFunc("GET /v1/airplay/pairing", s.auth(s.airplayPairing))
 	s.mux.HandleFunc("POST /v1/player/spotify", s.auth(s.playerCommand))
+	s.mux.HandleFunc("POST /v1/player/airplay", s.auth(s.airplayPlayerCommand))
 	s.mux.HandleFunc("GET /v1/providers", s.auth(s.providers))
 	s.mux.HandleFunc("PUT /v1/providers/{provider}", s.auth(s.configureProvider))
 	s.mux.HandleFunc("POST /v1/playback", s.auth(s.playback))

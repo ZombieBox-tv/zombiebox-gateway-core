@@ -30,4 +30,10 @@
 
 !docs/
 !docs/licenses/
+!docs/licenses/DIAL-LICENSE
 !docs/licenses/go-qrcode-LICENSE
+!docs/licenses/miekg-dns-LICENSE
+!docs/licenses/golang-x-net-LICENSE
+!docs/licenses/golang-x-sys-LICENSE
+!third_party/
+!third_party/THIRD_PARTY_NOTICES.md

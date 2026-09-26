@@ -25,6 +25,30 @@ MAX_EXTRACTION_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_EXTRACTION_STDERR_BYTES = 256 * 1024
 PROCESS_READ_CHUNK_BYTES = 64 * 1024
 MAX_UPSTREAM_RESPONSE_BYTES = 1024 * 1024  # 1 MiB
+MANUAL_QUALITIES = {"1080p", "720p", "480p", "360p"}
+
+
+class QualityUnavailableError(RuntimeError):
+    """A requested exact resolution could not be validated and delivered."""
+
+    def __init__(self) -> None:
+        # Keep this message independent of extractor output and signed media URLs.
+        super().__init__("Requested quality is unavailable")
+
+
+def _quality_for_height(height: int) -> Optional[str]:
+    """Map numeric pixel height to the highest standard tier it fully reaches."""
+    for tier, minimum_height in (
+        ("2160p", 2160),
+        ("1440p", 1440),
+        ("1080p", 1080),
+        ("720p", 720),
+        ("480p", 480),
+        ("360p", 360),
+    ):
+        if height >= minimum_height:
+            return tier
+    return None
 
 
 class _ProcessOutputLimitError(RuntimeError):
@@ -175,22 +199,9 @@ def fallback_to_upstream(
     token: str,
     timeout_seconds: int = 10,
     fetch_func: Optional[Callable[..., Tuple[int, dict, bytes]]] = None,
-    requested_quality: str = "",
 ) -> Dict[str, Any]:
-    """Fall back to the upstream baseline YouTube worker.
-
-    Always requests upstream's reliable baseline progressive 360p H.264/AAC stream.
-    Even if a manual HD quality (e.g., '1080p' or '720p') was requested by the client,
-    we do NOT forward that HD quality parameter to upstream. The upstream worker lacks
-    per-video PO tokens and cannot reliably fulfill HD requests without failing (502)
-    or returning unplayable/throttled streams.
-
-    By querying upstream for its baseline without an HD quality parameter, the user's
-    functional DIAL 360p playback path is preserved with zero interruption.
-    """
+    """Resolve the upstream baseline stream for automatic or unspecified quality."""
     target = f"{upstream_url.rstrip('/')}/resolve/{video_id}"
-    # Do NOT pass ?quality={requested_quality} for HD requests. The baseline endpoint
-    # resolves the working 360p stream safely.
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -225,7 +236,7 @@ def resolve_video(
     range_fetch_func: Optional[Callable[..., Tuple[int, dict, bytes]]] = None,
     upstream_fetch_func: Optional[Callable[..., Tuple[int, dict, bytes]]] = None,
 ) -> Dict[str, Any]:
-    """Resolve a YouTube video using per-video PO tokens, falling back to 360p baseline on error/403."""
+    """Resolve a YouTube stream without silently degrading explicit quality requests."""
     if not YOUTUBE_ID_PATTERN.match(video_id):
         raise ValueError("Invalid YouTube video ID")
 
@@ -240,64 +251,66 @@ def resolve_video(
         ),
     )
 
-    # If in 403 cooldown, skip extraction immediately and use upstream baseline
-    if cooldown_tracker.is_in_cooldown():
+    def fallback_or_fail() -> Dict[str, Any]:
+        if quality in MANUAL_QUALITIES:
+            raise QualityUnavailableError() from None
         return fallback_to_upstream(
             video_id,
             upstream_url,
             token,
             timeout_seconds=timeout_sec,
             fetch_func=upstream_fetch_func,
-            requested_quality=quality,
         )
+
+    # A manual tier must be served exactly; an unrelated 360p fallback is not success.
+    if cooldown_tracker.is_in_cooldown():
+        return fallback_or_fail()
 
     extractor = extractor_func or run_ytdlp_extraction
     try:
         meta = extractor(video_id, bgutil_url, timeout_sec)
     except PermissionError:
         cooldown_tracker.record_403()
-        return fallback_to_upstream(
-            video_id,
-            upstream_url,
-            token,
-            timeout_seconds=timeout_sec,
-            fetch_func=upstream_fetch_func,
-            requested_quality=quality,
-        )
+        return fallback_or_fail()
     except Exception:
-        # Provider unavailable, timeout, or parsing error -> fallback to upstream baseline
-        return fallback_to_upstream(
-            video_id,
-            upstream_url,
-            token,
-            timeout_seconds=timeout_sec,
-            fetch_func=upstream_fetch_func,
-            requested_quality=quality,
-        )
+        # Provider unavailable, timeout, or parsing error -> baseline only for Auto.
+        return fallback_or_fail()
+
+    if not isinstance(meta, dict):
+        return fallback_or_fail()
 
     formats = meta.get("formats", [])
+    if not isinstance(formats, list):
+        return fallback_or_fail()
     selector = FormatSelector(formats, fetch_func=range_fetch_func)
-    resolved, _, saw_403 = selector.determine_variants_and_resolve(quality)
-
-    if saw_403:
-        cooldown_tracker.record_403()
-        return fallback_to_upstream(
-            video_id,
-            upstream_url,
-            token,
-            timeout_seconds=timeout_sec,
-            fetch_func=upstream_fetch_func,
-            requested_quality=quality,
-        )
+    try:
+        resolved, _, saw_403 = selector.determine_variants_and_resolve(quality)
+    except Exception:
+        # A malformed or unreachable rendition has the same exact-tier semantics.
+        return fallback_or_fail()
 
     if not resolved or not resolved.get("url"):
-        return fallback_to_upstream(
-            video_id,
-            upstream_url,
-            token,
-            timeout_seconds=timeout_sec,
-            fetch_func=upstream_fetch_func,
-            requested_quality=quality,
-        )
+        if saw_403:
+            cooldown_tracker.record_403()
+        return fallback_or_fail()
+
+    actual_quality = None
+    matching_heights = {
+        candidate.get("height")
+        for candidate in formats
+        if isinstance(candidate, dict) and candidate.get("url") == resolved["url"]
+    }
+    if len(matching_heights) == 1:
+        height = next(iter(matching_heights))
+        if type(height) is int and height > 0:
+            # Report resolution only from yt-dlp's numeric format metadata. Labels
+            # alone are not sufficient evidence for the actual selected rendition.
+            resolved["actualHeight"] = height
+            actual_quality = _quality_for_height(height)
+            if actual_quality:
+                resolved["actualQuality"] = actual_quality
+
+    if quality in MANUAL_QUALITIES and actual_quality != quality:
+        return fallback_or_fail()
 
     return resolved

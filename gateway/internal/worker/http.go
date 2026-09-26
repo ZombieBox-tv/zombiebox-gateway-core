@@ -63,6 +63,21 @@ func spotifyDaemonURL() string {
 // HandlerWithSpotifyDiagnostics adds only fixed failure categories to the
 // authenticated private worker health route; raw daemon output is never served.
 func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics) http.Handler {
+	return HandlerWithAirPlayProgress(ctx, c, diagnostics, NewAirPlayProgress())
+}
+
+// HandlerWithAirPlayProgress wires the process-owned, parsed UxPlay progress
+// stream into the private worker status route.
+func HandlerWithAirPlayProgress(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress) http.Handler {
+	return handlerWithAirPlayDACP(ctx, c, diagnostics, progress, nil, nil)
+}
+
+// handlerWithAirPlayDACP exposes testable DACP dependencies while keeping the
+// production handler on the pinned mDNS resolver and direct HTTP transport.
+func handlerWithAirPlayDACP(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress, resolver DACPResolver, dacpHTTP *http.Client) http.Handler {
+	if progress == nil {
+		progress = NewAirPlayProgress()
+	}
 	mux := http.NewServeMux()
 	var bridge *spotifyBridge
 	var airplayEvidence *airplayConnectionEvidence
@@ -266,6 +281,8 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 		})
 	} else {
 		airplayEvidence = newAirplayConnectionEvidence()
+		artworkEvidence := newAirplayArtworkEvidence()
+		dacp := newDACPControllerWithDependencies(filepath.Join(c.StateDir, "receiver.dacp"), resolver, dacpHTTP)
 		mux.HandleFunc("GET /pairing", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(struct {
@@ -273,30 +290,88 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			}{PIN: c.Pin})
 		})
 		mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
+			now := time.Now()
 			active, audioFlow := airplayStreamActivity(c.StateDir)
-			connected, connectionRevision, connectionKnown := airplayEvidence.observe(c.StateDir, time.Now(), audioFlow)
+			connected, connectionRevision, connectionKnown := airplayEvidence.observe(c.StateDir, now, audioFlow)
 			audioActive := audioFlow && !(connectionKnown && !connected)
-			w.Header().Set("Content-Type", "application/json")
 			status := map[string]any{"active": active, "audioActive": audioActive, "connected": connected, "connectionKnown": connectionKnown}
 			if connected && connectionRevision != "" {
 				status["connectionRevision"] = connectionRevision
 			}
+			metadata := airplayMetadataForConnection(c.StateDir, connected)
+			artworkRevision, _ := artworkEvidence.observe(c.StateDir, connectionRevision, metadata, now)
+			status["artworkRevision"] = artworkRevision
+			trackRevision := ""
+			if connected && metadata["title"] != "" {
+				trackRevision = airPlayProgressTrackRevision(metadata, connectionRevision)
+			}
+			progress.ObserveTrack(trackRevision)
+			sample := progress.Snapshot(time.Now())
+			status["progressKnown"] = sample.Known
+			if sample.Known {
+				status["positionMs"] = sample.PositionMS
+				status["durationMs"] = sample.DurationMS
+				status["positionAgeMs"] = sample.AgeMS
+			}
 			if audioActive || connected {
-				if meta := airplayMetadataForConnection(c.StateDir, connected); len(meta) > 0 {
-					status["metadata"] = meta
+				if len(metadata) > 0 {
+					status["metadata"] = metadata
 				}
 			}
+			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(status)
+		})
+		mux.HandleFunc("POST /control", func(w http.ResponseWriter, r *http.Request) {
+			var input struct {
+				Command DACPCommand `json:"command"`
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 1024)
+			decoder := json.NewDecoder(r.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&input); err != nil || decoder.Decode(new(any)) != io.EOF {
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+			if _, ok := dacpCommandPaths[input.Command]; !ok {
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+			connected, _, known := airplayEvidence.observe(c.StateDir, time.Now(), false)
+			if !known || !connected {
+				http.Error(w, "receiver unavailable", http.StatusConflict)
+				return
+			}
+			if err := dacp.Send(r.Context(), input.Command); err != nil {
+				switch {
+				case errors.Is(err, errInvalidDACPFile), errors.Is(err, errDACPUnavailable), errors.Is(err, errDACPChanged):
+					http.Error(w, "receiver unavailable", http.StatusConflict)
+				case errors.Is(err, errDACPCommand):
+					http.Error(w, "invalid request", http.StatusBadRequest)
+				case errors.Is(err, context.DeadlineExceeded):
+					http.Error(w, "receiver timeout", http.StatusGatewayTimeout)
+				default:
+					http.Error(w, "receiver command failed", http.StatusBadGateway)
+				}
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
 		})
 		mux.HandleFunc("GET /artwork", func(w http.ResponseWriter, r *http.Request) {
 			active, audioFlow := airplayStreamActivity(c.StateDir)
-			connected, _, connectionKnown := airplayEvidence.observe(c.StateDir, time.Now(), audioFlow)
+			connected, connectionRevision, connectionKnown := airplayEvidence.observe(c.StateDir, time.Now(), audioFlow)
 			audioActive := audioFlow && !(connectionKnown && !connected)
 			if !active && !audioActive && !connected {
 				http.NotFound(w, r)
 				return
 			}
-			airplayArtworkForRevision(c.StateDir, connected, r.URL.Query().Get("rev"), w, r)
+			metadata := airplayMetadataForConnection(c.StateDir, connected)
+			revision, data := artworkEvidence.observe(c.StateDir, connectionRevision, metadata, time.Now())
+			if revision == "" || r.URL.Query().Get("rev") != revision || len(data) == 0 {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", http.DetectContentType(data))
+			_, _ = w.Write(data)
 		})
 		mux.HandleFunc("GET /stream/{file}", func(w http.ResponseWriter, r *http.Request) {
 			name := r.PathValue("file")
@@ -324,9 +399,9 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 }
 
 func airplayStreamActivity(stateDir string) (video, audio bool) {
-	info, err := os.Stat(filepath.Join(stateDir, "hls", "index.m3u8"))
-	video = err == nil && time.Since(info.ModTime()) < 15*time.Second
-	audio = airplayHLSPlayable(filepath.Join(stateDir, "hls"), "audio.m3u8")
+	hlsDir := filepath.Join(stateDir, "hls")
+	video = airplayHLSPlayable(hlsDir, "index.m3u8")
+	audio = airplayHLSPlayable(hlsDir, "audio.m3u8")
 	return video, audio
 }
 

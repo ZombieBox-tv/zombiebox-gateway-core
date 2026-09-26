@@ -3,6 +3,7 @@ package media
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -137,6 +138,151 @@ func TestRemoteBridgeOwnershipAndCancellation(t *testing.T) {
 		t.Fatal("upstream request survived cancellation")
 	}
 	<-done
+}
+
+func TestCopyUpstreamBodyIgnoresDownstreamWriteFailure(t *testing.T) {
+	writeErr := errors.New("downstream client closed")
+	err := copyUpstreamBody(remoteBodyErrorWriter{err: writeErr}, strings.NewReader("fixture body"))
+	if err != nil {
+		t.Fatalf("downstream write error was misclassified as upstream read failure: %v", err)
+	}
+}
+
+func TestCopyUpstreamBodyPreservesOnlySourceTimeoutClassification(t *testing.T) {
+	timeout := remoteBodyTimeoutError{}
+	err := copyUpstreamBody(io.Discard, &remoteBodyErrorReader{err: timeout})
+	if !errors.Is(err, timeout) {
+		t.Fatalf("upstream read cause = %v, want timeout", err)
+	}
+	if class := upstreamErrorClass(err, ConversionFailureUpstreamTransport); class != ConversionFailureUpstreamTimeout {
+		t.Fatalf("upstream read class = %q", class)
+	}
+	failure := newConversionFailure(ConversionFailureUpstreamTimeout, 0, 0)
+	if failure.Error() != "conversion_failed" || strings.Contains(failure.Error(), "private") {
+		t.Fatalf("failure exposed upstream details: %q", failure.Error())
+	}
+}
+
+type remoteBodyErrorWriter struct {
+	err error
+}
+
+func (w remoteBodyErrorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+type remoteBodyErrorReader struct {
+	err  error
+	done bool
+}
+
+func (r *remoteBodyErrorReader) Read(buffer []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		return copy(buffer, "partial body"), nil
+	}
+	return 0, r.err
+}
+
+type remoteBodyTimeoutError struct{}
+
+func (remoteBodyTimeoutError) Error() string   { return "private upstream timeout detail" }
+func (remoteBodyTimeoutError) Timeout() bool   { return true }
+func (remoteBodyTimeoutError) Temporary() bool { return true }
+
+func TestRemoteConversionPreservesBoundedUpstreamHTTPFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer private-header" {
+			t.Error("remote bridge did not forward fixture authorization")
+		}
+		http.Error(w, "private-body", http.StatusForbidden)
+	}))
+	defer upstream.Close()
+
+	runner := runFunc(func(ctx context.Context, _ string, args []string, _ io.Writer) error {
+		input := bridgeInputFromArgs(args)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, input, nil)
+		if err != nil {
+			return errors.New("FFmpeg failed for https://media.example/video?signature=private")
+		}
+		response, err := (&http.Client{Timeout: 2 * time.Second}).Do(request)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		}
+		return errors.New("FFmpeg failed for https://media.example/video?signature=private")
+	})
+	remote := NewRemote(NewWithRunner("ffmpeg", "ffprobe", runner), upstream.Client())
+	source := domain.Source{
+		URL:     upstream.URL + "/media?signature=private-url",
+		MIME:    "video/mp4",
+		Headers: http.Header{"Authorization": {"Bearer private-header"}},
+	}
+	err := remote.ConvertRemote(t.Context(), source, "REMUX", domain.MediaSelection{}, io.Discard)
+	if ConversionFailureClass(err) != ConversionFailureUpstreamHTTP {
+		t.Fatalf("failure class = %q", ConversionFailureClass(err))
+	}
+	if status, ok := ConversionFailureHTTPStatus(err); !ok || status != http.StatusForbidden {
+		t.Fatalf("upstream status = %d, present = %v", status, ok)
+	}
+	if _, ok := ConversionFailureExitCode(err); ok {
+		t.Fatal("upstream failure was incorrectly reported as an FFmpeg exit")
+	}
+	if err.Error() != "conversion_failed" || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "signature") {
+		t.Fatalf("error exposed private upstream data: %q", err.Error())
+	}
+}
+
+func TestRemoteConversionClassifiesUpstreamTimeoutWithoutLeakingCause(t *testing.T) {
+	entered := make(chan struct{})
+	finished := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+		close(finished)
+	}))
+	defer upstream.Close()
+
+	runner := runFunc(func(ctx context.Context, _ string, args []string, _ io.Writer) error {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, bridgeInputFromArgs(args), nil)
+		if err == nil {
+			response, requestErr := (&http.Client{Timeout: 2 * time.Second}).Do(request)
+			if requestErr == nil {
+				_, _ = io.Copy(io.Discard, response.Body)
+				_ = response.Body.Close()
+			}
+		}
+		return errors.New("FFmpeg failed with upstream timeout")
+	})
+	remote := NewRemote(NewWithRunner("ffmpeg", "ffprobe", runner), &http.Client{Timeout: 100 * time.Millisecond})
+	source := domain.Source{URL: upstream.URL + "/media?token=private-token", MIME: "video/mp4"}
+	err := remote.ConvertRemote(t.Context(), source, "REMUX", domain.MediaSelection{}, io.Discard)
+	if ConversionFailureClass(err) != ConversionFailureUpstreamTimeout {
+		t.Fatalf("failure class = %q", ConversionFailureClass(err))
+	}
+	if _, ok := ConversionFailureHTTPStatus(err); ok {
+		t.Fatal("timeout unexpectedly exposed an HTTP status")
+	}
+	if err.Error() != "conversion_failed" || strings.Contains(err.Error(), "private-token") {
+		t.Fatalf("error exposed timeout cause: %q", err.Error())
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream request did not start")
+	}
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out upstream request was not canceled")
+	}
+}
+
+func bridgeInputFromArgs(args []string) string {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == "-i" {
+			return args[index+1]
+		}
+	}
+	return ""
 }
 
 func TestRemoteProbeRejectsDisguisedManifest(t *testing.T) {

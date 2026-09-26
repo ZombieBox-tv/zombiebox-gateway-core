@@ -106,6 +106,7 @@ type Screen struct {
 	Screen     string    `json:"screen"`
 	Hero       *Hero     `json:"hero,omitempty"`
 	Sections   []Section `json:"sections"`
+	NextOffset int       `json:"nextOffset,omitempty"`
 }
 type Module struct {
 	ID       string   `json:"id"`

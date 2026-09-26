@@ -440,34 +440,21 @@ func TestYouTubeRelatedValidationAndBadCursors(t *testing.T) {
 	}
 }
 
-func TestYouTubeHomeFeedThreeTierFallback(t *testing.T) {
-	// Setup upstream wrapper and fake Google OAuth API
+func TestYouTubeHomeUsesProviderFeedWithConnectedAccount(t *testing.T) {
 	var browseQuery atomic.Value
 	var browseParent atomic.Value
+	var subscriptionCalls atomic.Int32
 	browseQuery.Store("")
 	browseParent.Store("")
 
 	wrapper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/browse":
-			q := r.URL.Query().Get("q")
-			parent := r.URL.Query().Get("parent")
-			browseQuery.Store(q)
-			browseParent.Store(parent)
-			if strings.HasPrefix(parent, "channel:UC") {
-				// Subscribed channel's videos
-				fmt.Fprint(w, `{"items":[{"id":"subVideo123","kind":"video","title":"Subscribed Channel Video"}],"nextOffset":-1}`)
-			} else if q == "mechanical keyboards" {
-				// Recent context query
-				fmt.Fprint(w, `{"items":[{"id":"keyVideo123","kind":"video","title":"Keyboards Video"}],"nextOffset":-1}`)
-			} else if q == "popular" {
-				// Generic popular
-				fmt.Fprint(w, `{"items":[{"id":"popVideo123","kind":"video","title":"Popular Video"}],"nextOffset":-1}`)
-			} else {
-				fmt.Fprint(w, `{"items":[],"nextOffset":-1}`)
-			}
+			browseQuery.Store(r.URL.Query().Get("q"))
+			browseParent.Store(r.URL.Query().Get("parent"))
+			fmt.Fprint(w, `{"items":[{"id":"homeVideo12","kind":"video","title":"Provider Home Video"}],"nextOffset":-1}`)
 		case "/catalog":
-			fmt.Fprint(w, `{"items":[]}`)
+			fmt.Fprint(w, `{"items":[{"id":"searchvid01","kind":"video","title":"Explicit Search Video"}]}`)
 		default:
 			fmt.Fprint(w, `{"url":"https://r1.googlevideo.com/videoplayback?signature=private","mimeType":"video/mp4"}`)
 		}
@@ -481,6 +468,7 @@ func TestYouTubeHomeFeedThreeTierFallback(t *testing.T) {
 		case "/token":
 			fmt.Fprint(w, `{"access_token":"token","refresh_token":"refresh","expires_in":3600,"scope":"https://www.googleapis.com/auth/youtube.readonly"}`)
 		case "/v3/subscriptions":
+			subscriptionCalls.Add(1)
 			fmt.Fprint(w, `{"items":[{"id":"sub1","snippet":{"title":"Tech Channel","description":"","resourceId":{"channelId":"UC1234567890123456789012"}}}]}`)
 		default:
 			http.NotFound(w, r)
@@ -496,67 +484,40 @@ func TestYouTubeHomeFeedThreeTierFallback(t *testing.T) {
 		Revoke: googleAPI.URL + "/revoke",
 		Data:   googleAPI.URL + "/v3",
 	}, func() time.Time { return clock })
-
 	if err := s.SeedProviders(context.Background(), map[string]providers.Config{
-		"youtube": {Enabled: true, URL: wrapper.URL, Token: strings.Repeat("s", 32)},
+		"youtube": {Enabled: true, URL: wrapper.URL, Token: strings.Repeat("s", 32), CatalogID: "curated-news"},
 	}); err != nil {
 		t.Fatal(err)
 	}
+	token := pair(t, s, "home-device-account")
 
-	token := pair(t, s, "home-device-fallback")
-
-	// --- Case 1: Cold start, disconnected account, no search/view history ---
-	// Must fall back to Tier 3: generic anonymous popular
-	res1 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-fallback", token, "")
-	if res1.Code != 200 || !strings.Contains(res1.Body.String(), "Popular Video") {
-		t.Fatalf("cold home: want Popular Video, got %d %s", res1.Code, res1.Body)
+	if w := call(s, "POST", "/v1/youtube/account/authorization", "", "home-device-account", token, ""); w.Code != 200 {
+		t.Fatalf("authorization start: %d %s", w.Code, w.Body)
 	}
-	if browseQuery.Load().(string) != "popular" {
-		t.Fatalf("expected popular query on cold home, got: %s", browseQuery.Load().(string))
-	}
-
-	// --- Case 2: Recent search/view context (Tier 2) ---
-	// Device searches for "mechanical keyboards"
-	searchRes := call(s, "GET", "/v1/home?provider=youtube&q=mechanical+keyboards", "", "home-device-fallback", token, "")
-	if searchRes.Code != 200 {
-		t.Fatalf("search failed: %d", searchRes.Code)
-	}
-
-	// Now fetch Home without query - must switch to recent search/view context (Tier 2) instead of popular!
-	res2 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-fallback", token, "")
-	if res2.Code != 200 || !strings.Contains(res2.Body.String(), "Keyboards Video") {
-		t.Fatalf("recent context home: want Keyboards Video, got %d %s", res2.Code, res2.Body)
-	}
-	if browseQuery.Load().(string) != "mechanical keyboards" {
-		t.Fatalf("expected 'mechanical keyboards' query on context home, got: %s", browseQuery.Load().(string))
-	}
-
-	// --- Case 3: Signed-in profile feed (Tier 1) ---
-	// Connect YouTube account
-	_ = call(s, "POST", "/v1/youtube/account/authorization", "", "home-device-fallback", token, "")
 	clock = clock.Add(6 * time.Second)
-	pollRes := call(s, "POST", "/v1/youtube/account/authorization/poll", "", "home-device-fallback", token, "")
-	if pollRes.Code != 200 {
-		t.Fatalf("poll failed: %d %s", pollRes.Code, pollRes.Body)
+	if w := call(s, "POST", "/v1/youtube/account/authorization/poll", "", "home-device-account", token, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"connected":true`) {
+		t.Fatalf("authorization poll: %d %s", w.Code, w.Body)
+	}
+	if w := call(s, "GET", "/v1/youtube/account", "", "home-device-account", token, ""); w.Code != 200 || !strings.Contains(w.Body.String(), `"connected":true`) {
+		t.Fatalf("account status: %d %s", w.Code, w.Body)
 	}
 
-	// Fetch Home: must prioritize signed-in profile feed over recent context!
-	res3 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-fallback", token, "")
-	if res3.Code != 200 || !strings.Contains(res3.Body.String(), "Subscribed Channel Video") {
-		t.Fatalf("signed-in home: want Subscribed Channel Video, got %d %s", res3.Code, res3.Body)
+	search := call(s, "GET", "/v1/home?provider=youtube&q=mechanical+keyboards", "", "home-device-account", token, "")
+	if search.Code != 200 || !strings.Contains(search.Body.String(), "Explicit Search Video") {
+		t.Fatalf("explicit search: %d %s", search.Code, search.Body)
 	}
-	if !strings.HasPrefix(browseParent.Load().(string), "channel:UC") {
-		t.Fatalf("expected subscribed channel parent, got: %s", browseParent.Load().(string))
+	home := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-account", token, "")
+	if home.Code != 200 || !strings.Contains(home.Body.String(), "Provider Home Video") {
+		t.Fatalf("provider Home: %d %s", home.Code, home.Body)
 	}
-
-	// --- Case 4: Disconnect account ---
-	// Must not manufacture recommendations from disconnected account
-	_ = call(s, "DELETE", "/v1/youtube/account", "", "home-device-fallback", token, "123456")
-
-	// After disconnect, falls back to Tier 2 (recent context)
-	res4 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-fallback", token, "")
-	if res4.Code != 200 || !strings.Contains(res4.Body.String(), "Keyboards Video") {
-		t.Fatalf("post-disconnect home: want Keyboards Video, got %d %s", res4.Code, res4.Body)
+	if strings.Contains(home.Body.String(), "Explicit Search Video") || strings.Contains(home.Body.String(), "curated-news") {
+		t.Fatalf("Home was replaced by search history or CatalogID: %s", home.Body)
+	}
+	if browseQuery.Load().(string) != "" || browseParent.Load().(string) != "" {
+		t.Fatalf("Home did not request the provider feed: q=%q parent=%q", browseQuery.Load(), browseParent.Load())
+	}
+	if subscriptionCalls.Load() != 0 {
+		t.Fatalf("Home fetched OAuth subscriptions %d times; account subscriptions are not recommendations", subscriptionCalls.Load())
 	}
 }
 
@@ -627,134 +588,6 @@ func TestYouTubeRelatedRepeatedOnlyPageTerminates(t *testing.T) {
 	}
 	if p2.HasMore {
 		t.Errorf("expected hasMore=false on repeated-only page termination")
-	}
-}
-
-func TestYouTubeHomeFeedPrecedenceWithCatalogID(t *testing.T) {
-	var browseQuery atomic.Value
-	var browseParent atomic.Value
-	browseQuery.Store("")
-	browseParent.Store("")
-
-	wrapper := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/browse":
-			q := r.URL.Query().Get("q")
-			parent := r.URL.Query().Get("parent")
-			browseQuery.Store(q)
-			browseParent.Store(parent)
-			if strings.HasPrefix(parent, "channel:UC") {
-				fmt.Fprint(w, `{"items":[{"id":"subVideo123","kind":"video","title":"Subscribed Channel Video"}],"nextOffset":-1}`)
-			} else if q == "mechanical keyboards" {
-				fmt.Fprint(w, `{"items":[{"id":"keyVideo123","kind":"video","title":"Keyboards Video"}],"nextOffset":-1}`)
-			} else if q == "curated-news" {
-				fmt.Fprint(w, `{"items":[{"id":"pinVideo123","kind":"video","title":"Operator Pinned Video"}],"nextOffset":-1}`)
-			} else if q == "popular" {
-				fmt.Fprint(w, `{"items":[{"id":"popVideo123","kind":"video","title":"Popular Video"}],"nextOffset":-1}`)
-			} else {
-				fmt.Fprint(w, `{"items":[],"nextOffset":-1}`)
-			}
-		case "/catalog":
-			q := r.URL.Query().Get("q")
-			if q == "curated-news" {
-				fmt.Fprint(w, `{"items":[{"id":"pinVideo123","title":"Operator Pinned Video","kind":"video","durationMs":100}]}`)
-			} else {
-				fmt.Fprint(w, `{"items":[]}`)
-			}
-		default:
-			fmt.Fprint(w, `{"url":"https://r1.googlevideo.com/videoplayback?signature=private","mimeType":"video/mp4"}`)
-		}
-	}))
-	defer wrapper.Close()
-
-	googleAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/device":
-			fmt.Fprint(w, `{"device_code":"dc","user_code":"uc","verification_url":"https://google.com/device","expires_in":1800,"interval":5}`)
-		case "/token":
-			fmt.Fprint(w, `{"access_token":"token","refresh_token":"refresh","expires_in":3600,"scope":"https://www.googleapis.com/auth/youtube.readonly"}`)
-		case "/v3/subscriptions":
-			fmt.Fprint(w, `{"items":[{"id":"sub1","snippet":{"title":"Tech Channel","description":"","resourceId":{"channelId":"UC1234567890123456789012"}}}]}`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer googleAPI.Close()
-
-	s := testServer(t, nil, "")
-	clock := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
-	s.youtubeAccount = youtubeaccount.New(s.db, googleAPI.Client(), "fixture-client", "", youtubeaccount.Endpoints{
-		Device: googleAPI.URL + "/device",
-		Token:  googleAPI.URL + "/token",
-		Revoke: googleAPI.URL + "/revoke",
-		Data:   googleAPI.URL + "/v3",
-	}, func() time.Time { return clock })
-
-	// Operator has explicitly pinned CatalogID = "curated-news"
-	if err := s.SeedProviders(context.Background(), map[string]providers.Config{
-		"youtube": {Enabled: true, URL: wrapper.URL, Token: strings.Repeat("s", 32), CatalogID: "curated-news"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	token := pair(t, s, "home-device-pinned")
-
-	// --- Case 1: Cold start, disconnected account, no search/view history ---
-	// Must fall back to operator-pinned catalog, NOT generic popular!
-	res1 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-pinned", token, "")
-	if res1.Code != 200 || !strings.Contains(res1.Body.String(), "Operator Pinned Video") {
-		t.Fatalf("cold home with pinned catalog: want Operator Pinned Video, got %d %s", res1.Code, res1.Body)
-	}
-	if strings.Contains(res1.Body.String(), "Popular Video") {
-		t.Fatalf("cold home returned generic popular instead of pinned catalog")
-	}
-
-	// --- Case 2: User performs search for "mechanical keyboards" ---
-	searchRes := call(s, "GET", "/v1/home?provider=youtube&q=mechanical+keyboards", "", "home-device-pinned", token, "")
-	if searchRes.Code != 200 {
-		t.Fatalf("search failed: %d", searchRes.Code)
-	}
-
-	// Home fetch without query: user-context feed genuinely REPLACES operator-pinned catalog!
-	res2 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-pinned", token, "")
-	if res2.Code != 200 || !strings.Contains(res2.Body.String(), "Keyboards Video") {
-		t.Fatalf("context home: want Keyboards Video replacing pinned catalog, got %d %s", res2.Code, res2.Body)
-	}
-	if strings.Contains(res2.Body.String(), "Operator Pinned Video") {
-		t.Fatalf("context home failed to replace operator-pinned catalog")
-	}
-
-	// --- Case 3: Connect YouTube OAuth account ---
-	_ = call(s, "POST", "/v1/youtube/account/authorization", "", "home-device-pinned", token, "")
-	clock = clock.Add(6 * time.Second)
-	pollRes := call(s, "POST", "/v1/youtube/account/authorization/poll", "", "home-device-pinned", token, "")
-	if pollRes.Code != 200 {
-		t.Fatalf("poll failed: %d %s", pollRes.Code, pollRes.Body)
-	}
-
-	// Home fetch: signed-in profile feed genuinely REPLACES recent context and operator-pinned catalog!
-	res3 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-pinned", token, "")
-	if res3.Code != 200 || !strings.Contains(res3.Body.String(), "Subscribed Channel Video") {
-		t.Fatalf("signed-in home: want Subscribed Channel Video, got %d %s", res3.Code, res3.Body)
-	}
-	if strings.Contains(res3.Body.String(), "Operator Pinned Video") {
-		t.Fatalf("signed-in home failed to replace operator-pinned catalog")
-	}
-
-	// --- Case 4: Disconnect account ---
-	_ = call(s, "DELETE", "/v1/youtube/account", "", "home-device-pinned", token, "123456")
-
-	// Post-disconnect: falls back to recent context (replaces pinned catalog)
-	res4 := call(s, "GET", "/v1/home?provider=youtube", "", "home-device-pinned", token, "")
-	if res4.Code != 200 || !strings.Contains(res4.Body.String(), "Keyboards Video") {
-		t.Fatalf("post-disconnect home: want Keyboards Video, got %d %s", res4.Code, res4.Body)
-	}
-
-	// --- Case 5: Fresh device with no context ---
-	token2 := pair(t, s, "fresh-device-pinned")
-	res5 := call(s, "GET", "/v1/home?provider=youtube", "", "fresh-device-pinned", token2, "")
-	if res5.Code != 200 || !strings.Contains(res5.Body.String(), "Operator Pinned Video") {
-		t.Fatalf("fresh device: want Operator Pinned Video, got %d %s", res5.Code, res5.Body)
 	}
 }
 

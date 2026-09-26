@@ -1576,3 +1576,98 @@ func TestLiveAACHLSPCMIsLastEvidenceBackedAudioRoute(t *testing.T) {
 		t.Fatal("finite media must preserve its normal playback ladder")
 	}
 }
+
+func TestLiveMP3UsesProbeBackedDirectPCMHierarchy(t *testing.T) {
+	now := time.Now().Unix()
+	metadata := domain.Metadata{Streams: []domain.Stream{{Type: "audio", Codec: "mp3"}}}
+	metadata.Format.Name = "mp3"
+	source := domain.Source{URL: "https://spotify.example/live", MIME: "audio/mpeg", Live: true}
+	capabilities := func(mp3, fmp4, pcm domain.Probe) domain.Capabilities {
+		return domain.Capabilities{Probes: []domain.Probe{mp3, fmp4, pcm}}
+	}
+	pass := func(id string) domain.Probe {
+		return domain.Probe{ID: id, Status: "PASS", PositionMS: 1000, TestedAt: now}
+	}
+	fail := func(id string) domain.Probe {
+		return domain.Probe{ID: id, Status: "FAIL", TestedAt: now}
+	}
+	unknown := func(id string) domain.Probe {
+		return domain.Probe{ID: id, Status: "UNKNOWN", TestedAt: now}
+	}
+	for _, test := range []struct {
+		name      string
+		requested string
+		caps      domain.Capabilities
+		want      string
+	}{
+		{
+			name:      "verified chunked MP3 stays direct even when lower tiers fail",
+			requested: "AUTO",
+			caps:      capabilities(pass("mp3-chunked"), pass("http-fmp4-chunked"), fail("audio-track-pcm-stream")),
+			want:      "DIRECT_PLAY",
+		},
+		{
+			name:      "H264 AAC fMP4 pass does not skip the MP3 compatibility fallback",
+			requested: "AUTO",
+			caps:      capabilities(fail("mp3-chunked"), pass("http-fmp4-chunked"), pass("audio-track-pcm-stream")),
+			want:      "PCM_STREAM",
+		},
+		{
+			name:      "PCM follows an unverified MP3 direct route",
+			requested: "AUTO",
+			caps:      capabilities(unknown("mp3-chunked"), fail("http-fmp4-chunked"), pass("audio-track-pcm-stream")),
+			want:      "PCM_STREAM",
+		},
+		{
+			name:      "fMP4 evidence alone does not claim an MP3 route",
+			requested: "AUTO",
+			caps:      capabilities(fail("mp3-chunked"), pass("http-fmp4-chunked"), unknown("audio-track-pcm-stream")),
+			want:      "EXTERNAL_PLAYER",
+		},
+		{
+			name:      "PCM is unavailable without advancing positive evidence",
+			requested: "AUTO",
+			caps: capabilities(fail("mp3-chunked"), fail("http-fmp4-chunked"), domain.Probe{
+				ID: "audio-track-pcm-stream", Status: "PASS", TestedAt: now,
+			}),
+			want: "EXTERNAL_PLAYER",
+		},
+		{
+			name:      "stale PCM evidence is unavailable",
+			requested: "AUTO",
+			caps: capabilities(fail("mp3-chunked"), fail("http-fmp4-chunked"), domain.Probe{
+				ID: "audio-track-pcm-stream", Status: "PASS", PositionMS: 1000, TestedAt: now - 8*24*3600,
+			}),
+			want: "EXTERNAL_PLAYER",
+		},
+		{
+			name:      "explicit remux remains respected",
+			requested: "REMUX",
+			caps:      capabilities(fail("mp3-chunked"), fail("http-fmp4-chunked"), pass("audio-track-pcm-stream")),
+			want:      "REMUX",
+		},
+		{
+			name:      "explicit transcode may use the probed PCM route",
+			requested: "TRANSCODE",
+			caps:      capabilities(pass("mp3-chunked"), pass("http-fmp4-chunked"), pass("audio-track-pcm-stream")),
+			want:      "PCM_STREAM",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := LocalModeSource(metadata, source, test.caps, test.requested); got != test.want {
+				t.Fatalf("LocalModeSource() = %s, want %s", got, test.want)
+			}
+		})
+	}
+
+	video := metadata
+	video.Streams = append(append([]domain.Stream(nil), metadata.Streams...), domain.Stream{Type: "video", Codec: "h264", Width: 640, Height: 360})
+	if got := LocalModeSource(video, source, capabilities(fail("mp3-chunked"), fail("http-fmp4-chunked"), pass("audio-track-pcm-stream")), "AUTO"); got == "PCM_STREAM" {
+		t.Fatal("video-bearing input selected the audio-only PCM route")
+	}
+	finite := source
+	finite.Live = false
+	if got := LocalModeSource(metadata, finite, capabilities(fail("mp3-chunked"), fail("http-fmp4-chunked"), pass("audio-track-pcm-stream")), "AUTO"); got == "PCM_STREAM" {
+		t.Fatal("finite MP3 selected the live PCM route")
+	}
+}

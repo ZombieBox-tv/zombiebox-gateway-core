@@ -97,6 +97,38 @@ func TestSpotifyDaemonDiagnosticsClassifiesPinnedKeyRetrievalErrors(t *testing.T
 	}
 }
 
+func TestSpotifyDaemonDiagnosticsCountsPairingOutcomesWithoutRetainingSenderData(t *testing.T) {
+	d := NewSpotifyDaemonDiagnostics()
+	privateDevice := "Kitchen iPad private-user private-auth-blob"
+	for _, part := range []string{
+		"accepted zeroconf from " + privateDevice + "\n",
+		"refused zeroconf from " + privateDevice + "\n",
+		"zeroconf received request with bad checksum\n",
+		"zeroconf is authenticating another user\n",
+		"failed handling zeroconf add user request: " + privateDevice + "\n",
+	} {
+		if n, err := d.Write([]byte(part)); err != nil || n != len(part) {
+			t.Fatalf("stderr must be drained: n=%d err=%v", n, err)
+		}
+	}
+
+	snapshot := d.snapshot(false, false)
+	want := (spotifyPairingDiagnostics{Accepted: 1, Refused: 1, BadChecksum: 1, Busy: 1, RequestError: 1})
+	if snapshot.Pairing != want {
+		t.Fatalf("pairing outcomes = %+v, want %+v", snapshot.Pairing, want)
+	}
+
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"Kitchen iPad", "private-user", "private-auth-blob", "accepted zeroconf", "refused zeroconf"} {
+		if strings.Contains(string(raw), value) {
+			t.Fatalf("sender data or raw log text leaked through pairing diagnostics: %s", raw)
+		}
+	}
+}
+
 func TestSpotifyDaemonDiagnosticsStopsSkipStormAtRefusalLimit(t *testing.T) {
 	now := time.Unix(1000, 0)
 	d := newSpotifyDaemonDiagnostics(func() time.Time { return now })

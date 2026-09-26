@@ -18,9 +18,10 @@ import (
 )
 
 type qualityTestMedia struct {
-	width, height int
-	codec         string
-	profile       string
+	width, height      int
+	codec              string
+	profile            string
+	remoteProbeFailURL string
 }
 
 func (m *qualityTestMedia) Probe(context.Context, string) (domain.Metadata, error) {
@@ -50,6 +51,9 @@ func (*qualityTestMedia) Subtitles(context.Context, string, int) ([]domain.Subti
 	return nil, nil
 }
 func (m *qualityTestMedia) ProbeRemote(ctx context.Context, s domain.Source) (domain.Metadata, error) {
+	if m.remoteProbeFailURL != "" && strings.Contains(s.URL, m.remoteProbeFailURL) {
+		return domain.Metadata{}, errors.New("remote quality probe failed")
+	}
 	return m.Probe(ctx, s.URL)
 }
 func (*qualityTestMedia) ConvertRemote(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error {
@@ -71,6 +75,46 @@ func setDevicePassingProbes(t *testing.T, s *Server, deviceID string, probeIDs .
 		})
 	}
 	_ = s.db.Put(t.Context(), "devices", deviceID, dev)
+}
+
+func assertQualitySelectionFailurePreservesSession(t *testing.T, s *Server, deviceID, provider, token, sessionID, qualityID string, positionMS int64) {
+	t.Helper()
+	preferenceBefore := s.getQualityPreference(t.Context(), deviceID, provider, "video")
+	s.mu.Lock()
+	sessionBefore := s.sessions[sessionID]
+	sessionCountBefore := len(s.sessions)
+	s.mu.Unlock()
+	if sessionBefore == nil {
+		t.Fatal("expected the active session before manual quality selection")
+	}
+
+	requestBody := fmt.Sprintf(`{"qualityId":%q,"positionMs":%d}`, qualityID, positionMS)
+	response := call(s, "POST", "/v1/playback/"+sessionID+"/quality", requestBody, deviceID, token, "")
+	if response.Code != 502 {
+		t.Fatalf("expected 502 for failed manual quality selection, got %d: %s", response.Code, response.Body)
+	}
+	var failure struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure.Error.Code != "quality_resolution_failed" {
+		t.Fatalf("expected typed quality_resolution_failed response, got %q (decode error %v)", response.Body.String(), err)
+	}
+
+	s.mu.Lock()
+	sessionAfter := s.sessions[sessionID]
+	sessionCountAfter := len(s.sessions)
+	s.mu.Unlock()
+	if sessionAfter != sessionBefore || sessionAfter.ctx.Err() != nil || sessionAfter.supersededBy != "" {
+		t.Fatalf("failed manual selection changed or retired the active session: before=%+v after=%+v", sessionBefore, sessionAfter)
+	}
+	if sessionCountAfter != sessionCountBefore {
+		t.Fatalf("failed manual selection created a replacement session: before=%d after=%d", sessionCountBefore, sessionCountAfter)
+	}
+	if preferenceAfter := s.getQualityPreference(t.Context(), deviceID, provider, "video"); preferenceAfter != preferenceBefore {
+		t.Fatalf("failed manual selection changed stored preference from %q to %q", preferenceBefore, preferenceAfter)
+	}
 }
 
 func standardCapableProbes() []string {
@@ -404,7 +448,7 @@ func TestQualityPreferencePersistenceAndReuse(t *testing.T) {
 	}
 
 	// Verify preference is persisted in SQLite
-	pref := s.getQualityPreference(t.Context(), "pref-device", "video")
+	pref := s.getQualityPreference(t.Context(), "pref-device", "local", "video")
 	if pref != "480p" {
 		t.Fatalf("expected stored preference 480p, got %q", pref)
 	}
@@ -458,6 +502,47 @@ func TestQualityPreferencePersistenceAndReuse(t *testing.T) {
 	}
 }
 
+func TestQualityPreferenceIsProviderScoped(t *testing.T) {
+	s := testServer(t, nil, "")
+	ctx := t.Context()
+	deviceID := "provider-scope-device"
+
+	if err := s.setQualityPreference(ctx, deviceID, "youtube", "video", "720p"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.setQualityPreference(ctx, deviceID, "local", "video", "480p"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.getQualityPreference(ctx, deviceID, "youtube", "video"); got != "720p" {
+		t.Fatalf("expected YouTube preference 720p, got %q", got)
+	}
+	if got := s.getQualityPreference(ctx, deviceID, "local", "video"); got != "480p" {
+		t.Fatalf("expected local preference 480p, got %q", got)
+	}
+
+	if err := s.revertQualityPreference(ctx, deviceID, "youtube", "video"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.getQualityPreference(ctx, deviceID, "youtube", "video"); got != "auto" {
+		t.Fatalf("expected YouTube preference reverted to auto, got %q", got)
+	}
+	if got := s.getQualityPreference(ctx, deviceID, "local", "video"); got != "480p" {
+		t.Fatalf("reverting YouTube preference changed local preference to %q", got)
+	}
+
+	legacyDeviceID := "legacy-unattributed-device"
+	if err := s.db.Put(ctx, qualityPrefBucket+":"+legacyDeviceID, "video", qualityPreference{
+		QualityID: "1080p",
+		Kind:      "video",
+		UpdatedAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.getQualityPreference(ctx, legacyDeviceID, "youtube", "video"); got != "" {
+		t.Fatalf("unattributed kind-only preference was used for YouTube: %q", got)
+	}
+}
+
 func TestQualityPreferenceReversionOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "Movie.mp4"), []byte("video"), 0600)
@@ -482,8 +567,11 @@ func TestQualityPreferenceReversionOnFailure(t *testing.T) {
 	if err := json.Unmarshal(quality.Body.Bytes(), &replacement); err != nil {
 		t.Fatal(err)
 	}
-	if s.getQualityPreference(t.Context(), "fail-device", "video") != "720p" {
+	if s.getQualityPreference(t.Context(), "fail-device", "local", "video") != "720p" {
 		t.Fatal("preference was not set")
+	}
+	if err := s.setQualityPreference(t.Context(), "fail-device", "youtube", "video", "1080p"); err != nil {
+		t.Fatal(err)
 	}
 
 	// A late failure from the superseded session must not erase the new choice.
@@ -491,8 +579,11 @@ func TestQualityPreferenceReversionOnFailure(t *testing.T) {
 	if prog.Code != 200 {
 		t.Fatalf("progress failed: %d %s", prog.Code, prog.Body)
 	}
-	if got := s.getQualityPreference(t.Context(), "fail-device", "video"); got != "720p" {
+	if got := s.getQualityPreference(t.Context(), "fail-device", "local", "video"); got != "720p" {
 		t.Fatalf("superseded session failure erased 720p preference: %q", got)
+	}
+	if got := s.getQualityPreference(t.Context(), "fail-device", "youtube", "video"); got != "1080p" {
+		t.Fatalf("superseded local session changed YouTube preference: %q", got)
 	}
 
 	// Failure of the session using 720p must revert to Auto.
@@ -500,9 +591,12 @@ func TestQualityPreferenceReversionOnFailure(t *testing.T) {
 	if prog.Code != 200 {
 		t.Fatalf("replacement progress failed: %d %s", prog.Code, prog.Body)
 	}
-	reverted := s.getQualityPreference(t.Context(), "fail-device", "video")
-	if reverted != "" && reverted != "auto" {
-		t.Fatalf("expected preference reverted to auto, got %q", reverted)
+	reverted := s.getQualityPreference(t.Context(), "fail-device", "local", "video")
+	if reverted != "auto" {
+		t.Fatalf("expected active local preference reverted to auto, got %q", reverted)
+	}
+	if got := s.getQualityPreference(t.Context(), "fail-device", "youtube", "video"); got != "1080p" {
+		t.Fatalf("active local failure changed YouTube preference: %q", got)
 	}
 }
 
@@ -641,6 +735,9 @@ func TestYouTubeHDQualitySelectionAndSwitching(t *testing.T) {
 	if sess720 == nil || sess720.source.AudioURL != "https://r2.googlevideo.com/audio-140" || sess720.source.URL != "https://r1.googlevideo.com/video-720" {
 		t.Fatalf("replacement session does not hold resolved H.264/AAC pair: %+v", sess720)
 	}
+	if sess720.selection.Quality != "720p" || s.getQualityPreference(t.Context(), "yt-device", "youtube", "video") != "720p" {
+		t.Fatalf("successful manual quality was not retained: session=%+v preference=%q", sess720.selection, s.getQualityPreference(t.Context(), "yt-device", "youtube", "video"))
+	}
 
 	// 2. Source lacking HD: only 360p variant
 	ytSDSource := domain.Source{
@@ -715,7 +812,7 @@ func TestYouTubeHDQualitySelectionAndSwitching(t *testing.T) {
 		t.Fatalf("device without aac probe must not be offered adaptive HD: %+v", invNoAudio.Options)
 	}
 
-	// 5. Fallback to Auto on upstream failure during HD resolution
+	// 5. A failed manual tier resolution leaves the current session and preference intact.
 	failRes := &mockYouTubeResolver{
 		resolveFn: func(ctx context.Context, src domain.Source) (domain.Source, error) {
 			if src.ResolveQuality == "720p" {
@@ -738,22 +835,10 @@ func TestYouTubeHDQualitySelectionAndSwitching(t *testing.T) {
 	var planFB domain.Plan
 	json.Unmarshal(wFallback.Body.Bytes(), &planFB)
 
-	// Switching to 720p fails at upstream resolver: server falls back to Auto without breaking session
-	fbCall := call(s, "POST", "/v1/playback/"+planFB.SessionID+"/quality", `{"qualityId":"720p","positionMs":12000}`, "yt-device", token, "")
-	if fbCall.Code != 201 {
-		t.Fatalf("expected 201 fallback to auto, got %d: %s", fbCall.Code, fbCall.Body)
+	if err := s.setQualityPreference(t.Context(), "yt-device", "youtube", "video", "1080p"); err != nil {
+		t.Fatal(err)
 	}
-	var planAfterFB domain.Plan
-	json.Unmarshal(fbCall.Body.Bytes(), &planAfterFB)
-	s.mu.Lock()
-	sessFB := s.sessions[planAfterFB.SessionID]
-	s.mu.Unlock()
-	if sessFB.selection.Quality != "" && sessFB.selection.Quality != "auto" {
-		t.Fatalf("expected fallback to auto, got %s", sessFB.selection.Quality)
-	}
-	if sessFB.source.URL != "https://r1.googlevideo.com/video-360" {
-		t.Fatalf("expected working 360p stream preserved on fallback, got %s", sessFB.source.URL)
-	}
+	assertQualitySelectionFailurePreservesSession(t, s, "yt-device", "youtube", token, planFB.SessionID, "720p", 12000)
 
 	// 6. In-place switch: switch to 720p and back to Auto at preserved positions
 	s.deps.Resolver = mockRes // restore working resolver
@@ -803,6 +888,76 @@ func TestYouTubeHDQualitySelectionAndSwitching(t *testing.T) {
 	if sessInit720 == nil || sessInit720.source.URL != "https://r1.googlevideo.com/video-720" {
 		t.Fatalf("expected resolved 720p stream on initial creation, got: %+v", sessInit720)
 	}
+}
+
+func TestSelectYouTubeQualityRemoteProbeFailurePreservesSession(t *testing.T) {
+	s := testServer(t, nil, "")
+	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: "http://wrapper.local", Token: strings.Repeat("p", 32)}}); err != nil {
+		t.Fatal(err)
+	}
+
+	deviceID := "probe-failure-device"
+	token := pair(t, s, deviceID)
+	setDevicePassingProbes(t, s, deviceID, standardCapableProbes()...)
+	source := domain.Source{
+		Item:       domain.Item{ID: "youtube-probe-failure", Provider: "youtube", Kind: "video", Playable: true},
+		URL:        "http://wrapper.local/resolve/probe-failure",
+		MIME:       "application/x-zombie-youtube",
+		Variants:   []string{"1080p", "720p", "360p"},
+		ResolveURL: "http://wrapper.local/resolve/probe-failure",
+	}
+	s.deps.Catalog = &mockYouTubeCatalog{Catalog: s.deps.Catalog, source: source}
+	setDeviceSource := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.searchResults[deviceID] = searchResult{
+			query:    "probe failure",
+			revision: s.configRevision["youtube"],
+			fetched:  time.Now(),
+			sources:  []domain.Source{source},
+		}
+	}
+	setDeviceSource()
+
+	mediaStub := &qualityTestMedia{width: 640, height: 360, codec: "h264", profile: "Baseline"}
+	s.deps.Media = mediaStub
+	s.deps.RemoteMedia = mediaStub
+	s.deps.Resolver = &mockYouTubeResolver{
+		resolveFn: func(_ context.Context, src domain.Source) (domain.Source, error) {
+			resolved := src
+			resolved.MIME = "video/mp4"
+			if src.ResolveQuality == "720p" {
+				resolved.URL = "https://r1.googlevideo.com/video-720"
+				resolved.AudioURL = "https://r2.googlevideo.com/audio-140"
+			} else {
+				resolved.URL = "https://r1.googlevideo.com/video-360"
+				resolved.AudioURL = ""
+			}
+			return resolved, nil
+		},
+	}
+
+	start := call(s, "POST", "/v1/playback", `{"itemId":"youtube-probe-failure"}`, deviceID, token, "")
+	if start.Code != 201 {
+		t.Fatalf("initial playback returned %d: %s", start.Code, start.Body)
+	}
+	var plan domain.Plan
+	if err := json.Unmarshal(start.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fail the selected tier's required media probe after the current Auto session exists.
+	s.deps.RemoteMedia = &qualityTestMedia{
+		width:              640,
+		height:             360,
+		codec:              "h264",
+		profile:            "Baseline",
+		remoteProbeFailURL: "video-720",
+	}
+	if err := s.setQualityPreference(t.Context(), deviceID, "youtube", "video", "1080p"); err != nil {
+		t.Fatal(err)
+	}
+	assertQualitySelectionFailurePreservesSession(t, s, deviceID, "youtube", token, plan.SessionID, "720p", 12000)
 }
 
 type dynamicRemoteMedia struct {
@@ -884,7 +1039,7 @@ func TestYouTubeFailedHDResolveOnInitialAndInPlaceSessions(t *testing.T) {
 	// 1. Initial playback with stored preferred quality "720p":
 	// When HD resolve fails, gateway must genuinely fall back to Auto (DIRECT_PLAY 360p plan),
 	// revert preference to Auto, and NOT report a 720p plan!
-	_ = s.setQualityPreference(context.Background(), "fail-hd-device", "video", "720p")
+	_ = s.setQualityPreference(context.Background(), "fail-hd-device", "youtube", "video", "720p")
 
 	wPref := call(s, "POST", "/v1/playback", `{"itemId":"youtube-testVideo1"}`, "fail-hd-device", token, "")
 	if wPref.Code != 201 {
@@ -902,47 +1057,30 @@ func TestYouTubeFailedHDResolveOnInitialAndInPlaceSessions(t *testing.T) {
 	if sessPref.selection.Quality != "" && sessPref.selection.Quality != "auto" {
 		t.Fatalf("session quality should be empty/auto on fallback, got %q", sessPref.selection.Quality)
 	}
-	prefAfter := s.getQualityPreference(context.Background(), "fail-hd-device", "video")
+	prefAfter := s.getQualityPreference(context.Background(), "fail-hd-device", "youtube", "video")
 	if prefAfter != "auto" && prefAfter != "" {
 		t.Fatalf("expected preference reverted to auto, got %q", prefAfter)
 	}
 
-	// 2. Initial playback with explicit quality "720p":
-	// When HD resolve fails, gateway must genuinely fall back to Auto
+	// 2. An explicit manual quality failure must not silently start Auto.
 	wExplicit := call(s, "POST", "/v1/playback", `{"itemId":"youtube-testVideo1","quality":"720p"}`, "fail-hd-device", token, "")
-	if wExplicit.Code != 201 {
-		t.Fatalf("initial playback with explicit failing HD failed: %d %s", wExplicit.Code, wExplicit.Body)
-	}
-	var planExplicit domain.Plan
-	json.Unmarshal(wExplicit.Body.Bytes(), &planExplicit)
-	if planExplicit.Mode != "DIRECT_PLAY" {
-		t.Fatalf("expected fallback to DIRECT_PLAY on explicit failing HD, got mode %s", planExplicit.Mode)
+	if wExplicit.Code != 502 || !strings.Contains(wExplicit.Body.String(), "quality_resolution_failed") {
+		t.Fatalf("expected initial manual quality failure, got %d %s", wExplicit.Code, wExplicit.Body)
 	}
 	s.mu.Lock()
-	sessExplicit := s.sessions[planExplicit.SessionID]
+	sessExplicit := s.sessions[planPref.SessionID]
+	sessionCount := len(s.sessions)
 	s.mu.Unlock()
-	if sessExplicit.selection.Quality != "" && sessExplicit.selection.Quality != "auto" {
-		t.Fatalf("session quality should be empty/auto, got %q", sessExplicit.selection.Quality)
+	if sessExplicit == nil || sessExplicit.ctx.Err() != nil || sessionCount != 1 {
+		t.Fatalf("failed initial manual tier changed the active session set: session=%+v count=%d", sessExplicit, sessionCount)
 	}
 
-	// 3. In-place switch: active session at position 15000ms attempts to select 720p.
-	// Upstream resolve fails: server must genuinely fall back to Auto at position 15000ms,
-	// preserving the working 360p stream without breaking playback.
-	wSwitch := call(s, "POST", "/v1/playback/"+planExplicit.SessionID+"/quality", `{"qualityId":"720p","positionMs":15000}`, "fail-hd-device", token, "")
-	if wSwitch.Code != 201 {
-		t.Fatalf("in-place switch failed: %d %s", wSwitch.Code, wSwitch.Body)
+	// 3. A failed in-place manual switch returns an error and leaves the current
+	// Auto playback active. Auto fallback is reserved for explicit Auto selection.
+	if err := s.setQualityPreference(t.Context(), "fail-hd-device", "youtube", "video", "1080p"); err != nil {
+		t.Fatal(err)
 	}
-	var planSwitchFallback domain.Plan
-	json.Unmarshal(wSwitch.Body.Bytes(), &planSwitchFallback)
-	if planSwitchFallback.Mode != "DIRECT_PLAY" || planSwitchFallback.ResumeMS != 15000 || !planSwitchFallback.Seekable {
-		t.Fatalf("expected DIRECT_PLAY at 15000ms on fallback, got %+v", planSwitchFallback)
-	}
-	s.mu.Lock()
-	sessSwitchFB := s.sessions[planSwitchFallback.SessionID]
-	s.mu.Unlock()
-	if sessSwitchFB.source.URL != "https://r1.googlevideo.com/video-360" {
-		t.Fatalf("expected working 360p URL preserved, got %s", sessSwitchFB.source.URL)
-	}
+	assertQualitySelectionFailurePreservesSession(t, s, "fail-hd-device", "youtube", token, planPref.SessionID, "720p", 15000)
 
 	// 4. In-place switch succeeds: resolver returns 720p, metadata is updated coherently
 	workingResolver := &mockYouTubeResolver{
@@ -962,7 +1100,7 @@ func TestYouTubeFailedHDResolveOnInitialAndInPlaceSessions(t *testing.T) {
 	}
 	s.deps.Resolver = workingResolver
 
-	wOK := call(s, "POST", "/v1/playback/"+planSwitchFallback.SessionID+"/quality", `{"qualityId":"720p","positionMs":22000}`, "fail-hd-device", token, "")
+	wOK := call(s, "POST", "/v1/playback/"+planPref.SessionID+"/quality", `{"qualityId":"720p","positionMs":22000}`, "fail-hd-device", token, "")
 	if wOK.Code != 201 {
 		t.Fatalf("working switch to 720p failed: %d %s", wOK.Code, wOK.Body)
 	}
@@ -1003,6 +1141,64 @@ func TestYouTubeFailedHDResolveOnInitialAndInPlaceSessions(t *testing.T) {
 	s.mu.Unlock()
 	if sessBack.source.AudioURL != "" {
 		t.Fatalf("expected Auto progressive stream without audioUrl, got %s", sessBack.source.AudioURL)
+	}
+}
+
+func TestInitialManualYouTubeQualityResolutionFailureReturnsError(t *testing.T) {
+	s := testServer(t, nil, "")
+	if err := s.SeedProviders(context.Background(), map[string]providers.Config{"youtube": {Enabled: true, URL: "http://wrapper.local", Token: strings.Repeat("s", 32)}}); err != nil {
+		t.Fatal(err)
+	}
+	deviceID := "initial-quality-resolution-failure"
+	token := pair(t, s, deviceID)
+	setDevicePassingProbes(t, s, deviceID, standardCapableProbes()...)
+	source := domain.Source{
+		Item:       domain.Item{ID: "youtube-initial-quality-failure", Provider: "youtube", Kind: "video", Playable: true},
+		URL:        "http://wrapper.local/resolve/initial-quality-failure",
+		MIME:       "application/x-zombie-youtube",
+		Variants:   []string{"1080p", "720p", "360p"},
+		ResolveURL: "http://wrapper.local/resolve/initial-quality-failure",
+	}
+	s.mu.Lock()
+	s.searchResults[deviceID] = searchResult{
+		revision: s.configRevision["youtube"],
+		fetched:  time.Now(),
+		sources:  []domain.Source{source},
+	}
+	s.mu.Unlock()
+	mediaStub := &qualityTestMedia{width: 1920, height: 1080, codec: "h264", profile: "High"}
+	s.deps.Media = mediaStub
+	s.deps.RemoteMedia = mediaStub
+	s.deps.Resolver = &mockYouTubeResolver{
+		resolveFn: func(_ context.Context, src domain.Source) (domain.Source, error) {
+			if src.ResolveQuality == "720p" {
+				return domain.Source{}, errors.New("upstream quality resolution failed")
+			}
+			resolved := src
+			resolved.URL = "https://r1.googlevideo.com/video-360"
+			resolved.AudioURL = ""
+			resolved.MIME = "video/mp4"
+			return resolved, nil
+		},
+	}
+
+	response := call(s, "POST", "/v1/playback", `{"itemId":"youtube-initial-quality-failure","quality":"720p"}`, deviceID, token, "")
+	if response.Code != 502 {
+		t.Fatalf("expected 502 for failed explicit initial quality, got %d: %s", response.Code, response.Body)
+	}
+	var failure struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil || failure.Error.Code != "quality_resolution_failed" {
+		t.Fatalf("expected quality_resolution_failed, got %q (decode error %v)", response.Body.String(), err)
+	}
+	s.mu.Lock()
+	count := len(s.sessions)
+	s.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("failed initial manual selection created %d playback sessions", count)
 	}
 }
 
@@ -1081,7 +1277,7 @@ func TestYouTubeRemoteMediaProbeFailureOnHDQualitySelection(t *testing.T) {
 	// 1. Initial playback with stored preferred HD ("720p"):
 	// Upstream resolve succeeds, but RemoteMedia probe fails on the 720p stream.
 	// Server must revert preference, restore original 360p source, and return DIRECT_PLAY 360p.
-	_ = s.setQualityPreference(context.Background(), "probe-fail-device", "video", "720p")
+	_ = s.setQualityPreference(context.Background(), "probe-fail-device", "youtube", "video", "720p")
 
 	wPref := call(s, "POST", "/v1/playback", `{"itemId":"youtube-probeFailVid"}`, "probe-fail-device", token, "")
 	if wPref.Code != 201 {
@@ -1092,52 +1288,22 @@ func TestYouTubeRemoteMediaProbeFailureOnHDQualitySelection(t *testing.T) {
 	if planPref.Mode != "DIRECT_PLAY" {
 		t.Fatalf("expected fallback to DIRECT_PLAY on probe failure, got %s", planPref.Mode)
 	}
-	prefAfter := s.getQualityPreference(context.Background(), "probe-fail-device", "video")
+	prefAfter := s.getQualityPreference(context.Background(), "probe-fail-device", "youtube", "video")
 	if prefAfter != "auto" && prefAfter != "" {
 		t.Fatalf("expected preference reverted to auto, got %q", prefAfter)
 	}
 
-	// 2. In-place switch: active session at position 12000ms requests 720p.
-	// RemoteMedia probe fails on 720p: server must restore original Auto source at 12000ms.
-	wSwitch := call(s, "POST", "/v1/playback/"+planPref.SessionID+"/quality", `{"qualityId":"720p","positionMs":12000}`, "probe-fail-device", token, "")
-	if wSwitch.Code != 201 {
-		t.Fatalf("expected 201 on in-place switch fallback, got %d %s", wSwitch.Code, wSwitch.Body)
+	// 2. An in-place manual selection whose target probe fails must preserve the
+	// active session and preference rather than silently replacing it with Auto.
+	if err := s.setQualityPreference(t.Context(), "probe-fail-device", "youtube", "video", "1080p"); err != nil {
+		t.Fatal(err)
 	}
-	var planSwitch domain.Plan
-	json.Unmarshal(wSwitch.Body.Bytes(), &planSwitch)
-	if planSwitch.Mode != "DIRECT_PLAY" || planSwitch.ResumeMS != 12000 || !planSwitch.Seekable {
-		t.Fatalf("expected DIRECT_PLAY at 12000ms on fallback, got %+v", planSwitch)
-	}
-	s.mu.Lock()
-	sessSwitch := s.sessions[planSwitch.SessionID]
-	s.mu.Unlock()
-	if sessSwitch.source.AudioURL != "" || sessSwitch.source.URL != "https://r1.googlevideo.com/video-360" {
-		t.Fatalf("expected original 360p progressive source restored, got %+v", sessSwitch.source)
-	}
+	assertQualitySelectionFailurePreservesSession(t, s, "probe-fail-device", "youtube", token, planPref.SessionID, "720p", 12000)
 
-	// 3. In-place switch when fallback actually fails:
-	// Configure active session to be an adaptive split stream (so fallback must resolve Auto)
-	s.mu.Lock()
-	s.sessions[planSwitch.SessionID].source.AudioURL = "https://r2.googlevideo.com/audio"
-	s.mu.Unlock()
-
-	// Now fail all probes so both HD resolution and Auto fallback probe fail:
+	// 3. If target and Auto probes would both fail, the manual request still
+	// returns the target resolution error without mutating the active session.
 	failingMedia.failAll = true
-	wFailedSwitch := call(s, "POST", "/v1/playback/"+planSwitch.SessionID+"/quality", `{"qualityId":"1080p","positionMs":15000}`, "probe-fail-device", token, "")
-	// When fallback fails, must NOT advertise success!
-	if wFailedSwitch.Code == 201 {
-		t.Fatalf("server advertised success when fallback actually failed!")
-	}
-	if wFailedSwitch.Code != 502 {
-		t.Fatalf("expected 502 on failed fallback, got %d", wFailedSwitch.Code)
-	}
-	// Working session must remain intact!
-	s.mu.Lock()
-	existingSess := s.sessions[planSwitch.SessionID]
-	s.mu.Unlock()
-	if existingSess == nil || existingSess.ctx.Err() != nil {
-		t.Fatal("working session was destroyed when switch failed")
-	}
+	assertQualitySelectionFailurePreservesSession(t, s, "probe-fail-device", "youtube", token, planPref.SessionID, "1080p", 15000)
 }
 
 type metadataVaryingRemoteMedia struct {
@@ -1185,7 +1351,7 @@ func TestYouTubeHDProbeValidationVariants(t *testing.T) {
 		return s, token, ytSource
 	}
 
-	t.Run("nil adapter treats newly resolved HD as unprobed and falls back to Auto", func(t *testing.T) {
+	t.Run("nil adapter rejects manual tier without replacing Auto", func(t *testing.T) {
 		s, token, _ := setupServer()
 		mediaStub := &dynamicRemoteMedia{}
 		s.deps.Media = mediaStub
@@ -1217,25 +1383,13 @@ func TestYouTubeHDProbeValidationVariants(t *testing.T) {
 		// Set RemoteMedia adapter to nil
 		s.deps.RemoteMedia = nil
 
-		// In-place switch to 720p: should fail probe due to nil adapter, falling back to Auto without selecting unprobed 720p
-		switchResp := call(s, "POST", "/v1/playback/"+plan.SessionID+"/quality", `{"qualityId":"720p","positionMs":8000}`, "probe-var-device", token, "")
-		if switchResp.Code != 201 {
-			t.Fatalf("expected fallback 201 on nil adapter, got %d: %s", switchResp.Code, switchResp.Body)
+		if err := s.setQualityPreference(t.Context(), "probe-var-device", "youtube", "video", "1080p"); err != nil {
+			t.Fatal(err)
 		}
-		var planAfter domain.Plan
-		json.Unmarshal(switchResp.Body.Bytes(), &planAfter)
-		s.mu.Lock()
-		sessAfter := s.sessions[planAfter.SessionID]
-		s.mu.Unlock()
-		if sessAfter.source.URL == "https://r1.googlevideo.com/video-720" {
-			t.Fatal("nil adapter must never select unprobed HD source")
-		}
-		if sessAfter.selection.Quality != "" && sessAfter.selection.Quality != "auto" {
-			t.Fatalf("expected auto quality on fallback, got %q", sessAfter.selection.Quality)
-		}
+		assertQualitySelectionFailurePreservesSession(t, s, "probe-var-device", "youtube", token, plan.SessionID, "720p", 8000)
 	})
 
-	t.Run("ineligible remote candidate falls back to Auto", func(t *testing.T) {
+	t.Run("ineligible remote candidate rejects manual tier", func(t *testing.T) {
 		s, token, _ := setupServer()
 		mediaStub := &dynamicRemoteMedia{}
 		s.deps.Media = mediaStub
@@ -1257,27 +1411,19 @@ func TestYouTubeHDProbeValidationVariants(t *testing.T) {
 		}
 
 		w := call(s, "POST", "/v1/playback", `{"itemId":"youtube-probeVarVid"}`, "probe-var-device", token, "")
+		if w.Code != 201 {
+			t.Fatalf("initial playback failed: %d %s", w.Code, w.Body)
+		}
 		var plan domain.Plan
 		json.Unmarshal(w.Body.Bytes(), &plan)
 
-		switchResp := call(s, "POST", "/v1/playback/"+plan.SessionID+"/quality", `{"qualityId":"720p","positionMs":9000}`, "probe-var-device", token, "")
-		if switchResp.Code != 201 {
-			t.Fatalf("expected fallback 201 on ineligible candidate, got %d: %s", switchResp.Code, switchResp.Body)
+		if err := s.setQualityPreference(t.Context(), "probe-var-device", "youtube", "video", "1080p"); err != nil {
+			t.Fatal(err)
 		}
-		var planAfter domain.Plan
-		json.Unmarshal(switchResp.Body.Bytes(), &planAfter)
-		s.mu.Lock()
-		sessAfter := s.sessions[planAfter.SessionID]
-		s.mu.Unlock()
-		if sessAfter.source.URL == "ftp://ineligible.origin/video-720" {
-			t.Fatal("ineligible remote candidate must not be accepted")
-		}
-		if sessAfter.source.URL != "https://r1.googlevideo.com/video-360" {
-			t.Fatalf("expected 360p Auto stream preserved, got %s", sessAfter.source.URL)
-		}
+		assertQualitySelectionFailurePreservesSession(t, s, "probe-var-device", "youtube", token, plan.SessionID, "720p", 9000)
 	})
 
-	t.Run("empty metadata falls back to Auto", func(t *testing.T) {
+	t.Run("empty metadata rejects manual tier", func(t *testing.T) {
 		s, token, _ := setupServer()
 		varyingMedia := &metadataVaryingRemoteMedia{emptyHD: true}
 		s.deps.Media = varyingMedia
@@ -1299,27 +1445,19 @@ func TestYouTubeHDProbeValidationVariants(t *testing.T) {
 		}
 
 		w := call(s, "POST", "/v1/playback", `{"itemId":"youtube-probeVarVid"}`, "probe-var-device", token, "")
+		if w.Code != 201 {
+			t.Fatalf("initial playback failed: %d %s", w.Code, w.Body)
+		}
 		var plan domain.Plan
 		json.Unmarshal(w.Body.Bytes(), &plan)
 
-		switchResp := call(s, "POST", "/v1/playback/"+plan.SessionID+"/quality", `{"qualityId":"720p","positionMs":10000}`, "probe-var-device", token, "")
-		if switchResp.Code != 201 {
-			t.Fatalf("expected fallback 201 on empty metadata, got %d: %s", switchResp.Code, switchResp.Body)
+		if err := s.setQualityPreference(t.Context(), "probe-var-device", "youtube", "video", "1080p"); err != nil {
+			t.Fatal(err)
 		}
-		var planAfter domain.Plan
-		json.Unmarshal(switchResp.Body.Bytes(), &planAfter)
-		s.mu.Lock()
-		sessAfter := s.sessions[planAfter.SessionID]
-		s.mu.Unlock()
-		if sessAfter.source.URL == "https://r1.googlevideo.com/video-720" {
-			t.Fatal("empty metadata probe must not be accepted as valid HD")
-		}
-		if sessAfter.source.URL != "https://r1.googlevideo.com/video-360" {
-			t.Fatalf("expected 360p Auto stream preserved, got %s", sessAfter.source.URL)
-		}
+		assertQualitySelectionFailurePreservesSession(t, s, "probe-var-device", "youtube", token, plan.SessionID, "720p", 10000)
 	})
 
-	t.Run("explicit probe error falls back to Auto", func(t *testing.T) {
+	t.Run("explicit probe error rejects manual tier", func(t *testing.T) {
 		s, token, _ := setupServer()
 		varyingMedia := &metadataVaryingRemoteMedia{errHD: true}
 		s.deps.Media = varyingMedia
@@ -1341,24 +1479,16 @@ func TestYouTubeHDProbeValidationVariants(t *testing.T) {
 		}
 
 		w := call(s, "POST", "/v1/playback", `{"itemId":"youtube-probeVarVid"}`, "probe-var-device", token, "")
+		if w.Code != 201 {
+			t.Fatalf("initial playback failed: %d %s", w.Code, w.Body)
+		}
 		var plan domain.Plan
 		json.Unmarshal(w.Body.Bytes(), &plan)
 
-		switchResp := call(s, "POST", "/v1/playback/"+plan.SessionID+"/quality", `{"qualityId":"720p","positionMs":11000}`, "probe-var-device", token, "")
-		if switchResp.Code != 201 {
-			t.Fatalf("expected fallback 201 on explicit probe error, got %d: %s", switchResp.Code, switchResp.Body)
+		if err := s.setQualityPreference(t.Context(), "probe-var-device", "youtube", "video", "1080p"); err != nil {
+			t.Fatal(err)
 		}
-		var planAfter domain.Plan
-		json.Unmarshal(switchResp.Body.Bytes(), &planAfter)
-		s.mu.Lock()
-		sessAfter := s.sessions[planAfter.SessionID]
-		s.mu.Unlock()
-		if sessAfter.source.URL == "https://r1.googlevideo.com/video-720" {
-			t.Fatal("explicit probe error must not be accepted as valid HD")
-		}
-		if sessAfter.source.URL != "https://r1.googlevideo.com/video-360" {
-			t.Fatalf("expected 360p Auto stream preserved, got %s", sessAfter.source.URL)
-		}
+		assertQualitySelectionFailurePreservesSession(t, s, "probe-var-device", "youtube", token, plan.SessionID, "720p", 11000)
 	})
 }
 

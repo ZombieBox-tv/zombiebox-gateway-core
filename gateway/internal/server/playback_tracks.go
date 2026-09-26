@@ -195,6 +195,7 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 		networkAdaptation: sess.networkAdaptation,
 		adaptation:        sess.adaptation,
 		mode:              mode,
+		knownLengthRemux:  requiresKnownLengthYouTubeRemux(d, sess.source, sess.metadata, mode, time.Now()),
 		device:            d.ID,
 		ticket:            ticket,
 		expires:           sess.expires,

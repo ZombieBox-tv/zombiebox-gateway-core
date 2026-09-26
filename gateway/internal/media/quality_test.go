@@ -41,3 +41,25 @@ func TestLowBandwidthProfileIsBoundedAndRejectsArbitraryInput(t *testing.T) {
 		t.Fatal("arbitrary profile accepted")
 	}
 }
+
+func TestSplitRenditionUsesAudioInputDespitePreviousTrackIndex(t *testing.T) {
+	runner := &qualityRunner{}
+	tools := NewWithRunner("ffmpeg", "ffprobe", runner)
+	previousTrack := 1
+	selection := domain.MediaSelection{Quality: "720p", AudioID: &previousTrack}
+	if err := tools.convert(t.Context(), "http://127.0.0.1/video", "http://127.0.0.1/audio", true, false, false, "REMUX", selection, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index+1 < len(runner.args); index++ {
+		if runner.args[index] != "-map" {
+			continue
+		}
+		if runner.args[index+1] == "1:a:0" {
+			return
+		}
+		if runner.args[index+1] == "0:1" {
+			t.Fatal("stale audio index mapped from the video-only input")
+		}
+	}
+	t.Fatal("split audio input was not mapped")
+}

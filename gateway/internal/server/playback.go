@@ -5,12 +5,14 @@ import (
 	"crypto/subtle"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/media"
 	"zombiebox.local/gateway/internal/playback"
@@ -24,6 +26,7 @@ type session struct {
 	subtitleID        *int
 	selection         domain.MediaSelection
 	mode              string
+	knownLengthRemux  bool
 	receiverID        string
 	castID            string
 	device            string
@@ -133,11 +136,12 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 	}
 	if (req.Mode == "" || req.Mode == "AUTO") && (req.Quality == "" || req.Quality == "auto") {
+		provider := resolved.Item.Provider
 		kind := resolved.Item.Kind
 		if kind == "" {
 			kind = "video"
 		}
-		preferred := s.getQualityPreference(r.Context(), d.ID, kind)
+		preferred := s.getQualityPreference(r.Context(), d.ID, provider, kind)
 		if preferred != "" && preferred != "auto" && decision.metadata != nil {
 			inv := playback.Qualities(*decision.metadata, resolved, d, "")
 			if playback.HasQuality(inv, preferred) {
@@ -153,7 +157,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 						decision.metadata = &probedMeta
 						resolvedHD = true
 					} else {
-						_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+						_ = s.revertQualityPreference(r.Context(), d.ID, provider, kind)
 						resolved = originalResolved
 						decision.metadata = originalMetadata
 					}
@@ -165,7 +169,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 					} else {
 						resolved = originalResolved
 						decision.metadata = originalMetadata
-						_ = s.revertQualityPreference(r.Context(), d.ID, kind)
+						_ = s.revertQualityPreference(r.Context(), d.ID, provider, kind)
 					}
 				}
 			}
@@ -184,10 +188,8 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 					decision.metadata = &probedMeta
 					resolvedQuality = true
 				} else {
-					// Fallback genuinely to Auto on failed HD resolve or probe
-					req.Quality = ""
-					resolved = originalResolved
-					decision.metadata = originalMetadata
+					fail(w, 502, "quality_resolution_failed")
+					return
 				}
 			}
 			if resolvedQuality || resolved.Item.Provider != "youtube" {
@@ -258,9 +260,13 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		clientMode = "TRANSCODE"
 	}
 	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: clientMode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
-	if (mode == "REMUX" || mode == "HYBRID") && (resume > 0 || req.Quality == "LOW" || (decision.metadata != nil && playback.RequiresTranscodeForQuality(*decision.metadata, req.Quality))) {
+	qualityRequiresTranscode := req.Quality == "LOW" || (decision.metadata != nil && playback.RequiresTranscodeForQuality(*decision.metadata, req.Quality))
+	knownLengthResume := mode == "REMUX" && resume > 0 && !qualityRequiresTranscode && supportsKnownLengthYouTubeSeek(d, resolved, decision.metadata, mode, time.Now())
+	if (mode == "REMUX" || mode == "HYBRID") && (resume > 0 || qualityRequiresTranscode) && !knownLengthResume {
 		mode, plan.Mode, s.sessions[id].mode = "TRANSCODE", "TRANSCODE", "TRANSCODE"
 	}
+	knownLengthRemux := requiresKnownLengthYouTubeRemux(d, resolved, decision.metadata, mode, time.Now())
+	s.sessions[id].knownLengthRemux = knownLengthRemux
 	if mode == "REMUX" || mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
 		if isAudioOnly(resolved, decision.metadata) {
@@ -269,8 +275,11 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		if media.LiveAACRemux(resolved, decision.metadata, mode) {
 			plan.MIME = "audio/aac"
 		}
-		plan.Seekable = false
+		plan.Seekable = mode == "REMUX" && knownLengthRemux && supportsKnownLengthYouTubeSeek(d, resolved, decision.metadata, mode, time.Now()) && !resolved.Live
 		plan.ResumeMS = 0
+		if mode == "REMUX" && plan.Seekable {
+			plan.ResumeMS = resume
+		}
 		if mode == "TRANSCODE" {
 			plan.TimelineOffsetMS = resume
 			s.sessions[id].selection.PositionMS = resume
@@ -408,7 +417,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	src := sess.source
-	if resource := r.PathValue("resource"); resource != "" {
+	resource := r.PathValue("resource")
+	if resource != "" {
 		raw, ok := sess.resources[resource]
 		if !ok {
 			s.mu.Unlock()
@@ -427,6 +437,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			src.Headers = nil
 		}
 	}
+	knownLengthRemux := sess.knownLengthRemux && resource == ""
 	s.mu.Unlock()
 	select {
 	case s.streams <- struct{}{}:
@@ -442,12 +453,16 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", src.MIME)
-	if sess.mode == "HYBRID" {
+	if sess.mode == "HYBRID" || knownLengthRemux {
 		if (src.Path != "" && s.deps.Media == nil) || (src.Path == "" && s.deps.RemoteMedia == nil) {
 			fail(w, 502, "conversion_unavailable")
 			return
 		}
 		spool := s.getOrStartHybridSpool(sess)
+		startupWait := s.hybridStartupWait
+		if startupWait <= 0 {
+			startupWait = maxHybridStartupWait
+		}
 		select {
 		case <-spool.done:
 		case <-r.Context().Done():
@@ -455,11 +470,13 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		case <-sess.ctx.Done():
 			fail(w, 504, "conversion_timeout")
 			return
-		case <-time.After(maxHybridStartupWait):
+		case <-time.After(startupWait):
+			w.Header().Set("Retry-After", "2")
 			fail(w, 504, "conversion_timeout")
 			return
 		}
 		if spool.err != nil {
+			logMediaConversionFailure(spool.err, sess.mode, knownLengthRemux)
 			if errors.Is(spool.err, media.ErrBusy) {
 				fail(w, 429, "media_busy")
 			} else if errors.Is(spool.err, ErrSpoolQuotaExceeded) {
@@ -534,6 +551,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			err = s.deps.RemoteMedia.ConvertRemote(ctx, src, sess.mode, sess.selection, writer)
 		}
 		if err != nil {
+			logMediaConversionFailure(err, sess.mode, false)
 			if !writer.started {
 				if errors.Is(err, media.ErrBusy) {
 					fail(w, 429, "media_busy")
@@ -639,6 +657,24 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Keep conversion diagnostics bounded: remote URLs, command arguments and
+// raw process errors may contain provider credentials or signed media tokens.
+func logMediaConversionFailure(err error, mode string, knownLengthRemux bool) {
+	class := media.ConversionFailureClass(err)
+	if class == "" {
+		class = "other"
+	}
+	exitCode, hasExitCode := media.ConversionFailureExitCode(err)
+	httpStatus, hasHTTPStatus := media.ConversionFailureHTTPStatus(err)
+	if hasExitCode {
+		log.Printf("media conversion failure class=%s mode=%s known_length_remux=%t exit_code=%d stage=%s", class, mode, knownLengthRemux, exitCode, media.ConversionFailureStage(err))
+	} else if hasHTTPStatus {
+		log.Printf("media conversion failure class=%s mode=%s known_length_remux=%t upstream_status=%d", class, mode, knownLengthRemux, httpStatus)
+	} else {
+		log.Printf("media conversion failure class=%s mode=%s known_length_remux=%t", class, mode, knownLengthRemux)
+	}
+}
+
 // Deadlines apply to each upstream read, including a stalled media body.
 // Close cancels streams before the process drains its HTTP server.
 func (s *Server) Close() {
@@ -714,4 +750,114 @@ func isAudioOnly(source domain.Source, metadata *domain.Metadata) bool {
 		return hasAudio
 	}
 	return false
+}
+
+// requiresKnownLengthYouTubeRemux selects the bounded file-backed REMUX path
+// only when this device has current suite-2 evidence that fMP4 playback works
+// with a known length but not with chunked transfer encoding.
+func requiresKnownLengthYouTubeRemux(device domain.Device, source domain.Source, metadata *domain.Metadata, mode string, now time.Time) bool {
+	if mode != "REMUX" || source.Live || source.Path != "" || source.Item.Provider != "youtube" || source.Item.Kind != "video" || source.URL == "" || source.AudioURL == "" {
+		return false
+	}
+	if metadata == nil {
+		return false
+	}
+	hasH264Video, hasAACAudio := false, false
+	for _, stream := range metadata.Streams {
+		if stream.Type == "video" && stream.Codec == "h264" {
+			hasH264Video = true
+		}
+		if stream.Type == "audio" && stream.Codec == "aac" {
+			hasAACAudio = true
+		}
+	}
+	if !hasH264Video || !hasAACAudio {
+		return false
+	}
+
+	caps := devices.CurrentCapabilities(device)
+	if caps.SuiteVersion != devices.ProbeSuiteVersion || caps.DeviceID != device.ID || caps.CacheKey == "" || caps.CacheKey != devices.ProbeCacheKey(device) {
+		return false
+	}
+
+	knownLengthStatus, knownLengthFresh := freshProbeOutcome(caps, "http-fmp4", now)
+	chunkedProbe := freshProbe(caps, "http-fmp4-chunked", now)
+	if !knownLengthFresh || chunkedProbe == nil || knownLengthStatus != "PASS" {
+		return false
+	}
+	chunkedStatus := probeOutcome(chunkedProbe)
+	if chunkedStatus == "PASS" {
+		return false
+	}
+	if chunkedProbe.Status == "FAIL" || chunkedProbe.Stalled {
+		return true
+	}
+	return chunkedStatus == "UNKNOWN" && isRecordedChunkedPrepareRejection(chunkedProbe.Detail)
+}
+
+// supportsKnownLengthYouTubeSeek requires the bounded known-length REMUX path
+// plus a fresh suite-2 PASS showing the client can seek within that container.
+func supportsKnownLengthYouTubeSeek(device domain.Device, source domain.Source, metadata *domain.Metadata, mode string, now time.Time) bool {
+	if !requiresKnownLengthYouTubeRemux(device, source, metadata, mode, now) {
+		return false
+	}
+	caps := devices.CurrentCapabilities(device)
+	seekStatus, seekFresh := freshProbeOutcome(caps, "http-fmp4-seek", now)
+	return seekFresh && seekStatus == "PASS"
+}
+
+// freshProbeOutcome follows playback.probeStatus freshness and advancement
+// rules while also reporting whether a fresh record exists. That distinction
+// prevents missing or stale chunked evidence from triggering a transport
+// downgrade.
+func freshProbeOutcome(caps domain.Capabilities, probeID string, now time.Time) (string, bool) {
+	probe := freshProbe(caps, probeID, now)
+	if probe == nil {
+		return "", false
+	}
+	return probeOutcome(probe), true
+}
+
+func freshProbe(caps domain.Capabilities, probeID string, now time.Time) *domain.Probe {
+	nowSeconds := now.Unix()
+	var latest *domain.Probe
+	for index := range caps.Probes {
+		probe := &caps.Probes[index]
+		if probe.ID != probeID {
+			continue
+		}
+		if probe.TestedAt > nowSeconds+300 {
+			if latest == nil {
+				latest = probe
+			}
+			continue
+		}
+		if latest == nil || latest.TestedAt > nowSeconds+300 || probe.TestedAt >= latest.TestedAt {
+			latest = probe
+		}
+	}
+	if latest == nil || latest.TestedAt <= 0 || latest.TestedAt <= nowSeconds-7*24*60*60 || latest.TestedAt > nowSeconds+300 {
+		return nil
+	}
+	return latest
+}
+
+func probeOutcome(probe *domain.Probe) string {
+	if probe.Status == "PASS" && !probe.Stalled && (probe.PositionMS >= 500 || probe.Completed) {
+		return "PASS"
+	}
+	if probe.Status == "FAIL" || probe.Stalled {
+		return "FAIL"
+	}
+	return "UNKNOWN"
+}
+
+func isRecordedChunkedPrepareRejection(detail string) bool {
+	detail = strings.ToLower(detail)
+	for _, evidence := range []string{"@prepare", "what=0", "extra=0", "http=200", "video/mp4"} {
+		if !strings.Contains(detail, evidence) {
+			return false
+		}
+	}
+	return true
 }

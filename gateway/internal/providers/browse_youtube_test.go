@@ -69,3 +69,23 @@ func TestYouTubeBrowseRelatedRejectsInvalidParent(t *testing.T) {
 		t.Fatal("expected error for invalid related parent")
 	}
 }
+
+func TestYouTubeBrowseUsesProviderHomeForEmptyQueryAndPreservesSearch(t *testing.T) {
+	var queries []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query().Get("q"))
+		fmt.Fprint(w, `{"items":[{"id":"aqz-KE-bpKQ","kind":"video","title":"Provider Home"}],"nextOffset":40}`)
+	}))
+	defer upstream.Close()
+	config := Config{URL: upstream.URL, Token: strings.Repeat("s", 32), CatalogID: "curated-news"}
+
+	if _, err := testAdapters.Browse(context.Background(), "youtube", config, "", "", 0); err != nil {
+		t.Fatalf("browse provider home: %v", err)
+	}
+	if _, err := testAdapters.Browse(context.Background(), "youtube", config, "", "keyboard news", 0); err != nil {
+		t.Fatalf("browse explicit search: %v", err)
+	}
+	if len(queries) != 2 || queries[0] != "" || queries[1] != "keyboard news" {
+		t.Fatalf("browse queries = %#v; want empty home query followed by explicit search", queries)
+	}
+}

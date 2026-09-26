@@ -18,7 +18,8 @@ async function run() {
     po_token: poToken,
     visitor_data: visitorData,
   });
-  if (operation === "browse") return browse(yt, workerData.parent, query, workerData.offset);
+  if (operation === "browse")
+    return browse(yt, workerData.parent ?? "", query ?? "", workerData.offset ?? 0);
   if (operation === "catalog") {
     const feed = query ? await yt.search(query, { type: "video" }) : await yt.getHomeFeed();
     const items = [];

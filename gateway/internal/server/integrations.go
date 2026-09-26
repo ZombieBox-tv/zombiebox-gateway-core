@@ -200,3 +200,34 @@ func (s *Server) playerCommand(w http.ResponseWriter, r *http.Request, d domain.
 	s.events.publish("", "player.changed", map[string]string{"provider": "spotify"})
 	respond(w, 200, map[string]bool{"accepted": true})
 }
+
+func (s *Server) airplayPlayerCommand(w http.ResponseWriter, r *http.Request, d domain.Device) {
+	if !s.mediaReceiverInbox.OwnedAirPlay(d.ID) && !s.admin(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var command struct {
+		Action string `json:"action"`
+	}
+	if err := decoder.Decode(&command); err != nil || decoder.Decode(new(any)) != io.EOF {
+		fail(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if command.Action != "playpause" && command.Action != "next" && command.Action != "previous" {
+		fail(w, http.StatusBadRequest, "invalid_player_command")
+		return
+	}
+	c := s.config(r.Context(), "airplay")
+	if !c.Enabled {
+		fail(w, http.StatusConflict, "provider_disabled")
+		return
+	}
+	if s.deps.Player.AirPlayCommand(r.Context(), c, command.Action) != nil {
+		fail(w, http.StatusBadGateway, "player_unavailable")
+		return
+	}
+	s.events.publish("", "player.changed", map[string]string{"provider": "airplay"})
+	respond(w, http.StatusOK, map[string]bool{"accepted": true})
+}

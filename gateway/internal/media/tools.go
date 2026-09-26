@@ -156,7 +156,7 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	if selection.PositionMS > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(float64(selection.PositionMS)/1000, 'f', 3, 64))
 	}
-	if pcmStream {
+	if pcmStream && len(manifestKind) > 0 && manifestKind[0] == "hls" {
 		// HLS live playlists are short windows. Start from the newest listed
 		// segment for PCM receiver streams instead of replaying FFmpeg's default
 		// three-segment live buffer.
@@ -173,12 +173,15 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 		args = append(args, "-i", audioInput)
 		audio = "1:a:0"
 	}
-	if selection.AudioID != nil {
+	// A separate audio input has its own stream indexes. An index carried from
+	// the previous combined rendition belongs to input 0 and must not override
+	// the explicit input-1 audio map.
+	if selection.AudioID != nil && audioInput == "" {
 		audio = "0:" + strconv.Itoa(*selection.AudioID)
 	}
 	if pcmStream {
-		// This private output is a single raw PCM audio stream. It is only
-		// admitted by RemoteTools after the live HLS bridge and probe checks.
+		// This private output is a single raw PCM audio stream. RemoteTools
+		// admits it only after the live source and advancing device probe checks.
 		args = append(args, "-map", audio, "-vn", "-sn", "-dn", "-map_metadata", "-1")
 	} else {
 		args = append(args, "-map", "0:v:0?", "-map", audio, "-sn", "-dn", "-map_metadata", "-1")
@@ -207,7 +210,13 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 		args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
 	}
 	if err := t.runner.Run(ctx, t.ffmpeg, args, output); err != nil {
-		return toolError(ctx, "conversion_failed")
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return conversionProcessFailure(err)
 	}
 	return nil
 }

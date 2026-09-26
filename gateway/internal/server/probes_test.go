@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,8 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"zombiebox.local/gateway/internal/domain"
 )
@@ -364,6 +367,124 @@ func TestAudioOnlyMPEGTSProbeIsExtendedAndTyped(t *testing.T) {
 	}
 }
 
+func TestPacedMPEGTSProbeUsesSignedKnownLengthResponse(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	fixture := bytes.Repeat([]byte("paced-mpegts-h264-aac-fixture-"), 15000)
+	if err := os.WriteFile(filepath.Join(s.opt.ProbeDir, "baseline.ts"), fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "paced-mpegts-probe-device")
+
+	legacy := call(s, http.MethodGet, "/v1/probes", "", "paced-mpegts-probe-device", token, "")
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("expected suite 1 manifest, got %d", legacy.Code)
+	}
+	var legacyManifest struct{ Probes []probeAsset }
+	if err := json.Unmarshal(legacy.Body.Bytes(), &legacyManifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range legacyManifest.Probes {
+		if asset.ID == "mpegts-h264-aac-paced" {
+			t.Fatal("paced MPEG-TS playback probe must be absent from suite 1")
+		}
+	}
+
+	manifest := call(s, http.MethodGet, "/v1/probes?suite=2", "", "paced-mpegts-probe-device", token, "")
+	if manifest.Code != http.StatusOK {
+		t.Fatalf("expected suite 2 manifest, got %d", manifest.Code)
+	}
+	var listing struct {
+		SuiteVersion int
+		Probes       []probeAsset
+	}
+	if err := json.Unmarshal(manifest.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	var paced *probeAsset
+	for i := range listing.Probes {
+		if listing.Probes[i].ID == "mpegts-h264-aac-paced" {
+			paced = &listing.Probes[i]
+			break
+		}
+	}
+	if listing.SuiteVersion != 2 || paced == nil || !paced.Video || paced.Kind != "playback" {
+		t.Fatalf("suite 2 must expose the paced H.264/AAC video probe: suite=%d asset=%+v", listing.SuiteVersion, paced)
+	}
+
+	server := httptest.NewServer(s)
+	defer server.Close()
+	started := time.Now()
+	response, err := http.Get(server.URL + paced.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(started)
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "video/mp2t" {
+		t.Fatalf("unexpected paced MPEG-TS response: status=%d mime=%q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	if response.Header.Get("Content-Length") != strconv.Itoa(len(fixture)) || response.ContentLength != int64(len(fixture)) {
+		t.Fatalf("expected exact Content-Length %d, header=%q parsed=%d", len(fixture), response.Header.Get("Content-Length"), response.ContentLength)
+	}
+	if len(response.TransferEncoding) != 0 || response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected non-chunked no-store response, transfer=%v cache=%q", response.TransferEncoding, response.Header.Get("Cache-Control"))
+	}
+	if !bytes.Equal(body, fixture) {
+		t.Fatal("paced MPEG-TS response bytes differ from the fixed fixture")
+	}
+	if elapsed < pacedMPEGTSProbeDuration-150*time.Millisecond || elapsed > pacedMPEGTSProbeDuration+2*time.Second {
+		t.Fatalf("paced response took %s, expected approximately %s and below the bounded window", elapsed, pacedMPEGTSProbeDuration)
+	}
+
+	badURL, err := url.Parse(paced.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := badURL.Query()
+	query.Set("ticket", "tampered")
+	badURL.RawQuery = query.Encode()
+	if rejected := call(s, http.MethodGet, badURL.String(), "", "", "", ""); rejected.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for a tampered paced-probe ticket, got %d", rejected.Code)
+	}
+}
+
+func TestPacedMPEGTSProbeStopsAfterRequestCancellation(t *testing.T) {
+	fixture := bytes.Repeat([]byte("paced-mpegts-cancel-fixture-"), 2400)
+	path := filepath.Join(t.TempDir(), "baseline.ts")
+	if err := os.WriteFile(path, fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recorder := &cancelOnProbeWrite{ResponseRecorder: httptest.NewRecorder(), cancel: cancel}
+	started := time.Now()
+	streamPacedProbe(ctx, recorder, f, "video/mp2t", 400*time.Millisecond)
+	elapsed := time.Since(started)
+	if recorder.writes != 1 || recorder.Body.Len() != pacedProbeChunkSize {
+		t.Fatalf("expected one first chunk before cancellation, writes=%d bytes=%d", recorder.writes, recorder.Body.Len())
+	}
+	if recorder.Header().Get("Content-Length") != strconv.Itoa(len(fixture)) || recorder.Header().Get("Content-Type") != "video/mp2t" {
+		t.Fatalf("paced cancellation lost response framing: headers=%v", recorder.Header())
+	}
+	if !bytes.Equal(recorder.Body.Bytes(), fixture[:pacedProbeChunkSize]) {
+		t.Fatal("paced cancellation wrote bytes beyond the first chunk")
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("paced stream did not stop promptly after cancellation: %s", elapsed)
+	}
+}
+
 type flushCountingRecorder struct {
 	*httptest.ResponseRecorder
 	flushCount int
@@ -533,5 +654,158 @@ func TestChunkedMP3ProbeUsesAudioMIMEAndUnknownLength(t *testing.T) {
 	body, err := io.ReadAll(response.Body)
 	if err != nil || !bytes.Equal(body, fixture) {
 		t.Fatalf("chunked MP3 body mismatch: %v", err)
+	}
+}
+
+func TestChunkedFMP4ProbeUsesSameSignedAssetAndHTTPFraming(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	fixture := bytes.Repeat([]byte("fragmented-mp4-probe-fixture"), 1200)
+	if err := os.WriteFile(filepath.Join(s.opt.ProbeDir, "fragmented.mp4"), fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "fmp4-chunked-device")
+
+	legacy := call(s, http.MethodGet, "/v1/probes", "", "fmp4-chunked-device", token, "")
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("expected suite 1 manifest, got %d", legacy.Code)
+	}
+	var legacyManifest struct{ Probes []probeAsset }
+	if err := json.Unmarshal(legacy.Body.Bytes(), &legacyManifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range legacyManifest.Probes {
+		if asset.ID == "http-fmp4-chunked" || asset.ID == "http-fmp4-seek" {
+			t.Fatal("extended fMP4 probes must be absent from suite 1")
+		}
+	}
+
+	manifest := call(s, http.MethodGet, "/v1/probes?suite=2", "", "fmp4-chunked-device", token, "")
+	if manifest.Code != http.StatusOK {
+		t.Fatalf("expected suite 2 manifest, got %d", manifest.Code)
+	}
+	var listing struct {
+		SuiteVersion int
+		Probes       []probeAsset
+	}
+	if err := json.Unmarshal(manifest.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	var knownLength, chunked, seek *probeAsset
+	for i := range listing.Probes {
+		switch listing.Probes[i].ID {
+		case "http-fmp4":
+			knownLength = &listing.Probes[i]
+		case "http-fmp4-chunked":
+			chunked = &listing.Probes[i]
+		case "http-fmp4-seek":
+			seek = &listing.Probes[i]
+		}
+	}
+	if listing.SuiteVersion != 2 || knownLength == nil || chunked == nil || seek == nil || seek.Kind != "seek-midstream" {
+		t.Fatalf("suite 2 must contain fMP4 transport and midstream seek probes: %+v", listing)
+	}
+	var knownDefinition, chunkedDefinition probeAsset
+	for _, asset := range probeAssets {
+		switch asset.ID {
+		case "http-fmp4":
+			knownDefinition = asset
+		case "http-fmp4-chunked":
+			chunkedDefinition = asset
+		}
+	}
+	if knownDefinition.File != "fragmented.mp4" || chunkedDefinition.File != knownDefinition.File || !knownLength.Video || !chunked.Video || chunked.Kind != "playback" {
+		t.Fatalf("fMP4 probes must use the same video source and run as playback: known=%+v chunked=%+v", *knownLength, *chunked)
+	}
+
+	server := httptest.NewServer(s)
+	defer server.Close()
+	get := func(path string) *http.Response {
+		t.Helper()
+		response, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	knownResponse := get(knownLength.URL)
+	defer knownResponse.Body.Close()
+	knownBytes, err := io.ReadAll(knownResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if knownResponse.StatusCode != http.StatusOK || knownResponse.ProtoMajor != 1 || knownResponse.Header.Get("Content-Type") != "video/mp4" {
+		t.Fatalf("unexpected known-length fMP4 response: status=%d proto=%s mime=%q", knownResponse.StatusCode, knownResponse.Proto, knownResponse.Header.Get("Content-Type"))
+	}
+	if knownResponse.ContentLength != int64(len(fixture)) || knownResponse.Header.Get("Content-Length") == "" || len(knownResponse.TransferEncoding) != 0 {
+		t.Fatalf("expected known Content-Length, got header=%q parsed=%d transfer=%v", knownResponse.Header.Get("Content-Length"), knownResponse.ContentLength, knownResponse.TransferEncoding)
+	}
+	if !bytes.Equal(knownBytes, fixture) {
+		t.Fatal("known-length fMP4 response did not match fragmented.mp4 fixture")
+	}
+
+	chunkedResponse := get(chunked.URL)
+	defer chunkedResponse.Body.Close()
+	chunkedBytes, err := io.ReadAll(chunkedResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunkedResponse.StatusCode != http.StatusOK || chunkedResponse.ProtoMajor != 1 || chunkedResponse.Header.Get("Content-Type") != "video/mp4" {
+		t.Fatalf("unexpected chunked fMP4 response: status=%d proto=%s mime=%q", chunkedResponse.StatusCode, chunkedResponse.Proto, chunkedResponse.Header.Get("Content-Type"))
+	}
+	if chunkedResponse.ContentLength >= 0 || chunkedResponse.Header.Get("Content-Length") != "" || len(chunkedResponse.TransferEncoding) != 1 || chunkedResponse.TransferEncoding[0] != "chunked" {
+		t.Fatalf("expected HTTP/1.1 chunked response with unknown length, header=%q parsed=%d transfer=%v", chunkedResponse.Header.Get("Content-Length"), chunkedResponse.ContentLength, chunkedResponse.TransferEncoding)
+	}
+	if !bytes.Equal(chunkedBytes, knownBytes) {
+		t.Fatal("chunked fMP4 response bytes differ from http-fmp4")
+	}
+
+	wrongAssetURL := strings.Replace(chunked.URL, "http-fmp4-chunked", "http-fmp4", 1)
+	invalid, err := http.Get(server.URL + wrongAssetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, invalid.Body)
+	invalid.Body.Close()
+	if invalid.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected a ticket scoped to http-fmp4-chunked, got %d", invalid.StatusCode)
+	}
+}
+
+type cancelOnProbeWrite struct {
+	*httptest.ResponseRecorder
+	cancel context.CancelFunc
+	writes int
+}
+
+func (w *cancelOnProbeWrite) Write(p []byte) (int, error) {
+	w.writes++
+	n, err := w.ResponseRecorder.Write(p)
+	w.cancel()
+	return n, err
+}
+
+func TestChunkedProbeStopsReadingAfterRequestCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fragmented.mp4")
+	fixture := bytes.Repeat([]byte("fragmented-mp4-probe-fixture"), 1200)
+	if err := os.WriteFile(path, fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recorder := &cancelOnProbeWrite{ResponseRecorder: httptest.NewRecorder(), cancel: cancel}
+	streamChunkedProbe(ctx, recorder, f, "video/mp4")
+	if recorder.writes != 1 || recorder.Body.Len() != 16<<10 {
+		t.Fatalf("expected exactly the first 16 KiB chunk before cancellation, writes=%d bytes=%d", recorder.writes, recorder.Body.Len())
+	}
+	if !bytes.Equal(recorder.Body.Bytes(), fixture[:16<<10]) {
+		t.Fatal("canceled stream wrote bytes outside the first chunk")
 	}
 }

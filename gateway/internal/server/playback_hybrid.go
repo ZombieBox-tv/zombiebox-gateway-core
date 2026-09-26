@@ -30,7 +30,8 @@ const (
 	defaultMaxConcurrentHybrid           = 2
 )
 
-// hybridSpool tracks a single bounded on-disk conversion for HYBRID mode.
+// hybridSpool tracks bounded on-disk conversion for HYBRID and selected finite
+// YouTube REMUX sessions that require a known-length response.
 // Android AVAPIMediaPlayer on legacy Google TV (API 13) requires a definitive
 // Content-Length header and rejects HTTP chunked transfer encoding at end of
 // headers before reading fragments. Disk spooling provides an exact byte count,

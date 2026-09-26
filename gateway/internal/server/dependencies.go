@@ -44,6 +44,7 @@ type Player interface {
 	SpotifyStatus(context.Context, domain.Config) (domain.NowPlaying, error)
 	SpotifyAuthorization(context.Context, domain.Config) (domain.AuthorizationPrompt, error)
 	SpotifyCommand(context.Context, domain.Config, domain.PlayerCommand) error
+	AirPlayCommand(context.Context, domain.Config, string) error
 }
 type Browser interface {
 	BrowserRequest(context.Context, domain.Config, string, string, any) ([]byte, error)

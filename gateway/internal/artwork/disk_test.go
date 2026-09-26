@@ -77,8 +77,17 @@ func TestDiskExpiryCorruptionAndEviction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := make([]byte, 100<<10)
-	data[0], data[1] = 0xff, 0xd8
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 4, 4)), nil); err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 0, 100<<10)
+	data = append(data, encoded.Bytes()[:encoded.Len()-2]...)
+	for _, payloadLength := range []int{50_000, 50_000} {
+		data = append(data, 0xff, 0xfe, byte((payloadLength+2)>>8), byte(payloadLength+2))
+		data = append(data, bytes.Repeat([]byte{'x'}, payloadLength)...)
+	}
+	data = append(data, 0xff, 0xd9)
 	first, second, third := sha256.Sum256([]byte("first")), sha256.Sum256([]byte("second")), sha256.Sum256([]byte("third"))
 	expires := time.Now().Add(time.Hour)
 	disk.Put(first, data, expires)

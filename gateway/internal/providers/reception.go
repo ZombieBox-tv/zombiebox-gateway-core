@@ -18,16 +18,26 @@ func (a *Adapters) Reception(ctx context.Context, provider string, config Config
 		return &source, state, nil
 	}
 	if provider == "airplay" {
-		sources, connected, audioActive, hasTrackMetadata, err := a.airplaySources(ctx, config)
+		sources, connected, audioActive, hasTrackMetadata, progress, err := a.airplaySources(ctx, config)
 		state := domain.NowPlaying{Provider: provider, State: "STOPPED"}
 		if err != nil {
 			return nil, state, err
+		}
+		// A mirrored screen carries audio too. A ready video source is stronger
+		// evidence than the simultaneously active audio-only receiver stream.
+		for _, source := range sources {
+			if source.Item.Kind == "video" && source.Item.Playable {
+				state.State = "PLAYING"
+				state.Item = &source.Item
+				return &source, state, nil
+			}
 		}
 		if audioActive && (hasTrackMetadata || connected) {
 			for _, source := range sources {
 				if source.Item.Kind == "audio" && source.Item.Playable {
 					state.State = "PLAYING"
 					state.Item = &source.Item
+					applyAirplayProgress(&state, progress)
 					return &source, state, nil
 				}
 			}
@@ -36,6 +46,7 @@ func (a *Adapters) Reception(ctx context.Context, provider string, config Config
 			if source.Item.Playable {
 				state.State = "PLAYING"
 				state.Item = &source.Item
+				applyAirplayProgress(&state, progress)
 				return &source, state, nil
 			}
 		}
@@ -50,7 +61,19 @@ func (a *Adapters) Reception(ctx context.Context, provider string, config Config
 				}
 			}
 		}
+		applyAirplayProgress(&state, progress)
 		return nil, state, nil
 	}
 	return nil, domain.NowPlaying{}, errors.New("receiver unavailable")
+}
+
+func applyAirplayProgress(state *domain.NowPlaying, progress airplaySenderProgress) {
+	if !progress.Known || state.Item == nil || state.Item.Kind != "audio" {
+		return
+	}
+	state.PositionKnown = true
+	state.PositionMS = progress.PositionMS
+	state.DurationMS = progress.DurationMS
+	state.PositionAgeMS = progress.AgeMS
+	state.Item.DurationMS = progress.DurationMS
 }

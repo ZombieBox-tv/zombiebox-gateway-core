@@ -68,6 +68,62 @@ func TestReceiverFilesAndPrivateBoundary(t *testing.T) {
 	}
 }
 
+func TestAirPlayControlRequiresAuthenticationCredentialsAndFiniteCommand(t *testing.T) {
+	dir := t.TempDir()
+	config := Config{Mode: "airplay", Token: strings.Repeat("t", 32), StateDir: dir, Pin: "0427"}
+	resolver := &fakeDACPResolver{services: []DACPService{matchingDACPService("192.168.1.42")}}
+	var requestHost, requestPath, activeRemote string
+	dacpHTTP := &http.Client{Transport: dacpRoundTripper(func(request *http.Request) (*http.Response, error) {
+		requestHost = request.URL.Host
+		requestPath = request.URL.Path
+		activeRemote = request.Header.Get("Active-Remote")
+		return response(http.StatusNoContent, "", request), nil
+	})}
+	handler := handlerWithAirPlayDACP(context.Background(), config, nil, nil, resolver, dacpHTTP)
+	request := func(body, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/control", strings.NewReader(body))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, req)
+		return result
+	}
+	commandBody := `{"command":"previtem"}`
+	if result := request(commandBody, ""); result.Code != http.StatusUnauthorized || resolver.calls != 0 {
+		t.Fatalf("unauthenticated control: status=%d lookups=%d", result.Code, resolver.calls)
+	}
+	if result := request(commandBody, config.Token); result.Code != http.StatusConflict || resolver.calls != 0 {
+		t.Fatalf("disconnected control: status=%d lookups=%d", result.Code, resolver.calls)
+	}
+	if result := request(`{"command":"volumeup"}`, config.Token); result.Code != http.StatusBadRequest || resolver.calls != 0 {
+		t.Fatalf("unlisted control: status=%d lookups=%d", result.Code, resolver.calls)
+	}
+	if result := request(`{"command":"nextitem","extra":true}`, config.Token); result.Code != http.StatusBadRequest || resolver.calls != 0 {
+		t.Fatalf("unknown JSON field: status=%d lookups=%d", result.Code, resolver.calls)
+	}
+	if result := request(`{"command":"nextitem"} {}`, config.Token); result.Code != http.StatusBadRequest || resolver.calls != 0 {
+		t.Fatalf("trailing JSON value: status=%d lookups=%d", result.Code, resolver.calls)
+	}
+	if result := request(`{"command":"nextitem","padding":"`+strings.Repeat("x", 1024)+`"}`, config.Token); result.Code != http.StatusBadRequest || resolver.calls != 0 {
+		t.Fatalf("oversized JSON body: status=%d lookups=%d", result.Code, resolver.calls)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "receiver.dacp"), []byte(testDACPIdentifier+"\n"+testActiveRemote+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result := request(commandBody, config.Token)
+	if result.Code != http.StatusNoContent || resolver.calls != 1 {
+		t.Fatalf("valid control: status=%d lookups=%d body=%q", result.Code, resolver.calls, result.Body.String())
+	}
+	if requestHost != "192.168.1.42:50200" || requestPath != "/ctrl-int/1/previtem" || activeRemote != testActiveRemote {
+		t.Fatalf("DACP request target or command incorrect: host=%q path=%q tokenPresent=%t", requestHost, requestPath, activeRemote == testActiveRemote)
+	}
+	if strings.Contains(result.Body.String(), testActiveRemote) {
+		t.Fatal("Active-Remote leaked through the worker response")
+	}
+}
+
 func TestPCMBridgeProducesMP3(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg required")
@@ -247,6 +303,35 @@ func TestAirplayHLSReadinessAndMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestAirPlayVideoRequiresReadySegmentNotJustManifest(t *testing.T) {
+	dir := t.TempDir()
+	hlsDir := filepath.Join(dir, "hls")
+	if err := os.MkdirAll(hlsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nsegment0.ts\n"
+	if err := os.WriteFile(filepath.Join(hlsDir, "index.m3u8"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if video, _ := airplayStreamActivity(dir); video {
+		t.Fatal("fresh playlist without a completed segment reported video")
+	}
+	segment := filepath.Join(hlsDir, "segment0.ts")
+	if err := os.WriteFile(segment, make([]byte, 16<<10), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if video, _ := airplayStreamActivity(dir); !video {
+		t.Fatal("fresh playlist with a complete segment did not report video")
+	}
+	old := time.Now().Add(-30 * time.Second)
+	if err := os.Chtimes(segment, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if video, _ := airplayStreamActivity(dir); video {
+		t.Fatal("stale segment reported live video")
+	}
+}
+
 func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
 	dir := t.TempDir()
 	hlsDir := filepath.Join(dir, "hls")
@@ -306,8 +391,8 @@ func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
 		"title": "Current Song", "artist": "Current Artist",
 	})
 	artwork := request("/artwork?rev=" + artworkRevision)
-	if artwork.Code != http.StatusOK || string(artwork.Body.Bytes()) != string(cover) {
-		t.Fatalf("active stream artwork unavailable: code=%d body=%x", artwork.Code, artwork.Body.Bytes())
+	if artwork.Code != http.StatusNotFound {
+		t.Fatalf("unassociated artwork was served: code=%d body=%x", artwork.Code, artwork.Body.Bytes())
 	}
 
 	if err := os.Remove(filepath.Join(hlsDir, "audio.m3u8")); err != nil {
@@ -357,8 +442,21 @@ func TestAirplayStatusReturnsOnlyOpaqueConnectionEvidence(t *testing.T) {
 	if err := json.Unmarshal(status["connectionRevision"], &revision); err != nil || len(revision) != 16 {
 		t.Fatalf("opaque revision missing or unbounded: %s", w.Body.Bytes())
 	}
-	if len(status) != 5 {
+	if len(status) != 7 {
 		t.Fatalf("unexpected private status fields: %s", w.Body.Bytes())
+	}
+	var artworkRevision string
+	if err := json.Unmarshal(status["artworkRevision"], &artworkRevision); err != nil || artworkRevision != "" {
+		t.Fatalf("unassociated artwork exposed a revision: %s", w.Body.Bytes())
+	}
+	var progressKnown bool
+	if err := json.Unmarshal(status["progressKnown"], &progressKnown); err != nil || progressKnown {
+		t.Fatalf("absent sender progress must remain unknown: %s", w.Body.Bytes())
+	}
+	for _, field := range []string{"positionMs", "durationMs", "positionAgeMs"} {
+		if _, exists := status[field]; exists {
+			t.Fatalf("unknown sender position included %q: %s", field, w.Body.Bytes())
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -241,7 +242,37 @@ func (s *Server) modules(w http.ResponseWriter, r *http.Request, d domain.Device
 	respond(w, 200, map[string]any{"apiVersion": 1, "modules": s.moduleList(r.Context())})
 }
 func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
-	sources, err := s.screenSources(r.Context(), d.ID, r.URL.Query().Get("provider"), r.URL.Query().Get("q"))
+	scope := r.URL.Query().Get("provider")
+	query := r.URL.Query().Get("q")
+	search := strings.ToLower(strings.TrimSpace(query))
+	activityCursor := r.URL.Query().Get("activityCursor")
+	if activityCursor != "" && (scope != "youtube" || search != "") {
+		fail(w, 400, "invalid_activity_cursor")
+		return
+	}
+	if scope == "youtube" && search == "" {
+		if activityCursor != "" {
+			s.youtubeActivityHome(w, r, d, activityCursor)
+			return
+		}
+		activity, err := s.youtubeActivityRecords(r.Context(), d.ID)
+		if err != nil {
+			fail(w, 500, "storage_error")
+			return
+		}
+		items, next, hasActivity := youtubeActivityPageFromRecords(activity, nil)
+		if hasActivity {
+			recommendationContext, cancel := context.WithTimeout(r.Context(), youtubeActivityRecommendationTimeout)
+			recommendations := s.youtubeActivityRecommendations(recommendationContext, d.ID, activity)
+			cancel()
+			if r.Context().Err() != nil {
+				return
+			}
+			s.respondYouTubeActivity(w, items, next, recommendations)
+			return
+		}
+	}
+	sources, err := s.screenSources(r.Context(), d.ID, scope, query)
 	if err != nil {
 		fail(w, 502, "search_unavailable")
 		return
@@ -252,8 +283,6 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		return
 	}
 	screen := domain.Screen{APIVersion: 1, UIVersion: 1, Screen: "home", Sections: []domain.Section{}}
-	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	scope := r.URL.Query().Get("provider")
 	rows := map[string][]domain.Item{}
 	available := map[string]domain.Item{}
 	for _, src := range sources {
@@ -268,6 +297,14 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 			continue
 		}
 		rows[src.Item.Provider] = append(rows[src.Item.Provider], src.Item)
+	}
+	if scope == "youtube" && search == "" {
+		s.mu.Lock()
+		feed := s.youtubeHomeFeeds[d.ID]
+		if feed.revision == s.configRevision["youtube"] {
+			screen.NextOffset = feed.nextOffset
+		}
+		s.mu.Unlock()
 	}
 	if search == "" && scope == "" {
 		stored, _ := s.db.List(r.Context(), "progress:"+d.ID)
@@ -311,8 +348,12 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		if len(items) == 0 {
 			continue
 		}
-		if len(items) > 10 {
-			items = items[:10]
+		limit := 10
+		if id == "youtube" && scope == "youtube" && search == "" {
+			limit = 40
+		}
+		if len(items) > limit {
+			items = items[:limit]
 		}
 		kind := "landscape_row"
 		if id == "iptv" {
@@ -325,4 +366,159 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		screen.Hero = s.heroes.Select(r.Context(), d.ID, scope, screen.Sections)
 	}
 	respond(w, 200, screen)
+}
+
+const youtubeActivityPageSize = 40
+
+type youtubeActivityCursor struct {
+	UpdatedAt int64  `json:"t"`
+	ItemID    string `json:"i"`
+}
+
+func encodeYouTubeActivityCursor(cursor youtubeActivityCursor) string {
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeYouTubeActivityCursor(raw string) (*youtubeActivityCursor, error) {
+	if len(raw) > 512 {
+		return nil, errors.New("activity cursor too long")
+	}
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, errors.New("invalid activity cursor")
+	}
+	var cursor youtubeActivityCursor
+	if err := json.Unmarshal(data, &cursor); err != nil ||
+		cursor.UpdatedAt <= 0 ||
+		cursor.ItemID == "" ||
+		len(cursor.ItemID) > 256 ||
+		strings.ContainsAny(cursor.ItemID, "\x00\r\n") {
+		return nil, errors.New("invalid activity cursor")
+	}
+	return &cursor, nil
+}
+
+func (s *Server) youtubeActivityHome(w http.ResponseWriter, r *http.Request, d domain.Device, rawCursor string) {
+	cursor, err := decodeYouTubeActivityCursor(rawCursor)
+	if err != nil {
+		fail(w, 400, "invalid_activity_cursor")
+		return
+	}
+	items, next, _, err := s.youtubeActivityPage(r.Context(), d.ID, cursor)
+	if err != nil {
+		fail(w, 500, "storage_error")
+		return
+	}
+	s.respondYouTubeActivity(w, items, next, nil)
+}
+
+func (s *Server) respondYouTubeActivity(w http.ResponseWriter, items []domain.Item, next string, recommendations []domain.Item) {
+	sections := []domain.Section{}
+	if len(recommendations) > 0 {
+		sections = append(sections, domain.Section{
+			ID:    "youtube-watch-title-suggestions",
+			Type:  "landscape_row",
+			Title: "Title search suggestions from ZombieBox watch activity",
+			Items: recommendations,
+		})
+	}
+	if len(items) > 0 {
+		sections = append(sections, domain.Section{
+			ID:    "youtube-activity",
+			Type:  "landscape_row",
+			Title: "Your ZombieBox YouTube activity",
+			Items: items,
+		})
+	}
+	response := map[string]any{
+		"apiVersion":      1,
+		"uiSchemaVersion": 1,
+		"screen":          "home",
+		"feedType":        "zombiebox_activity",
+		"sections":        sections,
+	}
+	if next != "" {
+		response["nextCursor"] = next
+	}
+	respond(w, 200, response)
+}
+
+func (s *Server) youtubeActivityPage(ctx context.Context, device string, cursor *youtubeActivityCursor) ([]domain.Item, string, bool, error) {
+	records, err := s.youtubeActivityRecords(ctx, device)
+	if err != nil {
+		return nil, "", false, err
+	}
+	items, next, hasActivity := youtubeActivityPageFromRecords(records, cursor)
+	return items, next, hasActivity, nil
+}
+
+func (s *Server) youtubeActivityRecords(ctx context.Context, device string) ([]domain.Progress, error) {
+	stored, err := s.db.List(ctx, "progress:"+device)
+	if err != nil {
+		return nil, err
+	}
+	progress := make([]domain.Progress, 0, len(stored))
+	seen := make(map[string]struct{}, len(stored))
+	for _, raw := range stored {
+		var record domain.Progress
+		if json.Unmarshal(raw, &record) != nil ||
+			record.Item.Provider != "youtube" ||
+			record.Item.Kind != "video" ||
+			!record.Item.Playable ||
+			record.Item.ID == "" ||
+			record.PositionMS <= 0 ||
+			record.UpdatedAt <= 0 {
+			continue
+		}
+		if _, exists := seen[record.Item.ID]; exists {
+			continue
+		}
+		seen[record.Item.ID] = struct{}{}
+		progress = append(progress, record)
+	}
+	if len(progress) == 0 {
+		return progress, nil
+	}
+	sort.Slice(progress, func(i, j int) bool {
+		if progress[i].UpdatedAt != progress[j].UpdatedAt {
+			return progress[i].UpdatedAt > progress[j].UpdatedAt
+		}
+		return progress[i].Item.ID < progress[j].Item.ID
+	})
+	return progress, nil
+}
+
+func youtubeActivityPageFromRecords(progress []domain.Progress, cursor *youtubeActivityCursor) ([]domain.Item, string, bool) {
+	if len(progress) == 0 {
+		return nil, "", false
+	}
+	filtered := make([]domain.Progress, 0, len(progress))
+	for _, record := range progress {
+		if cursor != nil {
+			if record.UpdatedAt > cursor.UpdatedAt || (record.UpdatedAt == cursor.UpdatedAt && record.Item.ID <= cursor.ItemID) {
+				continue
+			}
+		}
+		filtered = append(filtered, record)
+	}
+	end := youtubeActivityPageSize
+	if len(filtered) < end {
+		end = len(filtered)
+	}
+	items := make([]domain.Item, 0, end)
+	for _, record := range filtered[:end] {
+		item := record.Item
+		item.PositionMS = record.PositionMS
+		if record.DurationMS > 0 {
+			item.DurationMS = record.DurationMS
+		}
+		items = append(items, item)
+	}
+	next := ""
+	if len(filtered) > end {
+		last := filtered[end-1]
+		next = encodeYouTubeActivityCursor(youtubeActivityCursor{UpdatedAt: last.UpdatedAt, ItemID: last.Item.ID})
+	}
+	return items, next, true
 }

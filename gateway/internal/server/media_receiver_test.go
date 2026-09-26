@@ -40,6 +40,7 @@ func TestMediaReceiverRoutesOwnedSourceAndAuthorizesSpotifyControls(t *testing.T
 	s := testServer(t, nil, t.TempDir())
 	s.SeedProviders(context.Background(), map[string]providers.Config{"spotify": {Enabled: true, URL: upstream.URL, Token: strings.Repeat("s", 32)}})
 	token := pair(t, s, "media-owner")
+	addLiveMP3DirectEvidence(t, s, "media-owner")
 	other := pair(t, s, "media-other")
 	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"spotify"}`, "media-owner", token, ""); w.Code != 200 {
 		t.Fatal(w.Body)
@@ -74,6 +75,125 @@ func TestMediaReceiverRoutesOwnedSourceAndAuthorizesSpotifyControls(t *testing.T
 	json.Unmarshal(blocked.Body.Bytes(), &result)
 	if result.Plan != nil {
 		t.Fatal("dismissed source reopened")
+	}
+}
+
+func addLiveMP3DirectEvidence(t *testing.T, s *Server, deviceID string) {
+	t.Helper()
+	var device domain.Device
+	if err := s.db.Get(t.Context(), "devices", deviceID, &device); err != nil {
+		t.Fatal(err)
+	}
+	device.Capabilities.Probes = append(device.Capabilities.Probes, domain.Probe{
+		ID: "mp3-chunked", Status: "PASS", PositionMS: 1000, TestedAt: time.Now().Unix(),
+	})
+	if err := s.db.Put(t.Context(), "devices", deviceID, device); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSpotifyReceiverWithoutMP3PlaybackEvidenceIsUnavailable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"stopped":false,"track":{"name":"Song","artist_names":["Artist"]}}`)
+	}))
+	defer upstream.Close()
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{
+		"spotify": {Enabled: true, URL: upstream.URL, Token: strings.Repeat("s", 32)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "media-no-mp3-evidence")
+	if response := call(s, "PUT", "/v1/media-receiver", `{"provider":"spotify"}`, "media-no-mp3-evidence", token, ""); response.Code != http.StatusOK {
+		t.Fatalf("Spotify claim: %d %s", response.Code, response.Body)
+	}
+	response := call(s, "GET", "/v1/media-receiver", "", "media-no-mp3-evidence", token, "")
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"code":"receiver_unavailable"`) {
+		t.Fatalf("unprobed Spotify source should remain unavailable: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestAirPlayPlayerCommandRequiresOwnerOrAdminAndMapsAllowedActions(t *testing.T) {
+	privateToken := strings.Repeat("a", 32)
+	var requests atomic.Int32
+	commands := make(chan string, 4)
+	var rejected atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/control" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer "+privateToken {
+			t.Errorf("unexpected worker request: method=%s path=%s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var body struct {
+			Command string `json:"command"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		requests.Add(1)
+		commands <- body.Command
+		if rejected.Load() {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	s := testServer(t, nil, t.TempDir())
+	s.opt.PairingCode = "123456"
+	if err := s.SeedProviders(context.Background(), map[string]providers.Config{
+		"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ownerToken := pair(t, s, "airplay-owner")
+	otherToken := pair(t, s, "airplay-other")
+	if response := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, "airplay-owner", ownerToken, ""); response.Code != http.StatusOK {
+		t.Fatalf("AirPlay claim: %d %s", response.Code, response.Body)
+	}
+	if response := call(s, "POST", "/v1/player/airplay", `{"action":"playpause"}`, "airplay-owner", ownerToken, ""); response.Code != http.StatusOK {
+		t.Fatalf("owner command: %d %s", response.Code, response.Body)
+	}
+	if got := <-commands; got != "playpause" {
+		t.Fatalf("private command = %q, want playpause", got)
+	}
+	if response := call(s, "POST", "/v1/player/airplay", `{"action":"next"}`, "airplay-other", otherToken, ""); response.Code != http.StatusForbidden {
+		t.Fatalf("foreign command was accepted: %d %s", response.Code, response.Body)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("foreign request reached worker: %d", requests.Load())
+	}
+	if response := call(s, "POST", "/v1/player/airplay", `{"action":"../control"}`, "airplay-owner", ownerToken, ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("arbitrary action was accepted: %d %s", response.Code, response.Body)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("invalid request reached worker: %d", requests.Load())
+	}
+	if response := call(s, "POST", "/v1/player/airplay", `{"action":"previous"}`, "airplay-other", otherToken, "123456"); response.Code != http.StatusOK {
+		t.Fatalf("admin command: %d %s", response.Code, response.Body)
+	}
+	if got := <-commands; got != "previtem" {
+		t.Fatalf("admin private command = %q, want previtem", got)
+	}
+	if response := call(s, "POST", "/v1/player/airplay", `{"action":"next"}`, "airplay-owner", ownerToken, ""); response.Code != http.StatusOK {
+		t.Fatalf("owner next command: %d %s", response.Code, response.Body)
+	}
+	if got := <-commands; got != "nextitem" {
+		t.Fatalf("private next command = %q, want nextitem", got)
+	}
+	rejected.Store(true)
+	failed := call(s, "POST", "/v1/player/airplay", `{"action":"next"}`, "airplay-owner", ownerToken, "")
+	if failed.Code != http.StatusBadGateway {
+		t.Fatalf("worker failure was not reported: %d %s", failed.Code, failed.Body)
+	}
+	if strings.Contains(failed.Body.String(), privateToken) {
+		t.Fatal("private worker token leaked in public response")
 	}
 }
 
@@ -207,6 +327,7 @@ func TestSpotifyMetadataPauseAndNaturalEndKeepThenRevokeStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	token := pair(t, s, "spotify-lifecycle")
+	addLiveMP3DirectEvidence(t, s, "spotify-lifecycle")
 	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"spotify"}`, "spotify-lifecycle", token, ""); w.Code != 200 {
 		t.Fatal(w.Body)
 	}
