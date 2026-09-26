@@ -22,6 +22,7 @@ preserving architectural headroom for future client capability probes.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from media_ranges import validate_media_ranges
@@ -98,14 +99,42 @@ class FormatSelector:
         self,
         formats: List[Dict[str, Any]],
         fetch_func: Optional[Callable[..., Tuple[int, dict, bytes]]] = None,
+        deadline: Optional[float] = None,
     ):
         self.formats = formats or []
+        self.deadline = deadline
+        self.budget_expired = False
+        self._raw_fetch_func = fetch_func
         self.fetch_func = fetch_func
+        if fetch_func is not None and deadline is not None:
+            self.fetch_func = self._fetch_with_deadline
         self._checked: Dict[Tuple[str, int], bool] = {}
         self.saw_403 = False
 
+    def _fetch_with_deadline(self, url: str, headers: dict) -> Tuple[int, dict, bytes]:
+        """Stop starting range requests after the shared resolution deadline."""
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.budget_expired = True
+            raise TimeoutError("YouTube resolution budget expired")
+
+        try:
+            result = self._raw_fetch_func(url, headers)
+        except Exception:
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                self.budget_expired = True
+            raise
+
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.budget_expired = True
+            raise TimeoutError("YouTube resolution budget expired")
+        return result
+
     def validate_format(self, fmt: Dict[str, Any]) -> bool:
         """Validate format URL with head, mid, tail range checks, cached by exact URL and size."""
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.budget_expired = True
+            return False
+
         url = fmt.get("url")
         if not url:
             return False
@@ -118,6 +147,9 @@ class FormatSelector:
         is_valid, saw_403 = validate_media_ranges(
             url, declared_size=declared_size, fetch_func=self.fetch_func
         )
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.budget_expired = True
+            is_valid = False
         if saw_403:
             self.saw_403 = True
 
@@ -172,19 +204,58 @@ class FormatSelector:
             elif acodec == "none":
                 tier_video[tier].append(fmt)
 
+        requested = (
+            target_quality if target_quality and target_quality != "auto" else ""
+        )
+
+        if requested:
+            if requested not in ALLOWED_TIERS:
+                return None, [], self.saw_403
+
+            # Manual selection only probes its requested tier. A validated combined
+            # stream needs no second audio request; split video gets one valid AAC pair.
+            for candidate in tier_combined[requested]:
+                if self.validate_format(candidate):
+                    return (
+                        {
+                            "url": candidate["url"],
+                            "mimeType": "video/mp4",
+                            "variants": [requested],
+                        },
+                        [requested],
+                        self.saw_403,
+                    )
+
+            validated_audio = self.find_validated_audio()
+            if validated_audio:
+                for candidate in tier_video[requested]:
+                    if self.validate_format(candidate):
+                        return (
+                            {
+                                "url": candidate["url"],
+                                "audioUrl": validated_audio["url"],
+                                "mimeType": "video/mp4",
+                                "variants": [requested],
+                            },
+                            [requested],
+                            self.saw_403,
+                        )
+
+            return None, [], self.saw_403
+
+        # Auto inventories all compatible tiers so its menu remains truthful. It
+        # prefers the validated combined 360p stream, then the highest validated tier.
         validated_audio = self.find_validated_audio()
         validated_tier_combined: Dict[str, Dict[str, Any]] = {}
         validated_tier_video: Dict[str, Dict[str, Any]] = {}
         truthful_variants: List[str] = []
 
         for tier in ALLOWED_TIERS:
-            # Check combined
             for candidate in tier_combined[tier]:
                 if self.validate_format(candidate):
                     validated_tier_combined[tier] = candidate
                     break
 
-            # Check adaptive video (requires validated audio)
             if validated_audio:
                 for candidate in tier_video[tier]:
                     if self.validate_format(candidate):
@@ -194,52 +265,29 @@ class FormatSelector:
             if tier in validated_tier_combined or tier in validated_tier_video:
                 truthful_variants.append(tier)
 
-        # Selection logic
         resolved: Optional[Dict[str, Any]] = None
-        requested = (
-            target_quality if target_quality and target_quality != "auto" else ""
-        )
-
-        if requested:
-            if requested in validated_tier_combined:
-                resolved = {
-                    "url": validated_tier_combined[requested]["url"],
-                    "mimeType": "video/mp4",
-                    "variants": truthful_variants,
-                }
-            elif requested in validated_tier_video and validated_audio:
-                resolved = {
-                    "url": validated_tier_video[requested]["url"],
-                    "audioUrl": validated_audio["url"],
-                    "mimeType": "video/mp4",
-                    "variants": truthful_variants,
-                }
+        if "360p" in validated_tier_combined:
+            resolved = {
+                "url": validated_tier_combined["360p"]["url"],
+                "mimeType": "video/mp4",
+                "variants": truthful_variants,
+            }
         else:
-            # Auto requested: Keep Auto's progressive combined H.264/AAC 360p as baseline
-            # if valid, while truthful HD variants remain in the menu for manual selection.
-            if "360p" in validated_tier_combined:
-                resolved = {
-                    "url": validated_tier_combined["360p"]["url"],
-                    "mimeType": "video/mp4",
-                    "variants": truthful_variants,
-                }
-            else:
-                # Fallback chain across tiers: 1080p, 720p, 480p, 360p
-                for tier in ALLOWED_TIERS:
-                    if tier in validated_tier_combined:
-                        resolved = {
-                            "url": validated_tier_combined[tier]["url"],
-                            "mimeType": "video/mp4",
-                            "variants": truthful_variants,
-                        }
-                        break
-                    if tier in validated_tier_video and validated_audio:
-                        resolved = {
-                            "url": validated_tier_video[tier]["url"],
-                            "audioUrl": validated_audio["url"],
-                            "mimeType": "video/mp4",
-                            "variants": truthful_variants,
-                        }
-                        break
+            for tier in ALLOWED_TIERS:
+                if tier in validated_tier_combined:
+                    resolved = {
+                        "url": validated_tier_combined[tier]["url"],
+                        "mimeType": "video/mp4",
+                        "variants": truthful_variants,
+                    }
+                    break
+                if tier in validated_tier_video and validated_audio:
+                    resolved = {
+                        "url": validated_tier_video[tier]["url"],
+                        "audioUrl": validated_audio["url"],
+                        "mimeType": "video/mp4",
+                        "variants": truthful_variants,
+                    }
+                    break
 
         return resolved, truthful_variants, self.saw_403

@@ -6,9 +6,9 @@ Date: 2026-09-25
 
 ## 1. Context and Goal
 
-The baseline ZombieBox YouTube integration (`wrappers/youtube`) uses YouTube.js to provide catalog browsing, channel feeds, and a validated baseline 360p progressive stream (combined H.264/AAC at 30 fps). YouTube's current enforcement varies by player client. Following the [yt-dlp PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/Po-Token-Guide), the optional resolver explicitly selects yt-dlp's `mweb` client and uses the [BgUtils provider plugin](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) for its GVS PO token flow.
+The baseline ZombieBox YouTube integration (`wrappers/youtube`) uses YouTube.js to provide catalog browsing, channel feeds, and a validated baseline 360p progressive stream (combined H.264/AAC at 30 fps). YouTube's current enforcement varies by player client. Following the [yt-dlp PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/Po-Token-Guide), the optional resolver first tries yt-dlp's default clients without plugins, then can select `mweb` and use the [BgUtils provider plugin](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) for its GVS PO token flow.
 
-This increment implements an optional, bounded YouTube HD resolver path for **Full** using `yt-dlp` and a PO Token Provider plugin. It supplements the existing 360p stream with validated H.264 (AVC) <= 30 fps video paired with AAC audio (720p and 1080p tiers) where the source permits, while preserving the YouTube.js catalog, DIAL, and baseline fallback paths. An explicit quality request must resolve to that exact validated tier; it must never receive a 360p response while being treated as HD. Auto and unspecified quality may use the baseline fallback. The provider does not guarantee access to formats, and host extraction or range checks do not prove TV playback. Do not claim above-360p support until the selected physical device completes playback at that quality.
+This increment implements an optional, bounded YouTube HD resolver path for **Full** using `yt-dlp`, with a PO Token Provider as a separate fallback candidate. It supplements the existing 360p stream with validated H.264 (AVC) <= 30 fps video paired with AAC audio (720p and 1080p tiers) where the source permits, while preserving the YouTube.js catalog, DIAL, and baseline fallback paths. An explicit quality request must resolve to that exact validated tier; it must never receive a 360p response while being treated as HD. Auto and unspecified quality may use the baseline fallback. The provider does not guarantee access to formats, and host extraction or range checks do not prove TV playback. Do not claim above-360p support until the selected physical device completes playback at that quality.
 
 ---
 
@@ -28,7 +28,7 @@ Per project requirements, both prominent `yt-dlp` PO Token plugins were evaluate
   - Consists of two components:
     1. A lightweight Node.js/JavaScript HTTP daemon running LuanRT's Botguard interpreter on port 4416. It handles `POST /get_pot` requests with `content_binding` (video ID for video-bound player tokens or visitor data for GVS tokens).
     2. A Python provider plugin for `yt-dlp` that automatically queries this server via `--extractor-args "youtubepot-bgutilhttp:base_url=http://..."`.
-  - The resolver separately selects `youtube:player_client=mweb`, matching yt-dlp's recommended provider-plugin setup for a GVS PO token. It does not reuse the worker's static `poToken` or `visitorData` fields.
+  - The resolver first tries yt-dlp's default player clients with `--no-plugin-dirs`, allowing direct format extraction without a PO-token plugin. If that candidate fails exact-tier validation and the PO path is not in cooldown, it tries `youtube:player_client=mweb` with BgUtils. The PO path does not reuse the worker's static `poToken` or `visitorData` fields, and its 403 cooldown does not prevent a later default-client attempt.
 - **Resource Profile:**
   - **Memory:** Not measured on this deployment. The Compose profile imposes a 256 MiB container limit; actual usage and failure under load require validation.
   - **CPU:** Not measured; challenge generation, yt-dlp extraction and validation each consume CPU and network time.
@@ -112,19 +112,22 @@ The resolver (`gateway-core/wrappers/youtube-pot`) is a bounded, private HTTP ad
      - Mid: `floor(total / 2)` to `floor(total / 2) + 1023`
      - Tail: `total - 1024` to `total - 1`
    - All three probes must return HTTP 206 Partial Content with a valid `Content-Range` matching the requested boundaries. Any failure or HTTP 403 marks the format candidate as invalid.
+   - Manual requests probe only the requested video tier and, for split video, one validated AAC pairing. Auto continues validating its full candidate inventory so its reported variants remain truthful.
    - Range validation cache in `FormatSelector` is keyed strictly by `(url, declared_size)`, never by `format_id` alone. This prevents reusing validation results across different signed URLs sharing the same itag.
 
 5. **Single-Flight Concurrency (`concurrency: 1`):**
    - To prevent memory bloat and rate-limiting bursts, an internal mutex limits video resolution to exactly one active extraction at a time.
    - Concurrent requests immediately receive HTTP 503 `{"error": "busy"}`. The Gateway's existing client retries up to 5 times with exponential backoff.
 
-6. **403 Cooldown & Quality-Truthful Fallback:**
-   - If a 403 Forbidden is encountered from YouTube during extraction or range validation, a 300-second cooldown is activated.
+6. **Default Client, PO Candidate, Cooldown & Quality-Truthful Fallback:**
+   - Default yt-dlp player clients are attempted first with `--no-plugin-dirs`, and candidate formats still require the same codec and range validation.
+   - The mweb/BgUtils PO path is attempted only when the default candidate cannot provide the requested result and the PO cooldown is inactive. A 403 from the PO path during extraction or range validation activates a 300-second cooldown for that path. A default-client 403 does not suppress the distinct PO candidate.
+   - A later request always tries default clients even while the PO path is in cooldown.
    - **Automatic and Unspecified Quality:** During cooldown, extraction failures, or failed rendition validation, these requests may use the upstream YouTube.js worker's baseline stream (`http://youtube:8091`). The resolver does not forward a quality parameter to that baseline worker.
    - **Manual Exact Quality:** Requests for `1080p`, `720p`, `480p`, or `360p` return HTTP 502 with `{"error":"quality_unavailable"}` when the selected tier cannot be resolved and validated. They never silently switch to another tier. The error body contains no extraction details or signed stream URL. Successful selections include `actualHeight` and `actualQuality` when matching numeric height metadata is available; a quality label alone is not treated as proof of the actual height.
 
 7. **Boundedness, Privacy, & Ephemeral Secrets:**
-   - `yt-dlp` extraction has a hard 30-second maximum even if the worker config requests a larger timeout. Stdout is capped at 4 MiB and stderr at 256 KiB; overflow and timeout terminate the entire process group, including a Node.js challenge child. No subprocess output or signed media URL is written to logs.
+   - A single 18-second wall-clock budget covers default extraction, PO fallback, range validation and the automatic baseline fallback, leaving time inside the Gateway's 20-second HTTP client deadline. Each `yt-dlp` process also has a hard 30-second ceiling and receives only the remaining shared budget. Stdout is capped at 4 MiB and stderr at 256 KiB; overflow and timeout terminate the entire process group, including a Node.js challenge child. Range requests use the remaining budget as their network timeout. No subprocess output or signed media URL is written to logs.
    - **Bounded Reads:** Proxying `/catalog` and `/browse` responses caps incoming body size at 8 MiB (matching the Gateway's `providers/http.go` `8<<20` limit). Resolution fallback reads are capped at 1 MiB. Upstream error bodies are capped at 64 KiB.
    - **Safe Error Forwarding:** Upstream error bodies are parsed for JSON errors without echoing raw HTML backtraces, unexpected headers, or cookies.
    - **Log Sanitization:** Authentication bearer tokens and signed googlevideo URL query parameters (which embed client IP and signatures) are redacted from all logging and exception strings.

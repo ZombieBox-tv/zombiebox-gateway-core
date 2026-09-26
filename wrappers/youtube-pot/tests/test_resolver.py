@@ -11,14 +11,16 @@ WRAPPER_DIR = Path(__file__).resolve().parents[1]
 if str(WRAPPER_DIR) not in sys.path:
     sys.path.insert(0, str(WRAPPER_DIR))
 
-from cooldown import CooldownTracker
-from resolver import (
+from cooldown import CooldownTracker  # noqa: E402
+from resolver import (  # noqa: E402
     MANUAL_QUALITIES,
     MAX_UPSTREAM_RESPONSE_BYTES,
     QualityUnavailableError,
+    _ResolutionBudget,
     fallback_to_upstream,
     resolve_video,
     run_bounded_command,
+    run_default_ytdlp_extraction,
     run_ytdlp_extraction,
 )
 
@@ -33,6 +35,37 @@ class ResolverTests(unittest.TestCase):
             "timeout_seconds": 5,
         }
         self.cooldown_tracker = CooldownTracker()
+
+    @staticmethod
+    def default_extractor_unavailable(video_id, timeout_seconds):
+        raise RuntimeError("default client unavailable")
+
+    def resolve_with_default_failure(self, *args, **kwargs):
+        kwargs.setdefault("default_extractor_func", self.default_extractor_unavailable)
+        return resolve_video(*args, **kwargs)
+
+    @staticmethod
+    def combined_format(height, itag):
+        return {
+            "format_id": str(itag),
+            "url": (
+                f"https://rr1.googlevideo.com/videoplayback?itag={itag}&clen=50000"
+            ),
+            "vcodec": "avc1.64001f" if height == 720 else "avc1.640028",
+            "acodec": "mp4a.40.2",
+            "fps": 30,
+            "height": height,
+            "filesize": 50000,
+        }
+
+    @staticmethod
+    def valid_range_fetch(url, headers):
+        start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+        return (
+            206,
+            {"content-range": f"bytes {start}-{end}/50000"},
+            b"x" * (end - start + 1),
+        )
 
     def test_extractor_enables_bundled_ejs_runtime(self):
         completed = subprocess.CompletedProcess(
@@ -57,6 +90,235 @@ class ResolverTests(unittest.TestCase):
             extractor_args,
         )
         self.assertEqual(run.call_args.kwargs["timeout_seconds"], 12)
+
+    def test_default_extractor_disables_plugins_and_uses_default_clients(self):
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout=b'{"formats": []}', stderr=b""
+        )
+        with patch("resolver.run_bounded_command", return_value=completed) as run:
+            run_default_ytdlp_extraction("dQw4w9WgXcQ")
+
+        command = run.call_args.args[0]
+        self.assertIn("--no-plugin-dirs", command)
+        self.assertIn("--js-runtimes", command)
+        self.assertNotIn("--extractor-args", command)
+        self.assertNotIn("bgutil", " ".join(command))
+        self.assertEqual(run.call_args.kwargs["timeout_seconds"], 12)
+
+    def test_default_client_exact_hd_is_preferred_with_truthful_variants(self):
+        po_called = False
+
+        def default_extractor(video_id, timeout_seconds):
+            self.assertEqual(video_id, "dQw4w9WgXcQ")
+            self.assertEqual(timeout_seconds, 5)
+            return {"formats": [self.combined_format(720, 136)]}
+
+        def forbidden_po_extractor(video_id, bgutil_url, timeout_seconds):
+            nonlocal po_called
+            po_called = True
+            self.fail("validated default-client HD should be returned directly")
+
+        result = resolve_video(
+            "dQw4w9WgXcQ",
+            "720p",
+            self.config,
+            self.cooldown_tracker,
+            extractor_func=forbidden_po_extractor,
+            range_fetch_func=self.valid_range_fetch,
+            default_extractor_func=default_extractor,
+        )
+
+        self.assertFalse(po_called)
+        self.assertEqual(result["actualHeight"], 720)
+        self.assertEqual(result["actualQuality"], "720p")
+        self.assertEqual(result["variants"], ["720p"])
+
+    def test_default_403_does_not_block_valid_po_exact_hd(self):
+        def default_extractor(video_id, timeout_seconds):
+            raise PermissionError("default player returned 403")
+
+        def po_extractor(video_id, bgutil_url, timeout_seconds):
+            return {"formats": [self.combined_format(720, 136)]}
+
+        result = resolve_video(
+            "dQw4w9WgXcQ",
+            "720p",
+            self.config,
+            self.cooldown_tracker,
+            extractor_func=po_extractor,
+            range_fetch_func=self.valid_range_fetch,
+            default_extractor_func=default_extractor,
+        )
+
+        self.assertEqual(result["actualQuality"], "720p")
+        self.assertFalse(self.cooldown_tracker.is_in_cooldown())
+
+    def test_default_invalid_range_falls_through_to_valid_po_exact_hd(self):
+        default_format = self.combined_format(1080, 137)
+        default_format["url"] += "&source=default"
+        po_format = self.combined_format(1080, 137)
+        po_format["url"] += "&source=po"
+
+        def default_extractor(video_id, timeout_seconds):
+            return {"formats": [default_format]}
+
+        def po_extractor(video_id, bgutil_url, timeout_seconds):
+            return {"formats": [po_format]}
+
+        def range_fetch(url, headers):
+            if "source=default" in url:
+                return 200, {}, b"invalid range response"
+            return self.valid_range_fetch(url, headers)
+
+        result = resolve_video(
+            "dQw4w9WgXcQ",
+            "1080p",
+            self.config,
+            self.cooldown_tracker,
+            extractor_func=po_extractor,
+            range_fetch_func=range_fetch,
+            default_extractor_func=default_extractor,
+        )
+
+        self.assertEqual(result["actualHeight"], 1080)
+        self.assertEqual(result["actualQuality"], "1080p")
+
+    def test_po_cooldown_does_not_suppress_working_default_hd(self):
+        self.cooldown_tracker.record_403(cooldown_seconds=300)
+
+        def default_extractor(video_id, timeout_seconds):
+            return {"formats": [self.combined_format(720, 136)]}
+
+        def forbidden_po_extractor(video_id, bgutil_url, timeout_seconds):
+            self.fail("PO cooldown must skip the PO candidate")
+
+        result = resolve_video(
+            "dQw4w9WgXcQ",
+            "720p",
+            self.config,
+            self.cooldown_tracker,
+            extractor_func=forbidden_po_extractor,
+            range_fetch_func=self.valid_range_fetch,
+            default_extractor_func=default_extractor,
+        )
+
+        self.assertEqual(result["actualQuality"], "720p")
+        self.assertTrue(self.cooldown_tracker.is_in_cooldown())
+
+    def test_slow_default_candidate_leaves_bounded_time_for_po_fallback(self):
+        config = {**self.config, "timeout_seconds": 12}
+        now = [100.0]
+        po_timeout = None
+
+        def default_extractor(video_id, timeout_seconds):
+            self.assertEqual(timeout_seconds, 12)
+            now[0] += 12.25
+            return {"formats": []}
+
+        def po_extractor(video_id, bgutil_url, timeout_seconds):
+            nonlocal po_timeout
+            po_timeout = timeout_seconds
+            return {"formats": [self.combined_format(720, 136)]}
+
+        with patch("time.monotonic", side_effect=lambda: now[0]):
+            result = resolve_video(
+                "dQw4w9WgXcQ",
+                "720p",
+                config,
+                self.cooldown_tracker,
+                extractor_func=po_extractor,
+                range_fetch_func=self.valid_range_fetch,
+                default_extractor_func=default_extractor,
+            )
+
+        self.assertEqual(po_timeout, 5)
+        self.assertEqual(result["actualQuality"], "720p")
+
+    def test_candidate_result_is_rejected_when_range_probe_exceeds_budget(self):
+        now = [100.0]
+        config = {**self.config, "timeout_seconds": 5}
+
+        def default_extractor(video_id, timeout_seconds):
+            return {"formats": [self.combined_format(720, 136)]}
+
+        def late_range_fetch(url, headers):
+            now[0] += 8.0
+            start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+            return (
+                206,
+                {"content-range": f"bytes {start}-{end}/50000"},
+                b"x" * (end - start + 1),
+            )
+
+        def forbidden_po_extractor(video_id, bgutil_url, timeout_seconds):
+            self.fail("an expired resolution budget must not start PO extraction")
+
+        def forbidden_upstream_fetch(url, headers):
+            self.fail("an expired resolution budget must not start baseline fallback")
+
+        with patch("time.monotonic", side_effect=lambda: now[0]):
+            with self.assertRaises(QualityUnavailableError):
+                resolve_video(
+                    "dQw4w9WgXcQ",
+                    "720p",
+                    config,
+                    self.cooldown_tracker,
+                    extractor_func=forbidden_po_extractor,
+                    range_fetch_func=late_range_fetch,
+                    upstream_fetch_func=forbidden_upstream_fetch,
+                    default_extractor_func=default_extractor,
+                )
+
+    def test_http_range_timeout_uses_remaining_resolution_budget(self):
+        class Response:
+            status = 206
+            headers = {"Content-Range": "bytes 0-1023/50000"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            @staticmethod
+            def read(max_bytes):
+                return b"x" * min(max_bytes, 1024)
+
+        budget = _ResolutionBudget(deadline=100.75)
+        with patch("time.monotonic", return_value=100.0):
+            with patch(
+                "resolver._NO_REDIRECT_OPENER.open", return_value=Response()
+            ) as open_request:
+                result = budget.range_fetch(
+                    "https://rr1.googlevideo.com/videoplayback?itag=136",
+                    {"Range": "bytes=0-1023"},
+                )
+
+        self.assertEqual(open_request.call_args.kwargs["timeout"], 0.75)
+        self.assertEqual(result[0], 206)
+        self.assertEqual(len(result[2]), 1024)
+
+    def test_manual_hd_never_returns_validated_360p_as_requested_quality(self):
+        def default_extractor(video_id, timeout_seconds):
+            return {"formats": [self.combined_format(360, 18)]}
+
+        def po_extractor(video_id, bgutil_url, timeout_seconds):
+            return {"formats": [self.combined_format(360, 18)]}
+
+        def forbidden_upstream_fetch(url, headers):
+            self.fail("manual HD must never fall back to the 360p baseline")
+
+        with self.assertRaises(QualityUnavailableError):
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "720p",
+                self.config,
+                self.cooldown_tracker,
+                extractor_func=po_extractor,
+                range_fetch_func=self.valid_range_fetch,
+                upstream_fetch_func=forbidden_upstream_fetch,
+                default_extractor_func=default_extractor,
+            )
 
     def test_extraction_timeout_is_capped(self):
         completed = subprocess.CompletedProcess(
@@ -149,7 +411,7 @@ class ResolverTests(unittest.TestCase):
                 b"x" * (end - start + 1),
             )
 
-        res = resolve_video(
+        res = self.resolve_with_default_failure(
             "dQw4w9WgXcQ",
             "720p",
             self.config,
@@ -184,7 +446,7 @@ class ResolverTests(unittest.TestCase):
             return 404, {}, b""
 
         self.assertFalse(self.cooldown_tracker.is_in_cooldown())
-        res = resolve_video(
+        res = self.resolve_with_default_failure(
             "dQw4w9WgXcQ",
             "auto",
             self.config,
@@ -209,7 +471,7 @@ class ResolverTests(unittest.TestCase):
                     self.fail("manual quality must not request the 360p baseline")
 
                 with self.assertRaises(QualityUnavailableError) as ctx:
-                    resolve_video(
+                    self.resolve_with_default_failure(
                         "dQw4w9WgXcQ",
                         quality,
                         self.config,
@@ -236,7 +498,7 @@ class ResolverTests(unittest.TestCase):
                     self.fail("manual quality must not request the 360p baseline")
 
                 with self.assertRaises(QualityUnavailableError):
-                    resolve_video(
+                    self.resolve_with_default_failure(
                         "dQw4w9WgXcQ",
                         quality,
                         self.config,
@@ -257,7 +519,7 @@ class ResolverTests(unittest.TestCase):
             self.fail("manual quality must not request the 360p baseline")
 
         with self.assertRaises(QualityUnavailableError) as ctx:
-            resolve_video(
+            self.resolve_with_default_failure(
                 "dQw4w9WgXcQ",
                 "1080p",
                 self.config,
@@ -278,7 +540,7 @@ class ResolverTests(unittest.TestCase):
             self.fail("manual quality must not request the 360p baseline")
 
         with self.assertRaises(QualityUnavailableError):
-            resolve_video(
+            self.resolve_with_default_failure(
                 "dQw4w9WgXcQ",
                 "1080p",
                 self.config,
@@ -314,7 +576,7 @@ class ResolverTests(unittest.TestCase):
             self.fail("manual quality must not request the 360p baseline")
 
         with self.assertRaises(QualityUnavailableError) as ctx:
-            resolve_video(
+            self.resolve_with_default_failure(
                 "dQw4w9WgXcQ",
                 "1080p",
                 self.config,
@@ -347,7 +609,7 @@ class ResolverTests(unittest.TestCase):
             self.fail("manual quality must not request the 360p baseline")
 
         with self.assertRaises(QualityUnavailableError):
-            resolve_video(
+            self.resolve_with_default_failure(
                 "dQw4w9WgXcQ",
                 "1080p",
                 self.config,
@@ -394,7 +656,7 @@ class ResolverTests(unittest.TestCase):
                 b"x" * (end - start + 1),
             )
 
-        result = resolve_video(
+        result = self.resolve_with_default_failure(
             "dQw4w9WgXcQ",
             "720p",
             self.config,
@@ -435,7 +697,7 @@ class ResolverTests(unittest.TestCase):
             self.fail("manual quality must not request the 360p baseline")
 
         with self.assertRaises(QualityUnavailableError):
-            resolve_video(
+            self.resolve_with_default_failure(
                 "dQw4w9WgXcQ",
                 "1080p",
                 self.config,
@@ -466,7 +728,7 @@ class ResolverTests(unittest.TestCase):
             ).encode("utf-8")
             return 200, {}, body
 
-        res = resolve_video(
+        res = self.resolve_with_default_failure(
             "dQw4w9WgXcQ",
             "auto",
             self.config,
@@ -506,7 +768,7 @@ class ResolverTests(unittest.TestCase):
                                 ).encode("utf-8"),
                             )
 
-                        result = resolve_video(
+                        result = self.resolve_with_default_failure(
                             "dQw4w9WgXcQ",
                             quality,
                             self.config,
@@ -549,7 +811,7 @@ class ResolverTests(unittest.TestCase):
                 ).encode("utf-8"),
             )
 
-        res = resolve_video(
+        res = self.resolve_with_default_failure(
             "dQw4w9WgXcQ",
             "auto",
             self.config,

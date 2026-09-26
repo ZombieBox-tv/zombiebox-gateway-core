@@ -1,15 +1,16 @@
 # YouTube PO Token HD Resolver Wrapper
 
-This wrapper provides an optional Proof-of-Origin (PO) Token resolver for Full. It asks yt-dlp to use YouTube's `mweb` player client, where the BgUtils plugin supplies a GVS token, then supplements the existing 360p path with validated H.264 <=30fps video and AAC audio formats when available.
+This wrapper provides an optional YouTube HD resolver for Full. It first tries yt-dlp's default player clients with plugins disabled, then may try YouTube's `mweb` client with a BgUtils GVS PO token when the default candidate cannot provide the requested tier.
 
 ## Features
 
-- **mweb GVS PO Token Flow:** Explicitly selects yt-dlp's `mweb` client and uses the `bgutil-ytdlp-pot-provider` plugin to request the GVS token from an internal `bgutil-provider` Botguard daemon. The plugin and yt-dlp versions are pinned in `requirements.lock`.
+- **Default Client First:** Runs the pinned yt-dlp with `--no-plugin-dirs` so its default player clients can expose directly usable formats without PO-token plugin behavior.
+- **mweb GVS PO Token Fallback:** If default-client extraction cannot provide the requested validated tier and the PO path is not in cooldown, it selects yt-dlp's `mweb` client and uses the `bgutil-ytdlp-pot-provider` plugin to request the GVS token from an internal `bgutil-provider` Botguard daemon. The plugin and yt-dlp versions are pinned in `requirements.lock`.
 - **Strict Format Guardrails:** Enforces H.264 (`avc1`/`h264`) video at `<= 30 fps` and AAC (`mp4a`/`aac`) audio. Higher frame rates (50/60fps) and non-hardware-friendly codecs (VP9/AV1/Opus) are rejected.
 - **Range Verification:** Verifies 3-point HTTP byte ranges (head 0–1023, mid, tail) to guarantee streams are actually servable without 403 truncations.
 - **Truthful Variants:** Only formats with validated ranges and valid audio pairs are reported in `variants`.
 - **Exact Manual Quality:** A manual `1080p`, `720p`, `480p`, or `360p` request either returns that validated tier or fails with HTTP 502 `{"error":"quality_unavailable"}`. It never reports baseline 360p as a successful manual HD selection. Successful results include numeric `actualHeight` and `actualQuality` when yt-dlp provides unambiguous height metadata; a label alone is not treated as proof.
-- **403 Cooldown & Single-Flight Lock:** Concurrency is locked to 1. If YouTube returns 403 or bot check, a 300s cooldown is activated. Auto and unspecified quality may use the upstream 360p baseline during cooldown, extraction failure, or rendition-validation failure. Manual exact-quality requests fail instead of changing quality silently.
+- **PO 403 Cooldown & Single-Flight Lock:** Concurrency is locked to 1. A 403 or bot check on the mweb/PO candidate activates a 300s cooldown for that candidate; default clients are still tried during cooldown. A default-client 403 does not block the PO candidate. Auto and unspecified quality may use the upstream 360p baseline after both candidates fail. Manual exact-quality requests fail instead of changing quality silently.
 - **Zero Catalog Fork:** `/catalog` and `/browse` are transparently proxied to the upstream YouTube.js worker (`http://youtube:8091`).
 - **Internal Only:** Runs unexposed on the internal Docker bridge network without published host/LAN ports.
 
@@ -32,9 +33,14 @@ Stored in `/config/pot.json`:
 }
 ```
 
-The resolver caps yt-dlp extraction at 30 seconds and its captured stdout and
-stderr at 4 MiB and 256 KiB. It terminates the yt-dlp process group on timeout
-or output overflow so the Node.js challenge runtime cannot remain orphaned.
+The resolver shares an 18-second deadline across default extraction, PO fallback,
+range validation and automatic baseline fallback, within the Gateway's 20-second
+HTTP client timeout. Each yt-dlp process also has a 30-second hard ceiling, and
+stdout and stderr are capped at 4 MiB and 256 KiB. Range requests receive the
+remaining resolution budget as their network timeout. The resolver terminates the
+yt-dlp process group on timeout or output overflow so the Node.js runtime cannot
+remain orphaned. Manual quality probes validate only the requested tier and its AAC
+pair; Auto still validates the full inventory before reporting its variants.
 
 ## Running Tests
 

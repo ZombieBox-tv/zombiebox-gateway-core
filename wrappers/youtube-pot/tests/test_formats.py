@@ -7,7 +7,7 @@ WRAPPER_DIR = Path(__file__).resolve().parents[1]
 if str(WRAPPER_DIR) not in sys.path:
     sys.path.insert(0, str(WRAPPER_DIR))
 
-from formats import (
+from formats import (  # noqa: E402
     FormatSelector,
     format_tier,
     is_aac_audio,
@@ -286,7 +286,109 @@ class FormatsTests(unittest.TestCase):
         self.assertIsNotNone(resolved)
         self.assertIn("itag=136", resolved["url"])
         self.assertIn("itag=140", resolved.get("audioUrl", ""))
-        self.assertEqual(resolved["variants"], ["720p", "360p"])
+        self.assertEqual(resolved["variants"], ["720p"])
+
+    def test_manual_selection_validates_only_requested_tier_and_aac_pair(self):
+        mock_formats = [
+            {
+                "format_id": "137",
+                "url": "https://rr1.googlevideo.com/videoplayback?itag=137&clen=90000",
+                "vcodec": "avc1.640028",
+                "acodec": "none",
+                "fps": 30,
+                "height": 1080,
+                "filesize": 90000,
+            },
+            {
+                "format_id": "136",
+                "url": "https://rr1.googlevideo.com/videoplayback?itag=136&clen=50000",
+                "vcodec": "avc1.4d401f",
+                "acodec": "none",
+                "fps": 30,
+                "height": 720,
+                "filesize": 50000,
+            },
+            {
+                "format_id": "18",
+                "url": "https://rr1.googlevideo.com/videoplayback?itag=18&clen=20000",
+                "vcodec": "avc1.42001E",
+                "acodec": "mp4a.40.2",
+                "fps": 30,
+                "height": 360,
+                "filesize": 20000,
+            },
+            {
+                "format_id": "140",
+                "url": "https://rr1.googlevideo.com/videoplayback?itag=140&clen=15000",
+                "vcodec": "none",
+                "acodec": "mp4a.40.2",
+                "abr": 128,
+                "filesize": 15000,
+            },
+        ]
+        checked_itags = set()
+
+        def mock_fetch(url, headers):
+            itag = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["itag"][0]
+            checked_itags.add(itag)
+            range_hdr = headers.get("Range", "")
+            parts = range_hdr.replace("bytes=", "").split("-")
+            start, end = int(parts[0]), int(parts[1])
+            total = next(
+                fmt["filesize"] for fmt in mock_formats if fmt["format_id"] == itag
+            )
+            return (
+                206,
+                {"content-range": f"bytes {start}-{end}/{total}"},
+                b"x" * (end - start + 1),
+            )
+
+        selector = FormatSelector(mock_formats, fetch_func=mock_fetch)
+        resolved, variants, saw_403 = selector.determine_variants_and_resolve("720p")
+
+        self.assertFalse(saw_403)
+        self.assertEqual(checked_itags, {"136", "140"})
+        self.assertEqual(variants, ["720p"])
+        self.assertEqual(resolved["variants"], ["720p"])
+        self.assertIn("itag=136", resolved["url"])
+        self.assertIn("itag=140", resolved["audioUrl"])
+
+    def test_validation_stops_when_resolution_deadline_expires(self):
+        fmt = {
+            "format_id": "136",
+            "url": "https://rr1.googlevideo.com/videoplayback?itag=136&clen=50000",
+            "vcodec": "avc1.4d401f",
+            "acodec": "mp4a.40.2",
+            "fps": 30,
+            "height": 720,
+            "filesize": 50000,
+        }
+        now = [10.0]
+        fetch_count = 0
+
+        def mock_fetch(url, headers):
+            nonlocal fetch_count
+            fetch_count += 1
+            now[0] = 20.0
+            start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+            return (
+                206,
+                {"content-range": f"bytes {start}-{end}/50000"},
+                b"x" * (end - start + 1),
+            )
+
+        selector = FormatSelector(
+            [fmt],
+            fetch_func=mock_fetch,
+            deadline=15.0,
+        )
+        with unittest.mock.patch("time.monotonic", side_effect=lambda: now[0]):
+            resolved, variants, _ = selector.determine_variants_and_resolve("720p")
+
+        self.assertEqual(fetch_count, 1)
+        self.assertTrue(selector.budget_expired)
+        self.assertIsNone(resolved)
+        self.assertEqual(variants, [])
 
     def test_audio_unavailable_drops_adaptive_tier(self):
         # Only adaptive 720p video, NO AAC audio (only opus)
