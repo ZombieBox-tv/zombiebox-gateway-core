@@ -1,5 +1,33 @@
 # zombiebox-gateway-core: component work
 
+## Dev.90 AirPlay state QA (in progress)
+
+The local Full gateway and AirPlay worker dev.90 images now run with existing
+volumes. Their receiver status reports connection presence separately from RTP
+activity, versions track stream sessions and clears stale sessions on
+disconnect. On the selected Vizio with signed Client dev.59, screenshots show
+three track changes with title changes and local timelines starting again.
+The AirPlay cover and metadata arrived in different orders during rapid skips;
+the receiver withheld artwork when it could not associate it safely. AudioTrack
+logged buffer underruns during the live PCM stream. Audible playback, pause
+latency and reconnection still need the iPad operator's result. No product gate
+closes from these screenshots.
+
+## Unreleased: live audio compatibility and private YouTube resolver
+
+Keep live audio in a capability-driven order: native HLS, copied AAC/ADTS,
+decoded PCM through AudioTrack, then external playback. PCM is selected only
+after a fresh advancing device probe; it is an audio-only, bounded FFmpeg
+fallback and does not replace the better quality native paths on other TVs.
+On the selected Vizio API 13, signed Client dev.58 played 2367 ms of the local
+AudioTrack probe. MediaPlayer accepted finite AAC and MPEG-TS/AAC files, but
+rejected ADTS, HLS and three chunked audio transports during preparation. The
+silent PCM probe establishes output progress, not audible Apple Music playback.
+The AirPlay worker also clears stopped metadata instead of retaining a stale
+song. A private, optional PO token resolver returned HD source variants in a
+host check; Vizio playback above 360p remains unverified. Spotify still refuses
+audio keys and encoded no audio in the dev.84 QA worker. No product gate closes.
+
 ## Unreleased: probe-gated audio-only conversion
 
 When H.264 video and AAC output have fresh advancing playback probes, the
