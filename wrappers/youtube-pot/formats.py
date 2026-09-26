@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 import time
+import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from media_ranges import validate_media_ranges
@@ -59,6 +60,23 @@ def is_aac_audio(format_dict: Dict[str, Any]) -> bool:
     if not acodec or acodec == "none":
         return False
     return acodec.startswith("mp4a") or acodec.startswith("aac")
+
+
+def is_direct_media_format(
+    format_dict: Dict[str, Any], extensions: tuple[str, ...]
+) -> bool:
+    """Keep manifest formats out of the byte-ranged MP4 remux path."""
+    if format_dict.get("protocol") not in (None, "https"):
+        return False
+    if format_dict.get("ext") not in (None, *extensions):
+        return False
+    url = format_dict.get("url")
+    if not isinstance(url, str):
+        return False
+    try:
+        return urllib.parse.urlsplit(url).path == "/videoplayback"
+    except ValueError:
+        return False
 
 
 def format_tier(format_dict: Dict[str, Any]) -> Optional[str]:
@@ -163,7 +181,7 @@ class FormatSelector:
             vcodec = str(fmt.get("vcodec") or "none")
             if vcodec != "none":
                 continue
-            if not is_aac_audio(fmt):
+            if not is_aac_audio(fmt) or not is_direct_media_format(fmt, ("m4a", "mp4")):
                 continue
             audio_candidates.append(fmt)
 
@@ -191,7 +209,11 @@ class FormatSelector:
         tier_video: Dict[str, List[Dict[str, Any]]] = {t: [] for t in ALLOWED_TIERS}
 
         for fmt in self.formats:
-            if not is_h264_video(fmt) or not is_safe_fps(fmt):
+            if (
+                not is_h264_video(fmt)
+                or not is_safe_fps(fmt)
+                or not is_direct_media_format(fmt, ("mp4",))
+            ):
                 continue
 
             tier = format_tier(fmt)

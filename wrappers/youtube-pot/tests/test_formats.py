@@ -353,6 +353,64 @@ class FormatsTests(unittest.TestCase):
         self.assertIn("itag=136", resolved["url"])
         self.assertIn("itag=140", resolved["audioUrl"])
 
+    def test_manifest_formats_are_not_mislabeled_as_direct_mp4(self):
+        hls_video = {
+            "format_id": "270",
+            "url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/270",
+            "protocol": "m3u8_native",
+            "ext": "mp4",
+            "vcodec": "avc1.640028",
+            "acodec": "none",
+            "fps": 24,
+            "height": 1080,
+            "filesize": 50000,
+        }
+        direct_video = {
+            **hls_video,
+            "format_id": "137",
+            "url": "https://rr1.googlevideo.com/videoplayback?itag=137",
+            "protocol": "https",
+        }
+        hls_audio = {
+            "url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/140",
+            "protocol": "m3u8_native",
+            "ext": "m4a",
+            "vcodec": "none",
+            "acodec": "mp4a.40.2",
+            "abr": 320,
+            "filesize": 50000,
+        }
+        direct_audio = {
+            **hls_audio,
+            "url": "https://rr1.googlevideo.com/videoplayback?itag=140",
+            "protocol": "https",
+            "abr": 128,
+        }
+        checked = []
+
+        def mock_fetch(url, headers):
+            checked.append(url)
+            start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+            return (
+                206,
+                {"content-range": f"bytes {start}-{end}/50000"},
+                b"x" * (end - start + 1),
+            )
+
+        selector = FormatSelector(
+            [hls_video, direct_video, hls_audio, direct_audio], fetch_func=mock_fetch
+        )
+        resolved, variants, _ = selector.determine_variants_and_resolve("1080p")
+        self.assertEqual(variants, ["1080p"])
+        self.assertIn("itag=137", resolved["url"])
+        self.assertIn("itag=140", resolved["audioUrl"])
+        self.assertTrue(all("/videoplayback" in url for url in checked))
+
+        manifest_only = FormatSelector([hls_video, hls_audio], fetch_func=mock_fetch)
+        unavailable, variants, _ = manifest_only.determine_variants_and_resolve("1080p")
+        self.assertIsNone(unavailable)
+        self.assertEqual(variants, [])
+
     def test_validation_stops_when_resolution_deadline_expires(self):
         fmt = {
             "format_id": "136",

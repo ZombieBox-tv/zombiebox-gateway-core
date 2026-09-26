@@ -10,6 +10,11 @@ The baseline ZombieBox YouTube integration (`wrappers/youtube`) uses YouTube.js 
 
 This increment implements an optional, bounded YouTube HD resolver path for **Full** using `yt-dlp`, with a PO Token Provider as a separate fallback candidate. It supplements the existing 360p stream with validated H.264 (AVC) <= 30 fps video paired with AAC audio (720p and 1080p tiers) where the source permits, while preserving the YouTube.js catalog, DIAL, and baseline fallback paths. An explicit quality request must resolve to that exact validated tier; it must never receive a 360p response while being treated as HD. Auto and unspecified quality may use the baseline fallback. The provider does not guarantee access to formats, and host extraction or range checks do not prove TV playback. Do not claim above-360p support until the selected physical device completes playback at that quality.
 
+The byte-ranged MP4 path accepts direct HTTPS `/videoplayback` formats only. A
+YouTube HLS variant can carry an `mp4` extension and pass a simple HTTP range
+request while its URL still points to a manifest. Such variants must use a
+separate manifest-aware path; they cannot be labeled as direct MP4 here.
+
 ---
 
 ## 2. Review of PO Token Provider Plugins
