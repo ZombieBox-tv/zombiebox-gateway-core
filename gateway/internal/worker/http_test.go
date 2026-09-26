@@ -347,6 +347,23 @@ func (fixedAirPlayMirrorDiagnostics) AirPlayMirrorSnapshot(time.Time) AirPlayMir
 		BridgeFailureStage:           "",
 		DirectVideoRequestCount:      1,
 		PhotoAppAttributionAvailable: false,
+		SessionSummary: AirPlayMirrorSessionSummary{
+			Version:                  1,
+			Available:                true,
+			Generation:               9,
+			SessionAgeMS:             4000,
+			FirstVideoRTPObserved:    true,
+			FirstVideoRTPAgeMS:       4000,
+			LastVideoRTPObserved:     true,
+			LastVideoRTPAgeMS:        125,
+			VideoRTPPacketCount:      42,
+			SelectedMode:             "video",
+			FFmpegStartClass:         "started",
+			FFmpegExitClass:          "not_observed",
+			FirstHLSManifestObserved: true,
+			FirstHLSManifestAgeMS:    3000,
+			FailureClass:             "none",
+		},
 	}
 }
 
@@ -373,7 +390,16 @@ func TestAirPlayStatusIncludesOnlyTypedMirrorDiagnostics(t *testing.T) {
 	if mirror.VideoRTPPacketCount != 42 || !mirror.VideoRTPAdvancedRecently || mirror.BridgeStage != "awaiting_hls" || mirror.DirectVideoRequestCount != 1 || mirror.PhotoAppAttributionAvailable {
 		t.Fatalf("unexpected mirror status: %+v", mirror)
 	}
-	for _, forbidden := range []string{"never-store-this", "Authorization", "http://", "192.168."} {
+	if mirror.SessionSummary.Version != 1 ||
+		!mirror.SessionSummary.Available ||
+		mirror.SessionSummary.Generation != 9 ||
+		!mirror.SessionSummary.FirstVideoRTPObserved ||
+		mirror.SessionSummary.LastVideoRTPAgeMS != 125 ||
+		mirror.SessionSummary.SelectedMode != "video" ||
+		!mirror.SessionSummary.FirstHLSManifestObserved {
+		t.Fatalf("versioned session summary missing from authenticated /status: %+v", mirror.SessionSummary)
+	}
+	for _, forbidden := range []string{"never-store-this", "Authorization", "http://", "192.168.", "ssrc", "sender", "pin", "payload", "upstream"} {
 		if strings.Contains(response.Body.String(), forbidden) {
 			t.Fatalf("private data leaked in worker status (%q): %s", forbidden, response.Body.String())
 		}

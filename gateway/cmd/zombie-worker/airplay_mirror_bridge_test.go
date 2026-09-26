@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -114,6 +115,103 @@ func TestMirrorDiagnosticsTrackOnlyAdvancingVideoRTP(t *testing.T) {
 	}
 }
 
+func TestMirrorSessionSummaryRetainsOnlyARecentSanitizedGeneration(t *testing.T) {
+	start := time.Now()
+	b := &mirrorBridge{hlsDir: t.TempDir()}
+	if b.observeVideo(start, 71, 10, 90_000) {
+		t.Fatal("first packet unexpectedly forwarded before encoder selection")
+	}
+	b.observeVideo(start.Add(400*time.Millisecond), 71, 11, 126_000)
+	b.mu.Lock()
+	b.runningSession = 1
+	b.encoderRunning = true
+	b.mu.Unlock()
+	b.recordMirrorMode(1, audioVideoMirror)
+	b.recordMirrorFFmpegStart(1, mirrorFFmpegStartStarted)
+	b.recordMirrorHLSReadiness(start.Add(time.Second), true, false)
+	b.recordMirrorHLSReadiness(start.Add(1500*time.Millisecond), true, true)
+	b.recordMirrorFFmpegExit(1, mirrorFFmpegExitStopped)
+	b.markMirrorSessionEnded(1, start.Add(2*time.Second))
+
+	snapshotAt := start.Add(7 * time.Second)
+	summary := b.sessionSummarySnapshot(snapshotAt)
+	if summary.Version != 1 || !summary.Available || summary.Generation != 1 {
+		t.Fatalf("missing versioned session summary: %+v", summary)
+	}
+	if summary.SessionAgeMS != 7000 ||
+		!summary.FirstVideoRTPObserved ||
+		summary.FirstVideoRTPAgeMS != 7000 {
+		t.Fatalf("first video RTP timing was not relative and monotonic: %+v", summary)
+	}
+	if !summary.LastVideoRTPObserved ||
+		summary.LastVideoRTPAgeMS != 6600 ||
+		summary.VideoRTPPacketCount != 2 {
+		t.Fatalf("last accepted RTP evidence is inaccurate: %+v", summary)
+	}
+	if summary.SelectedMode != "audio_video" ||
+		summary.FFmpegStartClass != mirrorFFmpegStartStarted ||
+		summary.FFmpegExitClass != mirrorFFmpegExitStopped {
+		t.Fatalf("selected mode or FFmpeg transition classes are inaccurate: %+v", summary)
+	}
+	if !summary.FirstHLSManifestObserved ||
+		summary.FirstHLSManifestAgeMS != 6000 ||
+		!summary.FirstHLSSegmentObserved ||
+		summary.FirstHLSSegmentAgeMS != 5500 {
+		t.Fatalf("first HLS readiness ages are inaccurate: %+v", summary)
+	}
+	if summary.FailureClass != mirrorFailureNone {
+		t.Fatalf("successful test session has failure class %q", summary.FailureClass)
+	}
+
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"ssrc", "url", "title", "sender", "pin", "payload", "timestamp"} {
+		if strings.Contains(strings.ToLower(string(encoded)), forbidden) {
+			t.Fatalf("session summary leaked forbidden field %q: %s", forbidden, encoded)
+		}
+	}
+
+	retained := b.sessionSummarySnapshot(start.Add(31*time.Second + 999*time.Millisecond))
+	if !retained.Available {
+		t.Fatalf("summary expired before the 30-second teardown retention: %+v", retained)
+	}
+	expired := b.sessionSummarySnapshot(start.Add(32*time.Second + time.Millisecond))
+	if expired.Version != 1 || expired.Available || expired.Generation != 0 || expired.FirstVideoRTPObserved {
+		t.Fatalf("expired record was not distinguished from an observed session: %+v", expired)
+	}
+}
+
+func TestMirrorSessionSummaryMarksUnreachedStagesAndSanitizesFailure(t *testing.T) {
+	start := time.Now()
+	b := &mirrorBridge{}
+	absent := b.sessionSummarySnapshot(start)
+	if absent.Version != 1 || absent.Available {
+		t.Fatalf("empty bridge did not report supported-but-unavailable summary: %+v", absent)
+	}
+	b.observeVideo(start, 81, 1, 180_000)
+	initial := b.sessionSummarySnapshot(start.Add(time.Second))
+	if !initial.Available || !initial.FirstVideoRTPObserved || initial.VideoRTPPacketCount != 1 {
+		t.Fatalf("session summary did not distinguish an observed session: %+v", initial)
+	}
+	if initial.SelectedMode != mirrorModeNotSelected ||
+		initial.FFmpegStartClass != mirrorFFmpegStartNotAttempted ||
+		initial.FFmpegExitClass != mirrorFFmpegExitNotObserved ||
+		initial.FirstHLSManifestObserved ||
+		initial.FirstHLSSegmentObserved ||
+		initial.FailureClass != mirrorFailureNone {
+		t.Fatalf("unreached stages were not represented explicitly: %+v", initial)
+	}
+	b.setBridgeStage("internal_failure", "untrusted error with URL and PIN")
+	b.recordMirrorFFmpegStart(1, "raw process text http://private?pin=1234")
+	b.recordMirrorFFmpegExit(1, "raw process exit text")
+	failure := b.sessionSummarySnapshot(start.Add(2 * time.Second))
+	if failure.FailureClass != "other" || failure.FFmpegStartClass != "other" || failure.FFmpegExitClass != "other" || strings.Contains(failure.FailureClass, "untrusted") {
+		t.Fatalf("unrecognized failure was not reduced to a fixed enum: %+v", failure)
+	}
+}
+
 func TestMirrorDiagnosticsReportHLSReadinessWithoutContents(t *testing.T) {
 	dir := t.TempDir()
 	manifest := "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nsegment7.ts\n"
@@ -131,9 +229,20 @@ func TestMirrorDiagnosticsReportHLSReadinessWithoutContents(t *testing.T) {
 		}
 	}
 	b := &mirrorBridge{hlsDir: dir, runningMode: videoMirror, encoderRunning: true, bridgeStage: "awaiting_hls"}
+	b.observeVideo(start, 71, 10, 90_000)
+	b.mu.Lock()
+	b.runningSession = 1
+	b.encoderRunning = true
+	b.mu.Unlock()
 	status := b.AirPlayMirrorSnapshot(start)
 	if !status.HLSManifestReady || !status.HLSSegmentReady || status.HLSSegmentAgeMS < 0 || status.BridgeStage != "hls_ready" {
 		t.Fatalf("fresh mirror HLS was not reported ready: %+v", status)
+	}
+	if !status.SessionSummary.FirstHLSManifestObserved ||
+		!status.SessionSummary.FirstHLSSegmentObserved ||
+		status.SessionSummary.FirstHLSManifestAgeMS != 0 ||
+		status.SessionSummary.FirstHLSSegmentAgeMS != 0 {
+		t.Fatalf("first HLS readiness was not retained in the session summary: %+v", status.SessionSummary)
 	}
 	old := start.Add(-20 * time.Second)
 	if err := os.Chtimes(filepath.Join(dir, "segment7.ts"), old, old); err != nil {
@@ -156,13 +265,21 @@ func TestMirrorDiagnosticsReportHLSReadinessWithoutContents(t *testing.T) {
 }
 
 func TestMirrorDiagnosticsRecordSanitizedEncoderFailureStage(t *testing.T) {
+	start := time.Now()
 	b := &mirrorBridge{hlsDir: t.TempDir(), ffmpegPath: filepath.Join(t.TempDir(), "missing-ffmpeg")}
+	b.observeVideo(start, 71, 1, 90_000)
 	if err := b.transition(context.Background(), videoMirror, 1); err == nil {
 		t.Fatal("missing FFmpeg executable unexpectedly started")
 	}
 	status := b.AirPlayMirrorSnapshot(time.Now())
 	if status.BridgeStage != "ffmpeg_start_failed" || status.BridgeFailureStage != "ffmpeg_start" || status.Mode != "idle" {
 		t.Fatalf("FFmpeg failure was not retained as a fixed stage: %+v", status)
+	}
+	if !status.SessionSummary.Available ||
+		status.SessionSummary.SelectedMode != "video" ||
+		status.SessionSummary.FFmpegStartClass != mirrorFFmpegStartFailed ||
+		status.SessionSummary.FailureClass != "ffmpeg_start" {
+		t.Fatalf("sanitized FFmpeg start failure was not retained: %+v", status.SessionSummary)
 	}
 }
 

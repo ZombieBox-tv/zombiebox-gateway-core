@@ -32,18 +32,43 @@ type Config struct {
 // evidence. It intentionally has no field for upstream logs, packet contents,
 // addresses, URLs, pairing state, or media metadata.
 type AirPlayMirrorStatus struct {
-	Protocol                     string `json:"protocol"`
-	Mode                         string `json:"mode"`
-	VideoRTPAdvancedRecently     bool   `json:"videoRtpAdvancedRecently"`
-	VideoRTPPacketCount          uint64 `json:"videoRtpPacketCount"`
-	VideoRTPLastPacketAgeMS      int64  `json:"videoRtpLastPacketAgeMs,omitempty"`
-	HLSManifestReady             bool   `json:"hlsManifestReady"`
-	HLSSegmentReady              bool   `json:"hlsSegmentReady"`
-	HLSSegmentAgeMS              int64  `json:"hlsSegmentAgeMs,omitempty"`
-	BridgeStage                  string `json:"bridgeStage"`
-	BridgeFailureStage           string `json:"bridgeFailureStage,omitempty"`
-	DirectVideoRequestCount      uint8  `json:"directVideoRequestCount"`
-	PhotoAppAttributionAvailable bool   `json:"photoAppAttributionAvailable"`
+	Protocol                     string                      `json:"protocol"`
+	Mode                         string                      `json:"mode"`
+	VideoRTPAdvancedRecently     bool                        `json:"videoRtpAdvancedRecently"`
+	VideoRTPPacketCount          uint64                      `json:"videoRtpPacketCount"`
+	VideoRTPLastPacketAgeMS      int64                       `json:"videoRtpLastPacketAgeMs,omitempty"`
+	HLSManifestReady             bool                        `json:"hlsManifestReady"`
+	HLSSegmentReady              bool                        `json:"hlsSegmentReady"`
+	HLSSegmentAgeMS              int64                       `json:"hlsSegmentAgeMs,omitempty"`
+	BridgeStage                  string                      `json:"bridgeStage"`
+	BridgeFailureStage           string                      `json:"bridgeFailureStage,omitempty"`
+	DirectVideoRequestCount      uint8                       `json:"directVideoRequestCount"`
+	PhotoAppAttributionAvailable bool                        `json:"photoAppAttributionAvailable"`
+	SessionSummary               AirPlayMirrorSessionSummary `json:"sessionSummary"`
+}
+
+// AirPlayMirrorSessionSummary retains one fixed, sanitized session record in
+// memory through teardown. Ages are relative to the status snapshot time, not
+// wall-clock timestamps. Enum fields use "not_observed" when a stage was not
+// reached; Available=false means no retained session record exists.
+type AirPlayMirrorSessionSummary struct {
+	Version                  uint8  `json:"version"`
+	Available                bool   `json:"available"`
+	Generation               uint64 `json:"generation,omitempty"`
+	SessionAgeMS             int64  `json:"sessionAgeMs,omitempty"`
+	FirstVideoRTPObserved    bool   `json:"firstVideoRtpObserved"`
+	FirstVideoRTPAgeMS       int64  `json:"firstVideoRtpAgeMs,omitempty"`
+	LastVideoRTPObserved     bool   `json:"lastVideoRtpObserved"`
+	LastVideoRTPAgeMS        int64  `json:"lastVideoRtpAgeMs,omitempty"`
+	VideoRTPPacketCount      uint64 `json:"videoRtpPacketCount,omitempty"`
+	SelectedMode             string `json:"selectedMode"`
+	FFmpegStartClass         string `json:"ffmpegStartClass"`
+	FFmpegExitClass          string `json:"ffmpegExitClass"`
+	FirstHLSManifestObserved bool   `json:"firstHlsManifestObserved"`
+	FirstHLSManifestAgeMS    int64  `json:"firstHlsManifestAgeMs,omitempty"`
+	FirstHLSSegmentObserved  bool   `json:"firstHlsSegmentObserved"`
+	FirstHLSSegmentAgeMS     int64  `json:"firstHlsSegmentAgeMs,omitempty"`
+	FailureClass             string `json:"failureClass"`
 }
 
 // AirPlayMirrorDiagnostics supplies a sanitized snapshot from the process

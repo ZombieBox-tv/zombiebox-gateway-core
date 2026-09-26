@@ -39,7 +39,31 @@ const (
 	mirrorProbeDelay  = 500 * time.Millisecond
 	mirrorAudioTTL    = 3 * time.Second
 	mirrorVideoTTL    = 12 * time.Second
+	mirrorSummaryTTL  = 30 * time.Second
 )
+
+const (
+	mirrorFFmpegStartNotAttempted = "not_attempted"
+	mirrorFFmpegStartStarted      = "started"
+	mirrorFFmpegStartFailed       = "failed"
+	mirrorFFmpegExitNotObserved   = "not_observed"
+	mirrorFFmpegExitStopped       = "stopped"
+	mirrorFFmpegExitClean         = "clean_exit"
+	mirrorFFmpegExitError         = "error_exit"
+	mirrorFFmpegExitTimeout       = "stop_timeout"
+	mirrorModeNotSelected         = "not_observed"
+	mirrorFailureNone             = "none"
+)
+
+type mirrorTransitionSummary struct {
+	status          worker.AirPlayMirrorSessionSummary
+	sessionStarted  time.Time
+	sessionEnded    time.Time
+	firstVideoRTPAt time.Time
+	lastVideoRTPAt  time.Time
+	firstManifestAt time.Time
+	firstSegmentAt  time.Time
+}
 
 type mirrorBridge struct {
 	ports         mirrorPorts
@@ -74,6 +98,7 @@ type mirrorBridge struct {
 	failureStage      string
 	encoderRunning    bool
 	uxplayLogs        *airPlayLogDiagnostics
+	sessionSummary    mirrorTransitionSummary
 }
 
 func newMirrorBridge(hlsDir, stateDir, ffmpegPath string, ports mirrorPorts) (*mirrorBridge, error) {
@@ -132,6 +157,178 @@ func validMirrorRTP(packet []byte, payloadType byte) bool {
 	return len(packet) >= 12+4*int(packet[0]&0x0f)
 }
 
+func emptyMirrorSessionSummary() worker.AirPlayMirrorSessionSummary {
+	return worker.AirPlayMirrorSessionSummary{
+		Version:          1,
+		SelectedMode:     mirrorModeNotSelected,
+		FFmpegStartClass: mirrorFFmpegStartNotAttempted,
+		FFmpegExitClass:  mirrorFFmpegExitNotObserved,
+		FailureClass:     mirrorFailureNone,
+	}
+}
+
+func relativeAgeMS(now, eventAt time.Time) int64 {
+	if eventAt.IsZero() {
+		return 0
+	}
+	age := now.Sub(eventAt)
+	if age <= 0 {
+		return 0
+	}
+	return age.Milliseconds()
+}
+
+func (b *mirrorBridge) beginMirrorSessionLocked(generation uint64, now time.Time) {
+	status := emptyMirrorSessionSummary()
+	status.Available = true
+	status.Generation = generation
+	status.FirstVideoRTPObserved = true
+	status.LastVideoRTPObserved = true
+	b.sessionSummary = mirrorTransitionSummary{
+		status:          status,
+		sessionStarted:  now,
+		firstVideoRTPAt: now,
+		lastVideoRTPAt:  now,
+	}
+}
+
+func (b *mirrorBridge) sessionSummarySnapshot(now time.Time) worker.AirPlayMirrorSessionSummary {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	summary := b.sessionSummary
+	if !summary.status.Available {
+		return emptyMirrorSessionSummary()
+	}
+	if b.mirrorSummaryExpiredLocked(now) {
+		b.sessionSummary = mirrorTransitionSummary{}
+		return emptyMirrorSessionSummary()
+	}
+
+	status := summary.status
+	status.SessionAgeMS = relativeAgeMS(now, summary.sessionStarted)
+	if status.FirstVideoRTPObserved {
+		status.FirstVideoRTPAgeMS = relativeAgeMS(now, summary.firstVideoRTPAt)
+	}
+	if status.LastVideoRTPObserved {
+		status.LastVideoRTPAgeMS = relativeAgeMS(now, summary.lastVideoRTPAt)
+	}
+	if status.FirstHLSManifestObserved {
+		status.FirstHLSManifestAgeMS = relativeAgeMS(now, summary.firstManifestAt)
+	}
+	if status.FirstHLSSegmentObserved {
+		status.FirstHLSSegmentAgeMS = relativeAgeMS(now, summary.firstSegmentAt)
+	}
+	return status
+}
+
+func (b *mirrorBridge) expireMirrorSessionSummary(now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.mirrorSummaryExpiredLocked(now) {
+		b.sessionSummary = mirrorTransitionSummary{}
+	}
+}
+
+func (b *mirrorBridge) mirrorSummaryExpiredLocked(now time.Time) bool {
+	if !b.sessionSummary.status.Available || b.sessionSummary.sessionEnded.IsZero() {
+		return false
+	}
+	retained := now.Sub(b.sessionSummary.sessionEnded)
+	return retained < 0 || retained > mirrorSummaryTTL
+}
+
+func (b *mirrorBridge) markMirrorSessionEnded(generation uint64, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sessionSummary.status.Available &&
+		b.sessionSummary.status.Generation == generation &&
+		b.sessionSummary.sessionEnded.IsZero() {
+		b.sessionSummary.sessionEnded = now
+	}
+}
+
+func (b *mirrorBridge) mirrorSessionExpired(generation uint64, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return generation != b.session || b.lastVideo.IsZero() || now.Sub(b.lastVideo) > mirrorVideoTTL
+}
+
+func (b *mirrorBridge) recordMirrorMode(generation uint64, mode mirrorMode) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sessionSummary.status.Available && b.sessionSummary.status.Generation == generation {
+		b.sessionSummary.status.SelectedMode = mirrorModeName(mode)
+	}
+}
+
+func (b *mirrorBridge) recordMirrorFFmpegStart(generation uint64, class string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sessionSummary.status.Available && b.sessionSummary.status.Generation == generation {
+		b.sessionSummary.status.FFmpegStartClass = mirrorFFmpegStartName(class)
+		b.sessionSummary.status.FFmpegExitClass = mirrorFFmpegExitNotObserved
+	}
+}
+
+func (b *mirrorBridge) recordMirrorFFmpegExit(generation uint64, class string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sessionSummary.status.Available &&
+		b.sessionSummary.status.Generation == generation &&
+		b.sessionSummary.status.FFmpegExitClass == mirrorFFmpegExitNotObserved {
+		b.sessionSummary.status.FFmpegExitClass = mirrorFFmpegExitName(class)
+	}
+}
+
+func (b *mirrorBridge) recordMirrorHLSReadiness(now time.Time, manifestReady, segmentReady bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	summary := &b.sessionSummary
+	if !summary.status.Available ||
+		!summary.sessionEnded.IsZero() ||
+		!b.encoderRunning ||
+		b.runningSession != summary.status.Generation {
+		return
+	}
+	if manifestReady && !summary.status.FirstHLSManifestObserved {
+		summary.status.FirstHLSManifestObserved = true
+		summary.firstManifestAt = now
+	}
+	if segmentReady && !summary.status.FirstHLSSegmentObserved {
+		summary.status.FirstHLSSegmentObserved = true
+		summary.firstSegmentAt = now
+	}
+}
+
+func mirrorFailureClass(stage string) string {
+	switch stage {
+	case "rtp_listener", "ffmpeg_start", "ffmpeg_exit", "ffmpeg_stop", "hls_cleanup":
+		return stage
+	case "":
+		return mirrorFailureNone
+	default:
+		return "other"
+	}
+}
+
+func mirrorFFmpegStartName(class string) string {
+	switch class {
+	case mirrorFFmpegStartNotAttempted, mirrorFFmpegStartStarted, mirrorFFmpegStartFailed:
+		return class
+	default:
+		return "other"
+	}
+}
+
+func mirrorFFmpegExitName(class string) string {
+	switch class {
+	case mirrorFFmpegExitNotObserved, mirrorFFmpegExitStopped, mirrorFFmpegExitClean, mirrorFFmpegExitError, mirrorFFmpegExitTimeout:
+		return class
+	default:
+		return "other"
+	}
+}
+
 func videoRTPRestart(lastSequence, sequence uint16, lastTimestamp, timestamp uint32, elapsed time.Duration) (restart, late bool) {
 	sequenceDelta := uint16(sequence - lastSequence)
 	if sequenceDelta == 0 || sequenceDelta >= 65536-32 {
@@ -174,9 +371,17 @@ func (b *mirrorBridge) observeVideo(now time.Time, ssrc uint32, sequence uint16,
 		b.audioSSRC = 0
 		b.firstVideo = now
 		b.lastAudio = time.Time{}
+		b.beginMirrorSessionLocked(b.session, now)
 	}
 	if b.videoPacketCount < ^uint64(0) {
 		b.videoPacketCount++
+	}
+	if b.sessionSummary.status.Available && b.sessionSummary.status.Generation == b.session {
+		if b.sessionSummary.status.VideoRTPPacketCount < ^uint64(0) {
+			b.sessionSummary.status.VideoRTPPacketCount++
+		}
+		b.sessionSummary.status.LastVideoRTPObserved = true
+		b.sessionSummary.lastVideoRTPAt = now
 	}
 	b.videoSequence = sequence
 	b.videoTimestamp = timestamp
@@ -217,6 +422,8 @@ func (b *mirrorBridge) AirPlayMirrorSnapshot(now time.Time) worker.AirPlayMirror
 		}
 	}
 	status.HLSManifestReady, status.HLSSegmentReady, status.HLSSegmentAgeMS = mirrorHLSReadiness(b.hlsDir, now)
+	b.recordMirrorHLSReadiness(now, status.HLSManifestReady, status.HLSSegmentReady)
+	status.SessionSummary = b.sessionSummarySnapshot(now)
 	if encoderRunning && status.HLSManifestReady && status.HLSSegmentReady {
 		status.BridgeStage = "hls_ready"
 	} else if status.BridgeStage == "" {
@@ -461,7 +668,10 @@ func (b *mirrorBridge) run(ctx context.Context) error {
 		cancel()
 		readers.Wait()
 	}()
-	defer func() { _ = b.stopProcess() }()
+	defer func() {
+		_ = b.stopProcess()
+		b.markMirrorSessionEnded(b.runningSession, time.Now())
+	}()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	cleanup := time.NewTicker(10 * time.Second)
@@ -474,19 +684,28 @@ func (b *mirrorBridge) run(ctx context.Context) error {
 			b.setBridgeStage("rtp_listener_failed", "rtp_listener")
 			return err
 		case err := <-b.processExited:
+			exitClass := mirrorFFmpegExitClean
+			if err != nil {
+				exitClass = mirrorFFmpegExitError
+			}
+			b.recordMirrorFFmpegExit(b.runningSession, exitClass)
 			b.setBridgeStage("ffmpeg_exited", "ffmpeg_exit")
 			return fmt.Errorf("AirPlay mirror FFmpeg exited: %v", err)
 		case <-ticker.C:
-			mode, session := b.desired(time.Now())
+			now := time.Now()
+			mode, session := b.desired(now)
 			if mode != b.runningMode || session != b.runningSession {
 				if err := b.transition(ctx, mode, session); err != nil {
 					return err
 				}
 			}
+			manifestReady, segmentReady, _ := mirrorHLSReadiness(b.hlsDir, now)
+			b.recordMirrorHLSReadiness(now, manifestReady, segmentReady)
 		case <-cleanup.C:
 			if err := b.clearOldSegments(); err != nil {
 				return err
 			}
+			b.expireMirrorSessionSummary(time.Now())
 		}
 	}
 }
@@ -504,19 +723,25 @@ func (b *mirrorBridge) transition(ctx context.Context, mode mirrorMode, session 
 		b.setBridgeStage("hls_cleanup_failed", "hls_cleanup")
 		return err
 	}
-	b.runningSession = session
 	b.mu.Lock()
+	b.runningSession = session
 	b.runningMode = noMirror
 	b.mu.Unlock()
 	if mode == noMirror {
 		b.setBridgeStage("waiting_for_video_rtp", "")
+		now := time.Now()
+		if b.mirrorSessionExpired(session, now) {
+			b.markMirrorSessionEnded(session, now)
+		}
 		return nil
 	}
 	b.setBridgeStage("starting_ffmpeg", "")
+	b.recordMirrorMode(session, mode)
 	cmd := exec.CommandContext(ctx, b.ffmpegPath, b.commandArgs(mode)...)
 	cmd.WaitDelay = time.Second
 	// AirPlay metadata, private paths and RTP never enter process logs.
 	if err := cmd.Start(); err != nil {
+		b.recordMirrorFFmpegStart(session, mirrorFFmpegStartFailed)
 		b.setBridgeStage("ffmpeg_start_failed", "ffmpeg_start")
 		return fmt.Errorf("start AirPlay mirror encoder: %w", err)
 	}
@@ -527,6 +752,10 @@ func (b *mirrorBridge) transition(ctx context.Context, mode mirrorMode, session 
 	b.runningMode = mode
 	b.encoderRunning = true
 	b.bridgeStage = "awaiting_hls"
+	if b.sessionSummary.status.Available && b.sessionSummary.status.Generation == session {
+		b.sessionSummary.status.FFmpegStartClass = mirrorFFmpegStartStarted
+		b.sessionSummary.status.FFmpegExitClass = mirrorFFmpegExitNotObserved
+	}
 	if b.session == session {
 		b.activeSession = session
 	}
@@ -541,10 +770,14 @@ func (b *mirrorBridge) stopProcess() error {
 		b.mu.Unlock()
 		return nil
 	}
+	generation := b.runningSession
 	_ = b.process.Process.Kill()
 	select {
 	case <-b.processExited:
+		b.recordMirrorFFmpegExit(generation, mirrorFFmpegExitStopped)
 	case <-time.After(3 * time.Second):
+		b.recordMirrorFFmpegExit(generation, mirrorFFmpegExitTimeout)
+		b.setBridgeStage("ffmpeg_stop_failed", "ffmpeg_stop")
 		return fmt.Errorf("AirPlay mirror encoder did not stop")
 	}
 	b.process = nil
@@ -560,6 +793,9 @@ func (b *mirrorBridge) setBridgeStage(stage, failure string) {
 	b.mu.Lock()
 	b.bridgeStage = stage
 	b.failureStage = failure
+	if b.sessionSummary.status.Available && b.sessionSummary.status.FailureClass == mirrorFailureNone && failure != "" {
+		b.sessionSummary.status.FailureClass = mirrorFailureClass(failure)
+	}
 	b.mu.Unlock()
 }
 
