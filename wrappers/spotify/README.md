@@ -84,7 +84,7 @@ Native Edge: the licensed patch can be staged for an Android/Bionic build. The
 legacy source installer still needs to consume that staging path; prebuilt Edge
 distribution and physical execution are separate gates. No Linux binary is reused.
 
-Upstream: https://github.com/devgianlu/go-librespot,
-commit `57d7278d94a9233060c2a6238f5926ffd1e72de4` (GPL-3.0).
+Upstream: https://github.com/devgianlu/go-librespot, release `v0.10.2`,
+commit `6a3e25019de8d2893b3fa26b0273d8cc376241c5` (GPL-3.0).
 Images carry its license and commit; source is restored by `make references`.
 Distribution notices/source obligations remain a beta release gate.

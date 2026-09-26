@@ -8,7 +8,7 @@ import tarfile
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-UPSTREAM = "57d7278d94a9233060c2a6238f5926ffd1e72de4"
+UPSTREAM = "6a3e25019de8d2893b3fa26b0273d8cc376241c5"
 PATCHES = [
     ROOT / "wrappers/spotify/patches/licensed-vorbis.patch",
     ROOT / "wrappers/spotify/patches/stop-key-refusal-skip.patch",
@@ -16,11 +16,12 @@ PATCHES = [
 
 
 def stage(source: pathlib.Path, output: pathlib.Path) -> None:
-    current = subprocess.check_output(
-        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    resolved = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", f"{UPSTREAM}^{{commit}}"],
+        text=True,
     ).strip()
-    if current != UPSTREAM:
-        raise ValueError(f"Expected go-librespot {UPSTREAM}; got {current}")
+    if resolved != UPSTREAM:
+        raise ValueError(f"Expected go-librespot commit {UPSTREAM}; got {resolved}")
     dirty = subprocess.check_output(
         ["git", "-C", str(source), "status", "--porcelain"], text=True
     ).strip()
@@ -32,7 +33,7 @@ def stage(source: pathlib.Path, output: pathlib.Path) -> None:
     with tempfile.TemporaryDirectory() as temporary:
         archive = pathlib.Path(temporary) / "upstream.tar"
         subprocess.run(
-            ["git", "-C", str(source), "archive", "HEAD", "-o", str(archive)],
+            ["git", "-C", str(source), "archive", UPSTREAM, "-o", str(archive)],
             check=True,
         )
         output.mkdir(parents=True)

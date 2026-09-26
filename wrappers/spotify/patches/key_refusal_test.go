@@ -119,10 +119,46 @@ func TestRestrictedAndUnsupportedMediaStillScheduleRecovery(t *testing.T) {
 	}
 }
 
-func TestIsUnplayableMediaSkipsOnlyRestrictedAndUnsupported(t *testing.T) {
+func TestRestrictedAndUnsupportedMediaStopAtSkipBound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "restricted", err: librespot.ErrMediaRestricted},
+		{name: "unsupported", err: librespot.ErrNoSupportedFormats},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newKeyRefusalTestPlayer(t)
+			uri := setKeyRefusalTestTrack(p)
+			p.consecutiveUnplayableSkips = maxConsecutiveUnplayableSkips
+
+			called := false
+			var callbackErr error
+			p.handleAdvanceToLoadError(uri, false, tc.err, func(_ bool, err error) {
+				called = true
+				callbackErr = err
+			})
+
+			require.True(t, called)
+			require.ErrorIs(t, callbackErr, tc.err)
+			require.Zero(t, p.consecutiveUnplayableSkips)
+			require.Empty(t, p.loader.queue, "the skip bound must stop recovery")
+			require.False(t, p.state.player.IsPlaying)
+			require.False(t, p.state.player.IsPaused)
+			require.False(t, p.state.player.IsBuffering)
+			require.Zero(t, p.state.player.PlaybackSpeed)
+		})
+	}
+}
+
+func TestUnplayableAndSkippableMediaClassifyKeyRefusalSeparately(t *testing.T) {
 	keyErr := fmt.Errorf("track load failed: %w", &audio.KeyProviderError{Code: 1})
-	require.False(t, isUnplayableMedia(keyErr))
+	require.True(t, isUnplayableMedia(keyErr))
+	require.False(t, isSkippableMedia(keyErr))
 	require.True(t, isUnplayableMedia(librespot.ErrMediaRestricted))
+	require.True(t, isSkippableMedia(librespot.ErrMediaRestricted))
 	require.True(t, isUnplayableMedia(librespot.ErrNoSupportedFormats))
+	require.True(t, isSkippableMedia(librespot.ErrNoSupportedFormats))
 	require.False(t, isUnplayableMedia(errors.New("network timeout")))
+	require.False(t, isSkippableMedia(errors.New("network timeout")))
 }

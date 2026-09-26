@@ -1,5 +1,17 @@
 # zombiebox-gateway-core: component work
 
+## 0.1.3-dev.0 Spotify upstream candidate (unreleased)
+
+The Spotify wrapper now pins go-librespot v0.10.2 at commit
+`6a3e25019de8d2893b3fa26b0273d8cc376241c5`. The staged source keeps
+the MIT Vorbis replacement and adapts the audio-key-refusal patch to the new
+`playback_error` event: a refused key is reported as unplayable, while only
+restricted or unsupported media may be skipped. Patch tests, Go vet/race,
+format checks and the local Docker image build pass; the image contains the
+GPL and MIT notices and both patch files. This is a local QA candidate, not
+evidence of Spotify Premium playback. The selected account still needs a
+controlled retry; YouTube, IPTV and AirPlay physical gates remain open.
+
 ## September 26 bounded YouTube range QA trace
 
 The known-length YouTube MP4 response can now report sampled status, byte

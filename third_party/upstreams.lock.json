@@ -54,7 +54,7 @@
     {
       "name": "go-librespot",
       "url": "https://github.com/devgianlu/go-librespot.git",
-      "commit": "57d7278d94a9233060c2a6238f5926ffd1e72de4",
+      "commit": "6a3e25019de8d2893b3fa26b0273d8cc376241c5",
       "referenceBranch": "master",
       "purpose": "Spotify Connect external process; GPL distribution review required",
       "licenseHint": "GPL-3.0",

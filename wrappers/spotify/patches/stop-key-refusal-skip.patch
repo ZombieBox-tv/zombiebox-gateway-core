@@ -1,23 +1,28 @@
 --- a/daemon/controls.go
 +++ b/daemon/controls.go
-@@ -513,37 +513,60 @@
+@@ -736,37 +736,65 @@
  	return list, list.Snapshot(ctx, nil), nil
  }
  
 -// isUnplayableMedia reports whether a load failed for a reason that skipping
 -// forward can get past: media the account may not play, media in no format the
 -// daemon supports, or a track whose audio key Spotify refused.
-+// isUnplayableMedia reports errors that skipping forward can get past:
-+// account-restricted media and media in no format the daemon supports. A
-+// refused audio key is a session or license failure, not evidence that the
-+// next track will work.
++// isUnplayableMedia also feeds playback_error's unplayable field. A key
++// refusal makes a track unplayable here, but is not safe to skip past.
  func isUnplayableMedia(err error) bool {
 -	var keyErr *audio.KeyProviderError
++	var keyErr *audio.KeyProviderError
  	return errors.Is(err, librespot.ErrMediaRestricted) ||
 -		errors.Is(err, librespot.ErrNoSupportedFormats) ||
 -		errors.As(err, &keyErr)
-+		errors.Is(err, librespot.ErrNoSupportedFormats)
++		errors.Is(err, librespot.ErrNoSupportedFormats) ||
++		errors.As(err, &keyErr)
  }
++
++func isSkippableMedia(err error) bool {
++	return errors.Is(err, librespot.ErrMediaRestricted) ||
++		errors.Is(err, librespot.ErrNoSupportedFormats)
++}
  
 -// loadCurrentTrackOrSkip loads the current track; if it is unplayable it
 -// advances forward to the first playable one instead of failing — so a
@@ -55,7 +60,7 @@
 +}
 +
 +func (p *AppPlayer) handleCurrentTrackLoadError(uri string, drop bool, err error, then func(error)) {
-+	if err == nil || !isUnplayableMedia(err) {
++	if err == nil || !isSkippableMedia(err) {
 +		var keyErr *audio.KeyProviderError
 +		if errors.As(err, &keyErr) {
 +			p.app.log.WithError(err).Warnf("playback unavailable: Spotify refused the audio key (code %d) for this playback context: %s", keyErr.Code, uri)
@@ -82,21 +87,11 @@
  	})
  }
  
-@@ -667,8 +690,11 @@
- 			})
- 			if err != nil {
- 				return loaderResult{
--					err:    err,
--					commit: func(_ *AppPlayer, err error) { then(err) },
-+					err: err,
-+					commit: func(p *AppPlayer, err error) {
+@@ -895,2 +923,3 @@
+ 						p.emitPlaybackError(playbackErrorStageLoad, spotId.Uri(), err)
 +						p.stopAfterKeyRefusal(err)
-+						then(err)
-+					},
- 				}
- 			}
- 
-@@ -1259,44 +1285,53 @@
+ 						then(err)
+@@ -1519,44 +1548,53 @@
  		p.state.player.IsBuffering = false
  	}
  
@@ -137,7 +132,7 @@
 -		} else {
 -			p.app.log.WithError(err).Infof("skipping unplayable media: %s", uri)
 -		}
-+	if !isUnplayableMedia(err) {
++	if !isSkippableMedia(err) {
 +		p.consecutiveUnplayableSkips = 0
 +		then(false, fmt.Errorf("failed loading current track (advance to %s): %w", uri, err))
 +		return
