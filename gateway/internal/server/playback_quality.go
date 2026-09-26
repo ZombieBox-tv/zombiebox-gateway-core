@@ -747,6 +747,11 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		fail(w, 500, "storage_error")
 		return
 	}
+	if provider == "youtube" {
+		// Correlate a manual rendition change with its actual transport and
+		// position policy. Never include the source URL, session ID or ticket.
+		log.Printf("media quality_plan provider=youtube requested=%q chosen=%q mode=%q split=%t requested_ms=%d resume_ms=%d offset_ms=%d seekable=%t prepare=%t", request.QualityID, chosenQuality, plan.Mode, targetSource.AudioURL != "", request.PositionMS, plan.ResumeMS, plan.TimelineOffsetMS, plan.Seekable, plan.PrepareBeforePlayback)
+	}
 
 	respond(w, 201, plan)
 }
