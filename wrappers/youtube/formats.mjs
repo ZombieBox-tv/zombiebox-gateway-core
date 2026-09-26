@@ -57,6 +57,8 @@ export const TIER_LABELS = Object.freeze({
   "360p": ["360p"],
 });
 
+const AAC_AUDIO_QUALITY_ORDER = Object.freeze(["best", "bestefficiency"]);
+
 export async function getAvailableVariants(
   info,
   player,
@@ -89,7 +91,7 @@ export async function getAvailableVariants(
   const getHasValidAudio = () => {
     if (!audioPromise) {
       audioPromise = (async () => {
-        for (const quality of ["bestefficiency", "best"]) {
+        for (const quality of AAC_AUDIO_QUALITY_ORDER) {
           try {
             const audio = info.chooseFormat({
               type: "audio",
@@ -195,7 +197,7 @@ export async function resolveFormats(
   const pairedAudio = async () => {
     if (audioChecked) return audioUrl;
     audioChecked = true;
-    for (const quality of ["bestefficiency", "best"]) {
+    for (const quality of AAC_AUDIO_QUALITY_ORDER) {
       try {
         const audio = info.chooseFormat({ type: "audio", format: "mp4", codec: "mp4a", quality });
         if (audio.has_audio && !audio.has_video) {

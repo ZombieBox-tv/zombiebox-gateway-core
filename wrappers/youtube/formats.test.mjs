@@ -220,32 +220,79 @@ test("missing audio never yields a video-only plan", async () => {
     /audio_unavailable/,
   );
 });
-test("failed combined and low-rate audio try another bounded format", async () => {
-  const selected = [];
+test("split HD selects the highest-bitrate compatible AAC without adding bitrate metadata", async () => {
+  const audioSelections = [];
   const candidates = {
-    combined: { ...format("combined", true, true), itag: 18 },
-    low: { ...format("low-audio", false, true), itag: 139 },
-    high: { ...format("high-audio", false, true), itag: 140 },
-    video: { ...format("video", true, false), itag: 134 },
+    low: { ...format("low-audio", false, true), itag: 139, bitrate: 48_000 },
+    high: { ...format("high-audio", false, true), itag: 140, bitrate: 128_000 },
+    video: { ...format("video-720", true, false, "720p"), itag: 136 },
   };
   const result = await resolveFormats(
     {
       chooseFormat(options) {
-        if (options.type === "video+audio") return candidates.combined;
+        if (options.type === "video+audio") throw new Error("no progressive format");
+        if (options.type === "video" && options.quality === "720p") return candidates.video;
+        if (options.type === "audio") {
+          audioSelections.push(options.quality);
+          return options.quality === "best" ? candidates.high : candidates.low;
+        }
+        throw new Error("missing format");
+      },
+    },
+    {},
+    async () => true,
+    "720p",
+  );
+
+  assert.deepEqual(result, { url: "video-720", audioUrl: "high-audio", mimeType: "video/mp4" });
+  assert.deepEqual(audioSelections, ["best"]);
+  assert.equal(Object.hasOwn(result, "audioBitrate"), false);
+});
+
+test("split HD falls back when the highest-bitrate compatible AAC URL is unavailable", async () => {
+  const selected = [];
+  const candidates = {
+    low: { ...format("low-audio", false, true), itag: 139, bitrate: 48_000 },
+    high: { ...format("high-audio", false, true), itag: 140, bitrate: 128_000 },
+    video: { ...format("video-720", true, false, "720p"), itag: 136 },
+  };
+  const result = await resolveFormats(
+    {
+      chooseFormat(options) {
+        if (options.type === "video+audio") throw new Error("no progressive format");
+        if (options.type === "video" && options.quality === "720p") return candidates.video;
         if (options.type === "audio")
           return options.quality === "best" ? candidates.high : candidates.low;
-        if (options.type === "video" && options.quality === "1080p") throw new Error("missing");
-        if (options.type === "video") return candidates.video;
+        throw new Error("missing format");
       },
     },
     {},
     async (url) => {
       selected.push(url);
-      return url !== "combined" && url !== "low-audio";
+      return url !== "high-audio";
     },
+    "720p",
   );
-  assert.deepEqual(result, { url: "video", audioUrl: "high-audio", mimeType: "video/mp4" });
-  assert.deepEqual(selected, ["combined", "video", "low-audio", "high-audio"]);
+  assert.deepEqual(result, { url: "video-720", audioUrl: "low-audio", mimeType: "video/mp4" });
+  assert.deepEqual(selected, ["video-720", "high-audio", "low-audio"]);
+});
+
+test("available variants validate the best AAC candidate before efficiency fallback", async () => {
+  const audioSelections = [];
+  const info = {
+    chooseFormat(options) {
+      if (options.type === "audio") {
+        audioSelections.push(options.quality);
+        return format(`${options.quality}-audio`, false, true);
+      }
+      if (options.type === "video" && options.quality === "720p")
+        return format("video-720", true, false, "720p");
+      throw new Error("missing format");
+    },
+  };
+
+  assert.deepEqual(await getAvailableVariants(info, {}, async () => true, ["720p"]), ["720p"]);
+  assert.deepEqual(audioSelections, ["best"]);
 });
 
 test("getAvailableVariants lists only tiers with video and available audio", async () => {
