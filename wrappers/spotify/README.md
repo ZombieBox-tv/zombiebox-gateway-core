@@ -34,6 +34,16 @@ maps that state to `STOPPED`. `encodedBytes` is cumulative for the worker proces
 so this guard only identifies a process that has encoded no audio yet. It does not
 measure per-track progress after earlier audio was encoded.
 
+Authenticated worker diagnostics also expose cumulative, fixed-category Zeroconf
+stage counters: `getInfoRequests`, `addUserRequests`, `checksumAccepted`, and the
+accepted/refused/bad-checksum/busy outcomes. These distinguish a phone request that
+reached the receiver from one that completed account authentication without keeping
+device names, account names, IP addresses, blobs, keys or raw daemon lines. They reset
+when the worker process restarts. A `getInfo` request proves a client reached the
+Zeroconf TCP listener after discovery; it does not prove the phone received the mDNS
+advertisement. An `addUser` acceptance still does not prove that Spotify will grant
+an audio key for a selected track.
+
 Open limitations: public PlayPlay is a stub; this mitigation does not introduce a
 DRM workaround or claim that Spotify audio playback succeeds. Spotify makes
 per-track, context-dependent licensing decisions; account-specific license

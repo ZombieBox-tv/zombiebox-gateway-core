@@ -28,6 +28,9 @@ const (
 	spotifyCategoryPairingBadChecksum
 	spotifyCategoryPairingBusy
 	spotifyCategoryPairingRequestError
+	spotifyCategoryPairingGetInfo
+	spotifyCategoryPairingAddUser
+	spotifyCategoryPairingChecksumAccepted
 	spotifyDiagnosticCategoryCount
 )
 
@@ -107,6 +110,9 @@ func newSpotifyDaemonDiagnostics(clock func() time.Time) *SpotifyDaemonDiagnosti
 		{spotifyCategoryPairingBadChecksum, "zeroconf received request with bad checksum"},
 		{spotifyCategoryPairingBusy, "zeroconf is authenticating another user"},
 		{spotifyCategoryPairingRequestError, "failed handling zeroconf add user request"},
+		{spotifyCategoryPairingGetInfo, "zeroconf getinfo request"},
+		{spotifyCategoryPairingAddUser, "zeroconf adduser request"},
+		{spotifyCategoryPairingChecksumAccepted, "zeroconf adduser checksum accepted"},
 	} {
 		d.patterns = append(d.patterns, newSpotifyFailurePattern(entry.category, entry.phrase))
 	}
@@ -238,15 +244,18 @@ type spotifyDaemonHealth struct {
 	LastStopStatus      int                       `json:"lastStopStatus,omitempty"`
 }
 
-// spotifyPairingDiagnostics exposes only aggregate Zeroconf outcomes. The
-// daemon's source log lines include sender-provided device and account names,
-// so the parser records fixed categories and discards all raw text.
+// spotifyPairingDiagnostics exposes only aggregate Zeroconf stages and
+// outcomes. The daemon's source log lines can include sender-provided device
+// and account names, so the parser records fixed categories and discards text.
 type spotifyPairingDiagnostics struct {
-	Accepted     uint64 `json:"accepted"`
-	Refused      uint64 `json:"refused"`
-	BadChecksum  uint64 `json:"badChecksum"`
-	Busy         uint64 `json:"busy"`
-	RequestError uint64 `json:"requestError"`
+	GetInfoRequests  uint64 `json:"getInfoRequests"`
+	AddUserRequests  uint64 `json:"addUserRequests"`
+	ChecksumAccepted uint64 `json:"checksumAccepted"`
+	Accepted         uint64 `json:"accepted"`
+	Refused          uint64 `json:"refused"`
+	BadChecksum      uint64 `json:"badChecksum"`
+	Busy             uint64 `json:"busy"`
+	RequestError     uint64 `json:"requestError"`
 }
 
 // An active attempt is evaluated against the refusal circuit. Reconnects during
@@ -306,11 +315,14 @@ func (d *SpotifyDaemonDiagnostics) snapshot(bufferingWithoutTrack, audioActive b
 		LastStopResult:      d.lastStopResult,
 		LastStopStatus:      d.lastStopHTTPStatus,
 		Pairing: spotifyPairingDiagnostics{
-			Accepted:     d.counts[spotifyCategoryPairingAccepted],
-			Refused:      d.counts[spotifyCategoryPairingRefused],
-			BadChecksum:  d.counts[spotifyCategoryPairingBadChecksum],
-			Busy:         d.counts[spotifyCategoryPairingBusy],
-			RequestError: d.counts[spotifyCategoryPairingRequestError],
+			GetInfoRequests:  d.counts[spotifyCategoryPairingGetInfo],
+			AddUserRequests:  d.counts[spotifyCategoryPairingAddUser],
+			ChecksumAccepted: d.counts[spotifyCategoryPairingChecksumAccepted],
+			Accepted:         d.counts[spotifyCategoryPairingAccepted],
+			Refused:          d.counts[spotifyCategoryPairingRefused],
+			BadChecksum:      d.counts[spotifyCategoryPairingBadChecksum],
+			Busy:             d.counts[spotifyCategoryPairingBusy],
+			RequestError:     d.counts[spotifyCategoryPairingRequestError],
 		},
 	}
 	for i, name := range spotifyFailureNames {

@@ -101,6 +101,9 @@ func TestSpotifyDaemonDiagnosticsCountsPairingOutcomesWithoutRetainingSenderData
 	d := NewSpotifyDaemonDiagnostics()
 	privateDevice := "Kitchen iPad private-user private-auth-blob"
 	for _, part := range []string{
+		"zeroconf getinfo request\n",
+		"zeroconf adduser request from " + privateDevice + "\n",
+		"zeroconf adduser checksum accepted for " + privateDevice + "\n",
 		"accepted zeroconf from " + privateDevice + "\n",
 		"refused zeroconf from " + privateDevice + "\n",
 		"zeroconf received request with bad checksum\n",
@@ -113,7 +116,10 @@ func TestSpotifyDaemonDiagnosticsCountsPairingOutcomesWithoutRetainingSenderData
 	}
 
 	snapshot := d.snapshot(false, false)
-	want := (spotifyPairingDiagnostics{Accepted: 1, Refused: 1, BadChecksum: 1, Busy: 1, RequestError: 1})
+	want := (spotifyPairingDiagnostics{
+		GetInfoRequests: 1, AddUserRequests: 1, ChecksumAccepted: 1,
+		Accepted: 1, Refused: 1, BadChecksum: 1, Busy: 1, RequestError: 1,
+	})
 	if snapshot.Pairing != want {
 		t.Fatalf("pairing outcomes = %+v, want %+v", snapshot.Pairing, want)
 	}
