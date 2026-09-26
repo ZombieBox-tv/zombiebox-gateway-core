@@ -191,11 +191,12 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 	}
 	id, ticket := randomID(16), randomID(24)
 	ctx, cancel := context.WithDeadline(context.Background(), sess.expires)
+	knownLengthRemux := requiresKnownLengthYouTubeRemux(d, sess.source, sess.metadata, mode, time.Now())
 	s.sessions[id] = &session{
 		networkAdaptation: sess.networkAdaptation,
 		adaptation:        sess.adaptation,
 		mode:              mode,
-		knownLengthRemux:  requiresKnownLengthYouTubeRemux(d, sess.source, sess.metadata, mode, time.Now()),
+		knownLengthRemux:  knownLengthRemux,
 		device:            d.ID,
 		ticket:            ticket,
 		expires:           sess.expires,
@@ -216,15 +217,16 @@ func (s *Server) selectAudio(w http.ResponseWriter, r *http.Request, d domain.De
 		seekable = !sess.source.Live
 	}
 	plan := domain.Plan{
-		Version:          1,
-		SubtitleID:       sess.subtitleID,
-		SessionID:        id,
-		Mode:             mode,
-		URL:              "/v1/streams/" + id + "?ticket=" + ticket,
-		MIME:             mime,
-		Seekable:         seekable,
-		TimelineOffsetMS: request.PositionMS,
-		Item:             sess.source.Item,
+		Version:               1,
+		SubtitleID:            sess.subtitleID,
+		SessionID:             id,
+		Mode:                  mode,
+		URL:                   "/v1/streams/" + id + "?ticket=" + ticket,
+		MIME:                  mime,
+		PrepareBeforePlayback: knownLengthRemux || mode == "HYBRID",
+		Seekable:              seekable,
+		TimelineOffsetMS:      request.PositionMS,
+		Item:                  sess.source.Item,
 	}
 	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
 	respond(w, 201, plan)

@@ -149,7 +149,17 @@ func (s *Server) startCompanionMedia(ctx context.Context, g companion.Grant, med
 	expires := time.Now().Add(6 * time.Hour)
 	sessionCtx, cancel := context.WithDeadline(context.Background(), expires)
 	s.sessions[id] = &session{device: target.ID, castID: castID, ticket: ticket, source: source, mode: decision.mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: quality}, expires: expires, ctx: sessionCtx, cancel: cancel, resources: map[string]string{}}
-	plan := &domain.Plan{Version: 1, SessionID: id, Mode: decision.mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: source.MIME, Seekable: true, Item: source.Item, SubtitleID: decision.subtitleID}
+	plan := &domain.Plan{
+		Version:               1,
+		SessionID:             id,
+		Mode:                  decision.mode,
+		URL:                   "/v1/streams/" + id + "?ticket=" + ticket,
+		MIME:                  source.MIME,
+		PrepareBeforePlayback: decision.mode == "HYBRID",
+		Seekable:              true,
+		Item:                  source.Item,
+		SubtitleID:            decision.subtitleID,
+	}
 	if decision.mode == "REMUX" || decision.mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
 		plan.Seekable = false

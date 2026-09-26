@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"errors"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +16,9 @@ import (
 )
 
 const qualityPrefBucket = "quality_preferences"
+
+const youtubeQualityResolveAttempts = 2
+const youtubeQualityResolveRetryDelay = 200 * time.Millisecond
 
 type qualityPreference struct {
 	QualityID string `json:"qualityId"`
@@ -137,13 +143,14 @@ func isNativeYouTubeSplitQuality(source domain.Source, metadata *domain.Metadata
 	return hasNativeH264 && hasAAC
 }
 
-func (s *Server) probeRemoteMedia(ctx context.Context, src domain.Source) (domain.Metadata, bool) {
+func (s *Server) probeRemoteMedia(ctx context.Context, src domain.Source) (domain.Metadata, bool, bool) {
 	if s.deps.RemoteMedia == nil || !media.RemoteCandidate(src) {
-		return domain.Metadata{}, false
+		return domain.Metadata{}, false, false
 	}
 	meta, err := s.deps.RemoteMedia.ProbeRemote(ctx, src)
 	if err != nil {
-		return domain.Metadata{}, false
+		retryable := ctx.Err() == nil && !errors.Is(err, context.Canceled) && !isDeterministicYouTubeProbeFailure(err)
+		return domain.Metadata{}, false, retryable
 	}
 	hasVideo, hasAudio := false, false
 	for _, stream := range meta.Streams {
@@ -151,26 +158,162 @@ func (s *Server) probeRemoteMedia(ctx context.Context, src domain.Source) (domai
 		hasAudio = hasAudio || stream.Type == "audio"
 	}
 	if !hasVideo || !hasAudio {
-		return domain.Metadata{}, false
+		return domain.Metadata{}, false, false
 	}
-	return meta, true
+	return meta, true, false
+}
+
+func isManualYouTubeQuality(quality string) bool {
+	return quality != "" && quality != "auto" && quality != "LOW" && quality != "STANDARD" && playback.ValidQuality(quality)
+}
+
+func hasDeterministicYouTubeQualityMessage(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"video_unavailable",
+		"audio_unavailable",
+		"quality_unavailable",
+		"unsupported quality",
+		"invalid wrapper stream",
+		"invalid youtube stream origin",
+		"unsupported codec",
+		"decoder not found",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDeterministicYouTubeResolverFailure(err error) bool {
+	if hasDeterministicYouTubeQualityMessage(err) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+
+	fields := strings.Fields(strings.ToLower(err.Error()))
+	if len(fields) < 3 || fields[0] != "provider" || fields[1] != "http" {
+		return false
+	}
+	status, parseErr := strconv.Atoi(fields[2])
+	if parseErr != nil || status < http.StatusBadRequest {
+		return false
+	}
+	if status == http.StatusNotImplemented || status == http.StatusHTTPVersionNotSupported {
+		return true
+	}
+	if status >= http.StatusInternalServerError {
+		return false
+	}
+	return status != http.StatusRequestTimeout && status != http.StatusTooEarly && status != http.StatusTooManyRequests
+}
+
+func isDeterministicYouTubeProbeFailure(err error) bool {
+	if hasDeterministicYouTubeQualityMessage(err) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no video stream") || strings.Contains(message, "no audio stream")
+}
+
+func freshYouTubeQualityRequest(base domain.Source, quality string) domain.Source {
+	req := base
+	req.ResolveQuality = quality
+	if req.ResolveURL != "" {
+		// Re-resolve from the stable wrapper locator, never from a prior signed
+		// video/audio URL that may have expired during the first attempt.
+		req.URL = req.ResolveURL
+		resolveHeaders := req.ResolveHeaders
+		if resolveHeaders == nil {
+			resolveHeaders = req.Headers
+		}
+		req.Headers = resolveHeaders.Clone()
+		req.AudioURL = ""
+		req.AudioHeaders = nil
+	}
+	return req
+}
+
+func waitForYouTubeQualityRetry(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	timer := time.NewTimer(youtubeQualityResolveRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
+	}
+}
+
+func traceYouTubeQualityAttempt(enabled bool, quality, stage string, attempt int, outcome string) {
+	if !enabled || os.Getenv("ZOMBIE_MEDIA_TRACE") != "1" {
+		return
+	}
+	log.Printf("media youtube_quality tier=%s stage=%s attempt=%d outcome=%s", quality, stage, attempt, outcome)
 }
 
 func (s *Server) resolveAndProbeYouTubeSource(ctx context.Context, base domain.Source, quality string) (domain.Source, domain.Metadata, bool) {
 	if s.deps.Resolver == nil {
 		return domain.Source{}, domain.Metadata{}, false
 	}
-	req := base
-	req.ResolveQuality = quality
-	resolved, err := s.deps.Resolver.Resolve(ctx, req)
-	if err != nil {
-		return domain.Source{}, domain.Metadata{}, false
+	manualQuality := base.Item.Provider == "youtube" && isManualYouTubeQuality(quality)
+	retryable := manualQuality && base.ResolveURL != ""
+	maxAttempts := 1
+	if retryable {
+		maxAttempts = youtubeQualityResolveAttempts
 	}
-	meta, ok := s.probeRemoteMedia(ctx, resolved)
-	if !ok {
-		return domain.Source{}, domain.Metadata{}, false
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			traceYouTubeQualityAttempt(manualQuality, quality, "resolver", attempt, "cancelled")
+			return domain.Source{}, domain.Metadata{}, false
+		}
+
+		resolved, err := s.deps.Resolver.Resolve(ctx, freshYouTubeQualityRequest(base, quality))
+		if err != nil {
+			traceYouTubeQualityAttempt(manualQuality, quality, "resolver", attempt, "failed")
+			if !retryable || attempt == maxAttempts || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isDeterministicYouTubeResolverFailure(err) {
+				return domain.Source{}, domain.Metadata{}, false
+			}
+			traceYouTubeQualityAttempt(manualQuality, quality, "resolver", attempt, "retry")
+			if !waitForYouTubeQualityRetry(ctx) {
+				traceYouTubeQualityAttempt(manualQuality, quality, "resolver", attempt, "cancelled")
+				return domain.Source{}, domain.Metadata{}, false
+			}
+			continue
+		}
+		traceYouTubeQualityAttempt(manualQuality, quality, "resolver", attempt, "resolved")
+
+		meta, ok, probeRetryable := s.probeRemoteMedia(ctx, resolved)
+		if !ok {
+			traceYouTubeQualityAttempt(manualQuality, quality, "probe", attempt, "failed")
+			if !retryable || !probeRetryable || attempt == maxAttempts || ctx.Err() != nil {
+				return domain.Source{}, domain.Metadata{}, false
+			}
+			traceYouTubeQualityAttempt(manualQuality, quality, "probe", attempt, "retry")
+			if !waitForYouTubeQualityRetry(ctx) {
+				traceYouTubeQualityAttempt(manualQuality, quality, "probe", attempt, "cancelled")
+				return domain.Source{}, domain.Metadata{}, false
+			}
+			continue
+		}
+		traceYouTubeQualityAttempt(manualQuality, quality, "probe", attempt, "passed")
+		return resolved, meta, true
 	}
-	return resolved, meta, true
+	return domain.Source{}, domain.Metadata{}, false
 }
 
 func (s *Server) playbackQualities(w http.ResponseWriter, r *http.Request, d domain.Device) {
@@ -378,14 +521,15 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 	s.sessions[id] = newSess
 
 	plan := domain.Plan{
-		Version:    1,
-		SubtitleID: oldSess.subtitleID,
-		SessionID:  id,
-		Mode:       mode,
-		URL:        "/v1/streams/" + id + "?ticket=" + ticket,
-		MIME:       targetSource.MIME,
-		Live:       targetSource.Live,
-		Item:       targetSource.Item,
+		Version:               1,
+		SubtitleID:            oldSess.subtitleID,
+		SessionID:             id,
+		Mode:                  mode,
+		URL:                   "/v1/streams/" + id + "?ticket=" + ticket,
+		MIME:                  targetSource.MIME,
+		PrepareBeforePlayback: newSess.knownLengthRemux || mode == "HYBRID",
+		Live:                  targetSource.Live,
+		Item:                  targetSource.Item,
 	}
 	if mode == "TRANSCODE" || mode == "REMUX" {
 		plan.MIME = "video/mp4"

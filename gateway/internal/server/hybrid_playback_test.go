@@ -248,7 +248,7 @@ func TestHybridPlaybackPlanIsSeekable(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &plan); err != nil {
 		t.Fatal(err)
 	}
-	if plan.Mode != "HYBRID" || plan.MIME != "video/mp4" || !plan.Seekable || plan.ResumeMS != 0 {
+	if plan.Mode != "HYBRID" || !plan.PrepareBeforePlayback || plan.MIME != "video/mp4" || !plan.Seekable || plan.ResumeMS != 0 {
 		t.Fatalf("invalid hybrid plan: %+v", plan)
 	}
 }
@@ -269,7 +269,7 @@ func TestHybridIsAutomaticResponseOnlyAndReceiverCanStartIt(t *testing.T) {
 		URL: "https://media.test/movie.mkv", MIME: "video/x-matroska",
 		Item: domain.Item{ID: "movie", Kind: "video", Playable: true},
 	})
-	if err != nil || plan.Mode != "HYBRID" || plan.MIME != "video/mp4" || !plan.Live || plan.Seekable {
+	if err != nil || plan.Mode != "HYBRID" || !plan.PrepareBeforePlayback || plan.MIME != "video/mp4" || !plan.Live || plan.Seekable {
 		t.Fatalf("receiver hybrid plan: %+v %v", plan, err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -276,6 +277,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	}
 	knownLengthRemux := requiresKnownLengthYouTubeRemux(d, resolved, decision.metadata, mode, time.Now())
 	s.sessions[id].knownLengthRemux = knownLengthRemux
+	plan.PrepareBeforePlayback = knownLengthRemux || mode == "HYBRID"
 	if mode == "REMUX" || mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
 		if isAudioOnly(resolved, decision.metadata) {
@@ -306,6 +308,9 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 		plan.Seekable = !resolved.Live
 		plan.ResumeMS = 0
+	}
+	if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" {
+		log.Printf("media plan provider=%s mode=%s split=%t quality=%s resume_ms=%d known_length_remux=%t", resolved.Item.Provider, mode, resolved.AudioURL != "", req.Quality, resume, knownLengthRemux)
 	}
 	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
 	respond(w, 201, plan)
@@ -447,7 +452,21 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	knownLengthRemux := sess.knownLengthRemux && resource == ""
+	prepareRequested := r.Method == http.MethodHead && r.URL.Query().Get("prepare") == "1" && resource == ""
 	s.mu.Unlock()
+	if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" {
+		rangeKind := "none"
+		if value := r.Header.Get("Range"); value != "" {
+			rangeKind = "other"
+			if strings.HasPrefix(value, "bytes=") {
+				rangeKind = "closed"
+				if strings.HasSuffix(value, "-") {
+					rangeKind = "open"
+				}
+			}
+		}
+		log.Printf("media request provider=%s mode=%s method=%s range=%s known_length_remux=%t", src.Item.Provider, sess.mode, r.Method, rangeKind, knownLengthRemux)
+	}
 	select {
 	case s.streams <- struct{}{}:
 		defer func() { <-s.streams }()
@@ -468,6 +487,54 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		spool := s.getOrStartHybridSpool(sess)
+		if prepareRequested {
+			if r.Context().Err() != nil {
+				return
+			}
+			if err := sess.ctx.Err(); err != nil {
+				fail(w, 504, "conversion_timeout")
+				return
+			}
+			select {
+			case <-spool.done:
+			default:
+				w.Header().Set("Retry-After", "2")
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+			if spool.err != nil {
+				writeHybridSpoolFailure(s, w, r, sess, spool, knownLengthRemux)
+				return
+			}
+			if err := spool.acquireReader(); err != nil {
+				fail(w, 500, "media_error")
+				return
+			}
+			defer spool.releaseReader()
+			spoolPath, _, err := spool.readerInfo()
+			if err != nil {
+				fail(w, 500, "media_error")
+				return
+			}
+			info, err := os.Lstat(spoolPath)
+			spool.mu.Lock()
+			fileInfo := spool.fileInfo
+			spool.mu.Unlock()
+			if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || fileInfo == nil || !os.SameFile(fileInfo, info) {
+				fail(w, 500, "media_error")
+				return
+			}
+			mime := "video/mp4"
+			if isAudioOnly(src, sess.metadata) {
+				mime = "audio/mp4"
+			}
+			w.Header().Set("Content-Type", mime)
+			w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+			w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		startupWait := s.hybridStartupWait
 		if startupWait <= 0 {
 			startupWait = maxHybridStartupWait
@@ -485,23 +552,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if spool.err != nil {
-			logMediaConversionFailure(spool.err, sess.mode, knownLengthRemux)
-			if errors.Is(spool.err, media.ErrBusy) {
-				fail(w, 429, "media_busy")
-			} else if errors.Is(spool.err, ErrSpoolQuotaExceeded) {
-				fail(w, 507, "spool_quota_exceeded")
-			} else if errors.Is(spool.err, ErrSpoolLimitExceeded) {
-				fail(w, 507, "spool_limit_exceeded")
-			} else if errors.Is(spool.err, ErrSpoolStorageUnavailable) {
-				fail(w, 500, "spool_storage_unavailable")
-			} else if errors.Is(spool.err, context.Canceled) || errors.Is(spool.err, context.DeadlineExceeded) {
-				fail(w, 504, "conversion_timeout")
-			} else {
-				s.mu.Lock()
-				_ = s.revertFailedSessionQualityLocked(r.Context(), r.PathValue("session"), sess)
-				s.mu.Unlock()
-				fail(w, 502, "conversion_failed")
-			}
+			writeHybridSpoolFailure(s, w, r, sess, spool, knownLengthRemux)
 			return
 		}
 		if err := spool.acquireReader(); err != nil {
@@ -599,6 +650,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	if src.Item.Provider == "youtube" && src.AudioURL == "" && media.YouTubeRangeOrigin(src.URL) && (r.Header.Get("Range") == "" || strings.HasSuffix(r.Header.Get("Range"), "-")) {
 		started, err := media.RelayYouTubeProgressive(w, r, s.deps.StreamHTTP, src)
+		if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" {
+			log.Printf("media progressive relay completed started=%t error=%t", started, err != nil)
+		}
 		if err != nil && ctx.Err() == nil {
 			if started {
 				panic(http.ErrAbortHandler)
@@ -663,6 +717,26 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
+	}
+}
+
+func writeHybridSpoolFailure(s *Server, w http.ResponseWriter, r *http.Request, sess *session, spool *hybridSpool, knownLengthRemux bool) {
+	logMediaConversionFailure(spool.err, sess.mode, knownLengthRemux)
+	if errors.Is(spool.err, media.ErrBusy) {
+		fail(w, 429, "media_busy")
+	} else if errors.Is(spool.err, ErrSpoolQuotaExceeded) {
+		fail(w, 507, "spool_quota_exceeded")
+	} else if errors.Is(spool.err, ErrSpoolLimitExceeded) {
+		fail(w, 507, "spool_limit_exceeded")
+	} else if errors.Is(spool.err, ErrSpoolStorageUnavailable) {
+		fail(w, 500, "spool_storage_unavailable")
+	} else if errors.Is(spool.err, context.Canceled) || errors.Is(spool.err, context.DeadlineExceeded) {
+		fail(w, 504, "conversion_timeout")
+	} else {
+		s.mu.Lock()
+		_ = s.revertFailedSessionQualityLocked(r.Context(), r.PathValue("session"), sess)
+		s.mu.Unlock()
+		fail(w, 502, "conversion_failed")
 	}
 }
 

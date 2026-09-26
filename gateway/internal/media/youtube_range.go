@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -110,6 +112,9 @@ func relayYouTubeOpenRange(w http.ResponseWriter, r *http.Request, client HTTPCl
 		}
 		if total == 0 {
 			total = size
+			if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" {
+				log.Printf("media progressive first range method=%s start=%d total_bytes=%d first_bytes=%d", r.Method, start, total, last-next+1)
+			}
 			w.Header().Set("Accept-Ranges", "bytes")
 			w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 			w.Header().Set("Content-Length", strconv.FormatInt(total-start, 10))

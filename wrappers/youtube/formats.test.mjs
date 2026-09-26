@@ -59,6 +59,65 @@ test("when baseline 360p is unavailable, auto falls back to validated adaptive H
   );
   assert.deepEqual(result, { url: "high-video", audioUrl: "aac", mimeType: "video/mp4" });
 });
+
+test("auto prefers a validated combined 720p after the 360p check fails", async () => {
+  const selected = [];
+  const result = await resolveFormats(
+    {
+      chooseFormat(options) {
+        if (options.type === "video+audio" && options.quality === "360p")
+          return format("baseline-360", true, true);
+        if (options.type === "video+audio" && options.quality === "720p")
+          return format("progressive-720", true, true);
+        if (options.type === "video" && options.quality === "1080p")
+          return format("adaptive-1080", true, false);
+        if (options.type === "audio") return format("aac", false, true);
+        throw new Error("missing");
+      },
+    },
+    {},
+    async (url) => {
+      selected.push(url);
+      return url !== "baseline-360";
+    },
+  );
+
+  assert.deepEqual(result, { url: "progressive-720", mimeType: "video/mp4" });
+  assert.deepEqual(selected, ["baseline-360", "progressive-720"]);
+});
+
+test("auto tries lower adaptive tiers before 1080p and validates paired audio", async () => {
+  const selected = [];
+  const result = await resolveFormats(
+    {
+      chooseFormat(options) {
+        if (options.type === "video+audio")
+          return format(`progressive-${options.quality}`, true, true);
+        if (options.type === "video" && options.quality === "720p")
+          return format("adaptive-720", true, false);
+        if (options.type === "video" && options.quality === "1080p")
+          return format("adaptive-1080", true, false);
+        if (options.type === "audio") return format("aac", false, true);
+        throw new Error("missing");
+      },
+    },
+    {},
+    async (url) => {
+      selected.push(url);
+      return url === "adaptive-720" || url === "aac";
+    },
+  );
+
+  assert.deepEqual(result, { url: "adaptive-720", audioUrl: "aac", mimeType: "video/mp4" });
+  assert.deepEqual(selected, [
+    "progressive-360p",
+    "progressive-720p",
+    "progressive-480p",
+    "adaptive-720",
+    "aac",
+  ]);
+});
+
 test("adaptive selection requires separate audio and bounds video resolution", async () => {
   const calls = [];
   const result = await resolveFormats(
@@ -77,7 +136,7 @@ test("adaptive selection requires separate audio and bounds video resolution", a
   assert.equal(result.url, "video");
   assert.deepEqual(
     calls.filter((x) => x.type === "video").map((x) => x.quality),
-    ["1080p", "720p", "480p"],
+    ["720p", "480p"],
   );
 });
 test("expired high source falls back to validated 720p combined", async () => {
@@ -99,7 +158,7 @@ test("expired high source falls back to validated 720p combined", async () => {
     },
   );
   assert.deepEqual(result, { url: "good-720", mimeType: "video/mp4" });
-  assert.deepEqual(selected, ["expired-high", "good-720"]);
+  assert.deepEqual(selected, ["good-720"]);
 });
 test("validated 360p baseline survives unavailable higher renditions", async () => {
   const result = await resolveFormats(
@@ -240,6 +299,8 @@ test("resolveFormats with targetQuality returns requested tier or errors", async
   const info = {
     chooseFormat(options) {
       if (options.type === "audio") return format("aac-audio", false, true);
+      if (options.type === "video" && options.quality === "1080p")
+        return format("1080-video", true, false);
       if (options.type === "video" && options.quality === "720p")
         return format("720-video", true, false);
       if (options.type === "video+audio" && options.quality === "360p")
@@ -254,10 +315,12 @@ test("resolveFormats with targetQuality returns requested tier or errors", async
   const res360 = await resolveFormats(info, {}, async () => true, "360p");
   assert.deepEqual(res360, { url: "360-combined", mimeType: "video/mp4" });
 
-  await assert.rejects(
-    resolveFormats(info, {}, async () => true, "1080p"),
-    /video_unavailable/,
-  );
+  const res1080 = await resolveFormats(info, {}, async () => true, "1080p");
+  assert.deepEqual(res1080, {
+    url: "1080-video",
+    audioUrl: "aac-audio",
+    mimeType: "video/mp4",
+  });
 });
 
 test("tier checks overlap within the bound of at most two simultaneous checks", async () => {

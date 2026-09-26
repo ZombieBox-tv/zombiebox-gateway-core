@@ -141,7 +141,13 @@ func setupKnownLengthYouTubeServer(t *testing.T, deviceID string) (*Server, stri
 	s.mu.Unlock()
 	stub := &knownLengthYouTubeRemote{}
 	s.deps.RemoteMedia = stub
-	s.deps.Resolver = &mockYouTubeResolver{}
+	s.deps.Resolver = &mockYouTubeResolver{resolveFn: func(_ context.Context, request domain.Source) (domain.Source, error) {
+		resolved := request
+		fixture := knownLengthYouTubeSource()
+		resolved.URL = fixture.URL
+		resolved.AudioURL = fixture.AudioURL
+		return resolved, nil
+	}}
 	return s, owner, source, stub
 }
 
@@ -301,7 +307,7 @@ func TestYouTubePlaybackKeepsRemuxModeAndSpoolsOnlyWithFreshEvidence(t *testing.
 	if err := json.Unmarshal(created.Body.Bytes(), &plan); err != nil {
 		t.Fatal(err)
 	}
-	if plan.Mode != "REMUX" || !plan.Seekable || plan.ResumeMS != 10000 || plan.TimelineOffsetMS != 0 {
+	if plan.Mode != "REMUX" || !plan.PrepareBeforePlayback || !plan.Seekable || plan.ResumeMS != 10000 || plan.TimelineOffsetMS != 0 {
 		t.Fatalf("transport workaround changed selected playback mode: %q", plan.Mode)
 	}
 	s.mu.Lock()
@@ -323,7 +329,7 @@ func TestYouTubePlaybackKeepsRemuxModeAndSpoolsOnlyWithFreshEvidence(t *testing.
 	if err := json.Unmarshal(selected.Body.Bytes(), &selectedPlan); err != nil {
 		t.Fatal(err)
 	}
-	if selectedPlan.Mode != "REMUX" || !selectedPlan.Seekable || selectedPlan.ResumeMS != 15000 || selectedPlan.TimelineOffsetMS != 0 {
+	if selectedPlan.Mode != "REMUX" || !selectedPlan.PrepareBeforePlayback || !selectedPlan.Seekable || selectedPlan.ResumeMS != 15000 || selectedPlan.TimelineOffsetMS != 0 {
 		t.Fatalf("manual rendition changed stream-copy mode: %q", selectedPlan.Mode)
 	}
 	s.mu.Lock()
@@ -710,6 +716,111 @@ func TestKnownLengthYouTubeREMUXTimeoutIsRetryable(t *testing.T) {
 	}
 	if stub.callCount() != 1 {
 		t.Fatalf("retry reran the same REMUX conversion %d times", stub.callCount())
+	}
+}
+
+func TestKnownLengthPrepareHeadPollsWithoutWaitingForSpool(t *testing.T) {
+	s := testServer(t, nil, t.TempDir())
+	s.hybridStartupWait = 250 * time.Millisecond
+	stub := &knownLengthYouTubeRemote{entered: make(chan struct{}), proceed: make(chan struct{}), block: true}
+	s.deps.RemoteMedia = stub
+	sessionCtx, cancelSession := context.WithCancel(t.Context())
+	defer cancelSession()
+	sess := &session{
+		mode: "REMUX", knownLengthRemux: true, ticket: "ticket", expires: time.Now().Add(time.Minute),
+		ctx: sessionCtx, cancel: cancelSession, source: knownLengthYouTubeSource(),
+		metadata: &domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264"}, {Type: "audio", Codec: "aac"}}},
+	}
+	s.sessions["prepare-known-length"] = sess
+	path := "/v1/streams/prepare-known-length?ticket=ticket&prepare=1"
+
+	invalid := httptest.NewRecorder()
+	s.ServeHTTP(invalid, httptest.NewRequest(http.MethodHead, "/v1/streams/prepare-known-length?ticket=wrong&prepare=1", nil))
+	if invalid.Code != http.StatusUnauthorized || sess.hybridSpool != nil {
+		t.Fatalf("preparation probe bypassed ticket validation: status=%d spool=%v", invalid.Code, sess.hybridSpool)
+	}
+
+	first := httptest.NewRecorder()
+	s.ServeHTTP(first, httptest.NewRequest(http.MethodHead, path, nil))
+	if first.Code != http.StatusAccepted || first.Header().Get("Retry-After") != "2" || first.Body.Len() != 0 {
+		t.Fatalf("incomplete spool was not reported as pending: status=%d retry-after=%q body=%q", first.Code, first.Header().Get("Retry-After"), first.Body.String())
+	}
+	select {
+	case <-stub.entered:
+	case <-time.After(time.Second):
+		t.Fatal("preparation probe did not start the spool worker")
+	}
+	spool := sess.hybridSpool
+	if spool == nil {
+		t.Fatal("preparation probe did not retain the in-flight spool")
+	}
+	select {
+	case <-spool.done:
+		t.Fatal("blocked fake spool completed before the test released it")
+	default:
+	}
+
+	close(stub.proceed)
+	select {
+	case <-spool.done:
+	case <-time.After(time.Second):
+		t.Fatal("spool did not finish after release")
+	}
+
+	ready := httptest.NewRecorder()
+	s.ServeHTTP(ready, httptest.NewRequest(http.MethodHead, path, nil))
+	if ready.Code != http.StatusOK || ready.Header().Get("Content-Length") != "14" || ready.Header().Get("Content-Type") != "video/mp4" || ready.Header().Get("Accept-Ranges") != "bytes" || ready.Body.Len() != 0 {
+		t.Fatalf("completed spool readiness headers are wrong: status=%d headers=%v body=%q", ready.Code, ready.Header(), ready.Body.String())
+	}
+	if stub.callCount() != 1 {
+		t.Fatalf("readiness retry started %d conversions, want 1", stub.callCount())
+	}
+}
+
+func TestKnownLengthPrepareHeadCancellationCleansBlockedSpool(t *testing.T) {
+	s := testServer(t, nil, t.TempDir())
+	stub := &knownLengthYouTubeRemote{entered: make(chan struct{}), block: true}
+	s.deps.RemoteMedia = stub
+	sessionCtx, cancelSession := context.WithCancel(t.Context())
+	sess := &session{
+		mode: "REMUX", knownLengthRemux: true, ticket: "ticket", expires: time.Now().Add(time.Minute),
+		ctx: sessionCtx, cancel: cancelSession, source: knownLengthYouTubeSource(),
+		metadata: &domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264"}, {Type: "audio", Codec: "aac"}}},
+	}
+	s.sessions["cancel-prepare-known-length"] = sess
+	request := httptest.NewRequest(http.MethodHead, "/v1/streams/cancel-prepare-known-length?ticket=ticket&prepare=1", nil)
+	response := httptest.NewRecorder()
+	requestDone := make(chan struct{})
+	go func() {
+		s.ServeHTTP(response, request)
+		close(requestDone)
+	}()
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("preparation HEAD waited for the blocked conversion")
+	}
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("blocked preparation HEAD returned %d, want 202", response.Code)
+	}
+	select {
+	case <-stub.entered:
+	case <-time.After(time.Second):
+		t.Fatal("blocked spool conversion did not start")
+	}
+	spool := sess.hybridSpool
+	if spool == nil {
+		t.Fatal("cancellation test did not retain the spool")
+	}
+	spoolPath := spool.filePath()
+	cancelSession()
+	select {
+	case <-spool.done:
+	case <-time.After(time.Second):
+		t.Fatal("session cancellation did not stop the blocked spool")
+	}
+	if _, err := os.Stat(spoolPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancelled preparation spool file was not removed: %v", err)
 	}
 }
 

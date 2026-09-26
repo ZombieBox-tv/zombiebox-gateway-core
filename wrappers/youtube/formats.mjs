@@ -225,24 +225,30 @@ export async function resolveFormats(
     /* If baseline is invalid or unavailable, use the existing validated fallback chain. */
   }
 
-  // Validated fallback chain when baseline 360p combined is unavailable/invalid:
-  for (const quality of ["1080p", "720p", "480p", "360p"]) {
-    if (quality !== "1080p" && quality !== "360p") {
-      try {
-        const combined = info.chooseFormat({
-          type: "video+audio",
-          format: "mp4",
-          codec: "avc1",
-          quality,
-        });
-        if (combined?.has_audio && combined?.has_video && isSafeFps(combined)) {
-          const url = await playable(combined);
-          if (url) return { url, mimeType: "video/mp4" };
-        }
-      } catch {
-        /* Fall through to a separate H.264/AAC pair at this resolution. */
+  // Prefer validated combined progressive formats before adaptive sources.
+  // This avoids an expensive gateway spool when 360p had a transient validation
+  // failure but a progressive 480p or 720p source is available.
+  for (const quality of ["720p", "480p"]) {
+    try {
+      const combined = info.chooseFormat({
+        type: "video+audio",
+        format: "mp4",
+        codec: "avc1",
+        quality,
+      });
+      if (combined?.has_audio && combined?.has_video && isSafeFps(combined)) {
+        const url = await playable(combined);
+        if (url) return { url, mimeType: "video/mp4" };
       }
+    } catch {
+      /* Try the next progressive tier before considering adaptive sources. */
     }
+  }
+
+  // Auto keeps adaptive 1080p as a last resort: lower tiers are less costly to
+  // spool and are tried first. Explicit quality requests take the separate
+  // exact-tier branch above and retain their selected resolution.
+  for (const quality of ["720p", "480p", "360p", "1080p"]) {
     try {
       const video = info.chooseFormat({ type: "video", format: "mp4", codec: "avc1", quality });
       if (video?.has_video && !video?.has_audio && isSafeFps(video)) {
@@ -253,7 +259,7 @@ export async function resolveFormats(
         }
       }
     } catch {
-      /* A higher tier may be missing, expired or unsuitable; try a lower one. */
+      /* Missing, expired or unsuitable formats fall through to the next tier. */
     }
   }
 

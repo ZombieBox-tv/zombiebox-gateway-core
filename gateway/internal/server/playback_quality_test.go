@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -611,6 +612,170 @@ func (m *mockYouTubeResolver) Resolve(ctx context.Context, s domain.Source) (dom
 	return s, nil
 }
 
+type transientYouTubeProbeMedia struct {
+	*qualityTestMedia
+	probeCalls int
+}
+
+func (m *transientYouTubeProbeMedia) ProbeRemote(ctx context.Context, source domain.Source) (domain.Metadata, error) {
+	m.probeCalls++
+	if m.probeCalls == 1 {
+		return domain.Metadata{}, errors.New("temporary remote range timeout")
+	}
+	return m.qualityTestMedia.ProbeRemote(ctx, source)
+}
+
+func TestResolveAndProbeYouTubeSourceRetriesTransientManualQualityFailure(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.deps.RemoteMedia = &qualityTestMedia{width: 1280, height: 720, codec: "h264", profile: "Main"}
+
+	base := domain.Source{
+		Item:           domain.Item{ID: "youtube-retryVid123", Provider: "youtube", Kind: "video"},
+		URL:            "https://r1.googlevideo.com/video-expired?signature=old",
+		Headers:        http.Header{"Authorization": {"stale-token"}},
+		AudioURL:       "https://r2.googlevideo.com/audio-expired?signature=old",
+		AudioHeaders:   http.Header{"Authorization": {"stale-token"}},
+		ResolveURL:     "http://wrapper.local/resolve/retryVid123",
+		ResolveHeaders: http.Header{"Authorization": {"wrapper-token"}},
+		ResolveQuality: "1080p",
+	}
+
+	var requests []domain.Source
+	s.deps.Resolver = &mockYouTubeResolver{
+		resolveFn: func(_ context.Context, request domain.Source) (domain.Source, error) {
+			requests = append(requests, request)
+			if len(requests) == 1 {
+				return domain.Source{}, errors.New("provider HTTP 502")
+			}
+			resolved := request
+			resolved.URL = "https://r1.googlevideo.com/video-720?signature=fresh"
+			resolved.AudioURL = "https://r2.googlevideo.com/audio-140?signature=fresh"
+			resolved.MIME = "video/mp4"
+			return resolved, nil
+		},
+	}
+
+	resolved, metadata, ok := s.resolveAndProbeYouTubeSource(context.Background(), base, "720p")
+	if !ok {
+		t.Fatal("expected the fresh 720p resolution and probe to succeed")
+	}
+	if len(requests) != 2 {
+		t.Fatalf("resolver attempts = %d, want 2", len(requests))
+	}
+	for attempt, request := range requests {
+		if request.ResolveQuality != "720p" {
+			t.Errorf("attempt %d quality = %q, want 720p", attempt+1, request.ResolveQuality)
+		}
+		if request.URL != base.ResolveURL {
+			t.Errorf("attempt %d URL = %q, want stable resolver endpoint", attempt+1, request.URL)
+		}
+		if request.Headers.Get("Authorization") != "wrapper-token" {
+			t.Errorf("attempt %d did not restore resolver authorization headers", attempt+1)
+		}
+		if request.AudioURL != "" || request.AudioHeaders != nil {
+			t.Errorf("attempt %d reused stale audio URL or headers", attempt+1)
+		}
+	}
+	if resolved.URL != "https://r1.googlevideo.com/video-720?signature=fresh" || resolved.AudioURL != "https://r2.googlevideo.com/audio-140?signature=fresh" {
+		t.Fatalf("returned source is not the fresh exact-tier pair: %+v", resolved)
+	}
+	if metadata.Streams[0].Height != 720 {
+		t.Fatalf("probed height = %d, want 720", metadata.Streams[0].Height)
+	}
+}
+
+func TestResolveAndProbeYouTubeSourceRetriesTransientProbeFailure(t *testing.T) {
+	s := testServer(t, nil, "")
+	probeMedia := &transientYouTubeProbeMedia{
+		qualityTestMedia: &qualityTestMedia{width: 1280, height: 720, codec: "h264", profile: "Main"},
+	}
+	s.deps.RemoteMedia = probeMedia
+
+	base := domain.Source{
+		Item:       domain.Item{ID: "youtube-probeRetry", Provider: "youtube", Kind: "video"},
+		URL:        "http://wrapper.local/resolve/probeRetry",
+		ResolveURL: "http://wrapper.local/resolve/probeRetry",
+		Variants:   []string{"720p"},
+	}
+	resolveCalls := 0
+	s.deps.Resolver = &mockYouTubeResolver{
+		resolveFn: func(_ context.Context, request domain.Source) (domain.Source, error) {
+			resolveCalls++
+			resolved := request
+			resolved.URL = fmt.Sprintf("https://r1.googlevideo.com/video-720-attempt-%d", resolveCalls)
+			resolved.AudioURL = fmt.Sprintf("https://r2.googlevideo.com/audio-attempt-%d", resolveCalls)
+			resolved.MIME = "video/mp4"
+			return resolved, nil
+		},
+	}
+
+	resolved, _, ok := s.resolveAndProbeYouTubeSource(context.Background(), base, "720p")
+	if !ok {
+		t.Fatal("expected the fresh second resolve and probe to succeed")
+	}
+	if resolveCalls != 2 || probeMedia.probeCalls != 2 {
+		t.Fatalf("resolve/probe calls = %d/%d, want 2/2", resolveCalls, probeMedia.probeCalls)
+	}
+	if !strings.Contains(resolved.URL, "attempt-2") || !strings.Contains(resolved.AudioURL, "attempt-2") {
+		t.Fatalf("returned a stale source from the failed probe attempt: %+v", resolved)
+	}
+}
+
+func TestResolveAndProbeYouTubeSourceDoesNotRetryDeterministicFailure(t *testing.T) {
+	for _, failure := range []string{"provider HTTP 404", "provider HTTP 501", "video_unavailable"} {
+		t.Run(failure, func(t *testing.T) {
+			s := testServer(t, nil, "")
+			s.deps.RemoteMedia = &qualityTestMedia{width: 1280, height: 720, codec: "h264", profile: "Main"}
+			base := domain.Source{
+				Item:       domain.Item{ID: "youtube-unavailable", Provider: "youtube", Kind: "video"},
+				URL:        "http://wrapper.local/resolve/unavailable",
+				ResolveURL: "http://wrapper.local/resolve/unavailable",
+			}
+			resolveCalls := 0
+			s.deps.Resolver = &mockYouTubeResolver{
+				resolveFn: func(_ context.Context, request domain.Source) (domain.Source, error) {
+					resolveCalls++
+					return domain.Source{}, errors.New(failure)
+				},
+			}
+
+			if _, _, ok := s.resolveAndProbeYouTubeSource(context.Background(), base, "720p"); ok {
+				t.Fatal("deterministic quality failure unexpectedly succeeded")
+			}
+			if resolveCalls != 1 {
+				t.Fatalf("resolver calls = %d, want 1 for deterministic failure", resolveCalls)
+			}
+		})
+	}
+}
+
+func TestResolveAndProbeYouTubeSourceStopsRetryOnCancellation(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.deps.RemoteMedia = &qualityTestMedia{width: 1280, height: 720, codec: "h264", profile: "Main"}
+	base := domain.Source{
+		Item:       domain.Item{ID: "youtube-cancelRetry", Provider: "youtube", Kind: "video"},
+		URL:        "http://wrapper.local/resolve/cancelRetry",
+		ResolveURL: "http://wrapper.local/resolve/cancelRetry",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolveCalls := 0
+	s.deps.Resolver = &mockYouTubeResolver{
+		resolveFn: func(_ context.Context, _ domain.Source) (domain.Source, error) {
+			resolveCalls++
+			cancel()
+			return domain.Source{}, errors.New("provider HTTP 502")
+		},
+	}
+
+	if _, _, ok := s.resolveAndProbeYouTubeSource(ctx, base, "720p"); ok {
+		t.Fatal("cancelled resolution unexpectedly succeeded")
+	}
+	if resolveCalls != 1 {
+		t.Fatalf("resolver calls = %d, want 1 after cancellation", resolveCalls)
+	}
+}
+
 type mockYouTubeCatalog struct {
 	Catalog
 	source domain.Source
@@ -696,8 +861,8 @@ func TestYouTubeHDQualitySelectionAndSwitching(t *testing.T) {
 	}
 	var plan domain.Plan
 	json.Unmarshal(w.Body.Bytes(), &plan)
-	if plan.Mode != "DIRECT_PLAY" {
-		t.Fatalf("initial Auto mode should be DIRECT_PLAY for 360p progressive stream, got %s", plan.Mode)
+	if plan.Mode != "DIRECT_PLAY" || plan.PrepareBeforePlayback {
+		t.Fatalf("initial Auto mode should be unprepared DIRECT_PLAY for 360p progressive stream, got %+v", plan)
 	}
 
 	// GET /v1/playback/{session}/qualities lists available validated variants intersected with device probes

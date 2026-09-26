@@ -128,14 +128,15 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 		clientMode = "TRANSCODE"
 	}
 	return domain.Plan{
-		Version:   1,
-		SessionID: id,
-		Mode:      clientMode,
-		URL:       "/v1/streams/" + id + "?ticket=" + ticket,
-		MIME:      mime,
-		Live:      true,
-		Seekable:  false,
-		Item:      item,
+		Version:               1,
+		SessionID:             id,
+		Mode:                  clientMode,
+		URL:                   "/v1/streams/" + id + "?ticket=" + ticket,
+		MIME:                  mime,
+		PrepareBeforePlayback: mode == "HYBRID",
+		Live:                  true,
+		Seekable:              false,
+		Item:                  item,
 	}, nil
 }
 func (a receiverAdapter) Stop(id string) {
