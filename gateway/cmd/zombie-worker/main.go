@@ -96,9 +96,9 @@ func run(path string) error {
 		defer mirror.closeSockets()
 		airplayProgress = worker.NewAirPlayProgress()
 		uxplay := exec.CommandContext(ctx, "uxplay", "-md", filepath.Join(c.StateDir, "metadata.txt"), "-ca", filepath.Join(c.StateDir, "coverart"), "-dacp", dacpPath, "-n", "Zombie Box AirPlay", "-p", "35000", "-pin", c.Pin, "-s", "1280x720", "-fps", "30", "-vrtp", "pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=35010", "-artp", "pt=97 ! multiudpsink clients=127.0.0.1:35012,127.0.0.1:35014")
-		// Parse only UxPlay's bounded progress record. Other stdout, including
-		// potentially sensitive upstream diagnostics, is discarded by the parser.
-		uxplay.Stdout = airplayProgress
+		// Retain only the parsed progress sample and a saturating count of
+		// UxPlay's fixed direct-video warning. Raw upstream output is discarded.
+		uxplay.Stdout = io.MultiWriter(airplayProgress, mirror.uxplayLogs)
 		commands = append(commands, uxplay)
 	}
 	var wg sync.WaitGroup
@@ -132,7 +132,11 @@ func run(path string) error {
 			errors <- fmt.Errorf("%s exited: %v", filepath.Base(cmd.Path), err)
 		}(cmd)
 	}
-	httpServer := &http.Server{Addr: c.Listen, Handler: worker.HandlerWithAirPlayProgress(ctx, c, spotifyDiagnostics, airplayProgress), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
+	handler := worker.HandlerWithAirPlayProgress(ctx, c, spotifyDiagnostics, airplayProgress)
+	if c.Mode == "airplay" {
+		handler = worker.HandlerWithAirPlayMirrorDiagnostics(ctx, c, airplayProgress, mirror)
+	}
+	httpServer := &http.Server{Addr: c.Listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() { errors <- httpServer.ListenAndServe() }()
 	var result error
 	select {

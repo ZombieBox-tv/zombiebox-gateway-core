@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"zombiebox.local/gateway/internal/worker"
 )
 
 // UxPlay sends RTP only to these loopback listeners. The bridge forwards it to
@@ -66,6 +69,11 @@ type mirrorBridge struct {
 	process           *exec.Cmd
 	processExited     chan error
 	lastSegmentNumber int64
+	videoPacketCount  uint64
+	bridgeStage       string
+	failureStage      string
+	encoderRunning    bool
+	uxplayLogs        *airPlayLogDiagnostics
 }
 
 func newMirrorBridge(hlsDir, stateDir, ffmpegPath string, ports mirrorPorts) (*mirrorBridge, error) {
@@ -77,7 +85,9 @@ func newMirrorBridge(hlsDir, stateDir, ffmpegPath string, ports mirrorPorts) (*m
 	}
 	b := &mirrorBridge{ports: ports, hlsDir: hlsDir, ffmpegPath: ffmpegPath,
 		videoSDP:      filepath.Join(stateDir, "mirror-video.sdp"),
-		audioVideoSDP: filepath.Join(stateDir, "mirror-av.sdp")}
+		audioVideoSDP: filepath.Join(stateDir, "mirror-av.sdp"),
+		bridgeStage:   "waiting_for_video_rtp",
+		uxplayLogs:    newAirPlayLogDiagnostics()}
 	var err error
 	defer func() {
 		if err != nil {
@@ -165,11 +175,200 @@ func (b *mirrorBridge) observeVideo(now time.Time, ssrc uint32, sequence uint16,
 		b.firstVideo = now
 		b.lastAudio = time.Time{}
 	}
+	if b.videoPacketCount < ^uint64(0) {
+		b.videoPacketCount++
+	}
 	b.videoSequence = sequence
 	b.videoTimestamp = timestamp
 	b.hasVideoClock = true
 	b.lastVideo = now
+	if b.bridgeStage == "" || b.bridgeStage == "waiting_for_video_rtp" {
+		b.bridgeStage = "probing_video_input"
+	}
 	return b.activeSession == b.session
+}
+
+// AirPlayMirrorSnapshot exposes only fixed state and counters. It reads a
+// bounded local manifest and never returns its contents or any RTP/log data.
+func (b *mirrorBridge) AirPlayMirrorSnapshot(now time.Time) worker.AirPlayMirrorStatus {
+	b.mu.Lock()
+	lastVideo := b.lastVideo
+	packetCount := b.videoPacketCount
+	mode := b.runningMode
+	stage := b.bridgeStage
+	failureStage := b.failureStage
+	encoderRunning := b.encoderRunning
+	logs := b.uxplayLogs
+	b.mu.Unlock()
+
+	status := worker.AirPlayMirrorStatus{
+		Protocol:                     "airplay_mirroring_rtp_h264",
+		Mode:                         mirrorModeName(mode),
+		VideoRTPPacketCount:          packetCount,
+		BridgeStage:                  stage,
+		BridgeFailureStage:           failureStage,
+		PhotoAppAttributionAvailable: false,
+	}
+	if !lastVideo.IsZero() {
+		age := now.Sub(lastVideo)
+		if age >= 0 {
+			status.VideoRTPLastPacketAgeMS = age.Milliseconds()
+			status.VideoRTPAdvancedRecently = age <= time.Second
+		}
+	}
+	status.HLSManifestReady, status.HLSSegmentReady, status.HLSSegmentAgeMS = mirrorHLSReadiness(b.hlsDir, now)
+	if encoderRunning && status.HLSManifestReady && status.HLSSegmentReady {
+		status.BridgeStage = "hls_ready"
+	} else if status.BridgeStage == "" {
+		status.BridgeStage = "waiting_for_video_rtp"
+	}
+	if logs != nil {
+		status.DirectVideoRequestCount = logs.DirectVideoRequestCount()
+	}
+	return status
+}
+
+func mirrorModeName(mode mirrorMode) string {
+	switch mode {
+	case videoMirror:
+		return "video"
+	case audioVideoMirror:
+		return "audio_video"
+	default:
+		return "idle"
+	}
+}
+
+func mirrorHLSReadiness(hlsDir string, now time.Time) (manifestReady, segmentReady bool, segmentAgeMS int64) {
+	if hlsDir == "" {
+		return false, false, 0
+	}
+	manifestPath := filepath.Join(hlsDir, "index.m3u8")
+	info, err := os.Stat(manifestPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > 64<<10 || !mirrorFileFresh(info.ModTime(), now) {
+		return false, false, 0
+	}
+	file, err := os.Open(manifestPath)
+	if err != nil {
+		return false, false, 0
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, (64<<10)+1))
+	_ = file.Close()
+	if readErr != nil || len(data) == 0 || len(data) > 64<<10 {
+		return false, false, 0
+	}
+	content := string(data)
+	lines := strings.Split(content, "\n")
+	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "#EXTM3U" {
+		return false, false, 0
+	}
+	targetDurationValid := false
+	for _, line := range lines[1:] {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "#EXT-X-TARGETDURATION:") {
+			continue
+		}
+		target, parseErr := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "#EXT-X-TARGETDURATION:")))
+		targetDurationValid = parseErr == nil && target > 0
+		break
+	}
+	if !targetDurationValid {
+		return false, false, 0
+	}
+	manifestReady = true
+	var pendingDuration float64
+	hasPendingDuration := false
+	for _, raw := range lines[1:] {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "#EXTINF:") {
+			duration := strings.TrimPrefix(line, "#EXTINF:")
+			if comma := strings.IndexByte(duration, ','); comma >= 0 {
+				duration = duration[:comma]
+			}
+			pendingDuration, err = strconv.ParseFloat(strings.TrimSpace(duration), 64)
+			hasPendingDuration = err == nil && pendingDuration >= 0.5
+			continue
+		}
+		if strings.HasPrefix(line, "#") || !hasPendingDuration {
+			continue
+		}
+		name := line
+		hasPendingDuration = false
+		if !mirrorSegmentName(name) {
+			continue
+		}
+		segmentInfo, statErr := os.Stat(filepath.Join(hlsDir, name))
+		if statErr != nil || !segmentInfo.Mode().IsRegular() || segmentInfo.Size() < 4096 || !mirrorFileFresh(segmentInfo.ModTime(), now) {
+			continue
+		}
+		segmentReady = true
+		age := now.Sub(segmentInfo.ModTime())
+		if age >= 0 {
+			segmentAgeMS = age.Milliseconds()
+		}
+		break
+	}
+	return manifestReady, segmentReady, segmentAgeMS
+}
+
+func mirrorFileFresh(modTime time.Time, now time.Time) bool {
+	age := now.Sub(modTime)
+	return age >= 0 && age <= 15*time.Second
+}
+
+const directAirPlayVideoRequestPhrase = "ignoring AirPlay video streaming request (use option -hls to activate HLS support)"
+
+// airPlayLogDiagnostics counts one fixed, non-mirroring video-route message
+// from UxPlay. It retains only a matcher offset and a saturating counter; app
+// identity cannot be inferred from this message.
+type airPlayLogDiagnostics struct {
+	mu          sync.Mutex
+	matched     int
+	discardLine bool
+	count       uint8
+}
+
+func newAirPlayLogDiagnostics() *airPlayLogDiagnostics {
+	return &airPlayLogDiagnostics{}
+}
+
+// Write implements io.Writer for UxPlay stdout. It recognizes only a complete
+// fixed route-warning line. No line, URL, address, pairing value or payload is kept.
+func (d *airPlayLogDiagnostics) Write(data []byte) (int, error) {
+	if d == nil {
+		return len(data), nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, value := range data {
+		if value == '\n' || value == '\r' {
+			if d.matched == len(directAirPlayVideoRequestPhrase) && d.count < ^uint8(0) {
+				d.count++
+			}
+			d.matched = 0
+			d.discardLine = false
+			continue
+		}
+		if d.discardLine {
+			continue
+		}
+		if d.matched < len(directAirPlayVideoRequestPhrase) && value == directAirPlayVideoRequestPhrase[d.matched] {
+			d.matched++
+		} else {
+			d.matched = 0
+			d.discardLine = true
+		}
+	}
+	return len(data), nil
+}
+
+func (d *airPlayLogDiagnostics) DirectVideoRequestCount() uint8 {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.count
 }
 
 func (b *mirrorBridge) observeAudio(now time.Time, ssrc uint32) bool {
@@ -243,8 +442,10 @@ func (b *mirrorBridge) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if err := b.clearPlaylist(true); err != nil {
+		b.setBridgeStage("hls_cleanup_failed", "hls_cleanup")
 		return err
 	}
+	b.setBridgeStage("waiting_for_video_rtp", "")
 	failures := make(chan error, 2)
 	var readers sync.WaitGroup
 	readers.Add(2)
@@ -270,8 +471,10 @@ func (b *mirrorBridge) run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case err := <-failures:
+			b.setBridgeStage("rtp_listener_failed", "rtp_listener")
 			return err
 		case err := <-b.processExited:
+			b.setBridgeStage("ffmpeg_exited", "ffmpeg_exit")
 			return fmt.Errorf("AirPlay mirror FFmpeg exited: %v", err)
 		case <-ticker.C:
 			mode, session := b.desired(time.Now())
@@ -294,27 +497,36 @@ func (b *mirrorBridge) transition(ctx context.Context, mode mirrorMode, session 
 	b.activeSession = 0
 	b.mu.Unlock()
 	if err := b.stopProcess(); err != nil {
+		b.setBridgeStage("ffmpeg_stop_failed", "ffmpeg_stop")
 		return err
 	}
 	if err := b.clearPlaylist(previousSession != session || mode == noMirror); err != nil {
+		b.setBridgeStage("hls_cleanup_failed", "hls_cleanup")
 		return err
 	}
 	b.runningSession = session
+	b.mu.Lock()
 	b.runningMode = noMirror
+	b.mu.Unlock()
 	if mode == noMirror {
+		b.setBridgeStage("waiting_for_video_rtp", "")
 		return nil
 	}
+	b.setBridgeStage("starting_ffmpeg", "")
 	cmd := exec.CommandContext(ctx, b.ffmpegPath, b.commandArgs(mode)...)
 	cmd.WaitDelay = time.Second
 	// AirPlay metadata, private paths and RTP never enter process logs.
 	if err := cmd.Start(); err != nil {
+		b.setBridgeStage("ffmpeg_start_failed", "ffmpeg_start")
 		return fmt.Errorf("start AirPlay mirror encoder: %w", err)
 	}
 	b.process = cmd
 	b.processExited = make(chan error, 1)
 	go func() { b.processExited <- cmd.Wait() }()
-	b.runningMode = mode
 	b.mu.Lock()
+	b.runningMode = mode
+	b.encoderRunning = true
+	b.bridgeStage = "awaiting_hls"
 	if b.session == session {
 		b.activeSession = session
 	}
@@ -324,6 +536,9 @@ func (b *mirrorBridge) transition(ctx context.Context, mode mirrorMode, session 
 
 func (b *mirrorBridge) stopProcess() error {
 	if b.process == nil {
+		b.mu.Lock()
+		b.encoderRunning = false
+		b.mu.Unlock()
 		return nil
 	}
 	_ = b.process.Process.Kill()
@@ -334,8 +549,18 @@ func (b *mirrorBridge) stopProcess() error {
 	}
 	b.process = nil
 	b.processExited = nil
+	b.mu.Lock()
 	b.runningMode = noMirror
+	b.encoderRunning = false
+	b.mu.Unlock()
 	return nil
+}
+
+func (b *mirrorBridge) setBridgeStage(stage, failure string) {
+	b.mu.Lock()
+	b.bridgeStage = stage
+	b.failureStage = failure
+	b.mu.Unlock()
 }
 
 func (b *mirrorBridge) commandArgs(mode mirrorMode) []string {

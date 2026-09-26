@@ -332,6 +332,54 @@ func TestAirPlayVideoRequiresReadySegmentNotJustManifest(t *testing.T) {
 	}
 }
 
+type fixedAirPlayMirrorDiagnostics struct{}
+
+func (fixedAirPlayMirrorDiagnostics) AirPlayMirrorSnapshot(time.Time) AirPlayMirrorStatus {
+	return AirPlayMirrorStatus{
+		Protocol:                     "airplay_mirroring_rtp_h264",
+		Mode:                         "video",
+		VideoRTPAdvancedRecently:     true,
+		VideoRTPPacketCount:          42,
+		VideoRTPLastPacketAgeMS:      125,
+		HLSManifestReady:             true,
+		HLSSegmentReady:              false,
+		BridgeStage:                  "awaiting_hls",
+		BridgeFailureStage:           "",
+		DirectVideoRequestCount:      1,
+		PhotoAppAttributionAvailable: false,
+	}
+}
+
+func TestAirPlayStatusIncludesOnlyTypedMirrorDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	token := strings.Repeat("t", 32)
+	config := Config{Mode: "airplay", Token: token, StateDir: dir, Pin: "0427"}
+	handler := handlerWithAirPlayDACPAndMirror(context.Background(), config, nil, NewAirPlayProgress(), nil, nil, fixedAirPlayMirrorDiagnostics{})
+	request := httptest.NewRequest(http.MethodGet, "/status", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200: %s", response.Code, response.Body.String())
+	}
+	var status map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	var mirror AirPlayMirrorStatus
+	if err := json.Unmarshal(status["mirrorDiagnostics"], &mirror); err != nil {
+		t.Fatalf("mirror diagnostics missing or invalid: %v", err)
+	}
+	if mirror.VideoRTPPacketCount != 42 || !mirror.VideoRTPAdvancedRecently || mirror.BridgeStage != "awaiting_hls" || mirror.DirectVideoRequestCount != 1 || mirror.PhotoAppAttributionAvailable {
+		t.Fatalf("unexpected mirror status: %+v", mirror)
+	}
+	for _, forbidden := range []string{"never-store-this", "Authorization", "http://", "192.168."} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("private data leaked in worker status (%q): %s", forbidden, response.Body.String())
+		}
+	}
+}
+
 func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
 	dir := t.TempDir()
 	hlsDir := filepath.Join(dir, "hls")

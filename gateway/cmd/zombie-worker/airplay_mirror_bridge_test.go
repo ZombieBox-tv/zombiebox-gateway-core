@@ -84,6 +84,117 @@ func TestMirrorRTPRestartWithReusedSSRC(t *testing.T) {
 	}
 }
 
+func TestMirrorDiagnosticsTrackOnlyAdvancingVideoRTP(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	b := &mirrorBridge{hlsDir: t.TempDir(), uxplayLogs: newAirPlayLogDiagnostics()}
+	initial := b.AirPlayMirrorSnapshot(start)
+	if initial.Protocol != "airplay_mirroring_rtp_h264" || initial.Mode != "idle" || initial.VideoRTPAdvancedRecently || initial.VideoRTPPacketCount != 0 {
+		t.Fatalf("unexpected initial mirror status: %+v", initial)
+	}
+	if b.observeVideo(start, 71, 10, 90_000) {
+		t.Fatal("first packet unexpectedly forwarded before encoder selection")
+	}
+	advanced := b.AirPlayMirrorSnapshot(start.Add(500 * time.Millisecond))
+	if !advanced.VideoRTPAdvancedRecently || advanced.VideoRTPPacketCount != 1 || advanced.VideoRTPLastPacketAgeMS != 500 || advanced.BridgeStage != "probing_video_input" {
+		t.Fatalf("advancing RTP evidence missing: %+v", advanced)
+	}
+	if b.observeVideo(start.Add(700*time.Millisecond), 71, 10, 90_000) {
+		t.Fatal("duplicate sequence was treated as advancing video")
+	}
+	stale := b.AirPlayMirrorSnapshot(start.Add(2200 * time.Millisecond))
+	if stale.VideoRTPAdvancedRecently || stale.VideoRTPPacketCount != 1 || stale.VideoRTPLastPacketAgeMS != 2200 {
+		t.Fatalf("duplicate packet changed bounded RTP evidence: %+v", stale)
+	}
+	b.mu.Lock()
+	b.videoPacketCount = ^uint64(0)
+	b.mu.Unlock()
+	b.observeVideo(start.Add(3*time.Second), 71, 11, 270_000)
+	if got := b.AirPlayMirrorSnapshot(start.Add(3 * time.Second)).VideoRTPPacketCount; got != ^uint64(0) {
+		t.Fatalf("RTP counter overflowed: %d", got)
+	}
+}
+
+func TestMirrorDiagnosticsReportHLSReadinessWithoutContents(t *testing.T) {
+	dir := t.TempDir()
+	manifest := "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nsegment7.ts\n"
+	if err := os.WriteFile(filepath.Join(dir, "index.m3u8"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "segment7.ts"), make([]byte, 4096), 0600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for _, name := range []string{"index.m3u8", "segment7.ts"} {
+		path := filepath.Join(dir, name)
+		if err := os.Chtimes(path, start, start); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := &mirrorBridge{hlsDir: dir, runningMode: videoMirror, encoderRunning: true, bridgeStage: "awaiting_hls"}
+	status := b.AirPlayMirrorSnapshot(start)
+	if !status.HLSManifestReady || !status.HLSSegmentReady || status.HLSSegmentAgeMS < 0 || status.BridgeStage != "hls_ready" {
+		t.Fatalf("fresh mirror HLS was not reported ready: %+v", status)
+	}
+	old := start.Add(-20 * time.Second)
+	if err := os.Chtimes(filepath.Join(dir, "segment7.ts"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	status = b.AirPlayMirrorSnapshot(start)
+	if status.HLSSegmentReady || status.BridgeStage == "hls_ready" {
+		t.Fatalf("stale segment was reported ready: %+v", status)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.m3u8"), []byte("#EXTM3U\n#EXT-X-TARGETDURATION:1\nsegment7.ts\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "index.m3u8"), start, start); err != nil {
+		t.Fatal(err)
+	}
+	status = b.AirPlayMirrorSnapshot(start)
+	if !status.HLSManifestReady || status.HLSSegmentReady {
+		t.Fatalf("unreferenced TS file was reported as a ready HLS segment: %+v", status)
+	}
+}
+
+func TestMirrorDiagnosticsRecordSanitizedEncoderFailureStage(t *testing.T) {
+	b := &mirrorBridge{hlsDir: t.TempDir(), ffmpegPath: filepath.Join(t.TempDir(), "missing-ffmpeg")}
+	if err := b.transition(context.Background(), videoMirror, 1); err == nil {
+		t.Fatal("missing FFmpeg executable unexpectedly started")
+	}
+	status := b.AirPlayMirrorSnapshot(time.Now())
+	if status.BridgeStage != "ffmpeg_start_failed" || status.BridgeFailureStage != "ffmpeg_start" || status.Mode != "idle" {
+		t.Fatalf("FFmpeg failure was not retained as a fixed stage: %+v", status)
+	}
+}
+
+func TestAirPlayLogDiagnosticsMatchOnlyFixedDirectVideoWarning(t *testing.T) {
+	diagnostics := newAirPlayLogDiagnostics()
+	secret := "Authorization: Bearer never-store-this\n"
+	phrase := []byte(directAirPlayVideoRequestPhrase)
+	if n, err := diagnostics.Write(append([]byte(secret), phrase[:19]...)); err != nil || n != len(secret)+19 {
+		t.Fatalf("first log fragment: n=%d err=%v", n, err)
+	}
+	if n, err := diagnostics.Write(append(phrase[19:], '\n')); err != nil || n != len(phrase)-19+1 {
+		t.Fatalf("second log fragment: n=%d err=%v", n, err)
+	}
+	if got := diagnostics.DirectVideoRequestCount(); got != 1 {
+		t.Fatalf("direct-video count = %d, want 1", got)
+	}
+	if diagnostics.matched != 0 || diagnostics.discardLine {
+		t.Fatal("log parser retained source text instead of bounded matcher state")
+	}
+	_, _ = diagnostics.Write(append([]byte("prefix "), append(phrase, '\n')...))
+	_, _ = diagnostics.Write(append([]byte("*** WARNING: "), append(phrase, '\n')...))
+	if got := diagnostics.DirectVideoRequestCount(); got != 1 {
+		t.Fatalf("embedded or incorrect-prefix warning counted as a UxPlay route line: %d", got)
+	}
+	for range 300 {
+		_, _ = diagnostics.Write(append(phrase, '\n'))
+	}
+	if got := diagnostics.DirectVideoRequestCount(); got != ^uint8(0) {
+		t.Fatalf("counter did not saturate: %d", got)
+	}
+}
+
 func TestMirrorStopWaitsForEncoderExit(t *testing.T) {
 	sleeper, err := exec.LookPath("sleep")
 	if err != nil {

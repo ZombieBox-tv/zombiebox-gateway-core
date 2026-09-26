@@ -28,6 +28,30 @@ type Config struct {
 	Pin      string `json:"pin,omitempty"`
 }
 
+// AirPlayMirrorStatus contains only fixed protocol state and bounded runtime
+// evidence. It intentionally has no field for upstream logs, packet contents,
+// addresses, URLs, pairing state, or media metadata.
+type AirPlayMirrorStatus struct {
+	Protocol                     string `json:"protocol"`
+	Mode                         string `json:"mode"`
+	VideoRTPAdvancedRecently     bool   `json:"videoRtpAdvancedRecently"`
+	VideoRTPPacketCount          uint64 `json:"videoRtpPacketCount"`
+	VideoRTPLastPacketAgeMS      int64  `json:"videoRtpLastPacketAgeMs,omitempty"`
+	HLSManifestReady             bool   `json:"hlsManifestReady"`
+	HLSSegmentReady              bool   `json:"hlsSegmentReady"`
+	HLSSegmentAgeMS              int64  `json:"hlsSegmentAgeMs,omitempty"`
+	BridgeStage                  string `json:"bridgeStage"`
+	BridgeFailureStage           string `json:"bridgeFailureStage,omitempty"`
+	DirectVideoRequestCount      uint8  `json:"directVideoRequestCount"`
+	PhotoAppAttributionAvailable bool   `json:"photoAppAttributionAvailable"`
+}
+
+// AirPlayMirrorDiagnostics supplies a sanitized snapshot from the process
+// adapter to the authenticated private worker status route.
+type AirPlayMirrorDiagnostics interface {
+	AirPlayMirrorSnapshot(time.Time) AirPlayMirrorStatus
+}
+
 // The private worker health response exposes only bounded audio-flow evidence.
 // The daemon's account, track URI, title and artwork never enter this payload.
 type spotifyWorkerHealth struct {
@@ -72,9 +96,19 @@ func HandlerWithAirPlayProgress(ctx context.Context, c Config, diagnostics *Spot
 	return handlerWithAirPlayDACP(ctx, c, diagnostics, progress, nil, nil)
 }
 
+// HandlerWithAirPlayMirrorDiagnostics adds bounded RTP/bridge evidence to the
+// private AirPlay status response without changing the gateway-facing model.
+func HandlerWithAirPlayMirrorDiagnostics(ctx context.Context, c Config, progress *AirPlayProgress, mirror AirPlayMirrorDiagnostics) http.Handler {
+	return handlerWithAirPlayDACPAndMirror(ctx, c, nil, progress, nil, nil, mirror)
+}
+
 // handlerWithAirPlayDACP exposes testable DACP dependencies while keeping the
 // production handler on the pinned mDNS resolver and direct HTTP transport.
 func handlerWithAirPlayDACP(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress, resolver DACPResolver, dacpHTTP *http.Client) http.Handler {
+	return handlerWithAirPlayDACPAndMirror(ctx, c, diagnostics, progress, resolver, dacpHTTP, nil)
+}
+
+func handlerWithAirPlayDACPAndMirror(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress, resolver DACPResolver, dacpHTTP *http.Client, mirror AirPlayMirrorDiagnostics) http.Handler {
 	if progress == nil {
 		progress = NewAirPlayProgress()
 	}
@@ -295,6 +329,9 @@ func handlerWithAirPlayDACP(ctx context.Context, c Config, diagnostics *SpotifyD
 			connected, connectionRevision, connectionKnown := airplayEvidence.observe(c.StateDir, now, audioFlow)
 			audioActive := audioFlow && !(connectionKnown && !connected)
 			status := map[string]any{"active": active, "audioActive": audioActive, "connected": connected, "connectionKnown": connectionKnown}
+			if mirror != nil {
+				status["mirrorDiagnostics"] = mirror.AirPlayMirrorSnapshot(now)
+			}
 			if connected && connectionRevision != "" {
 				status["connectionRevision"] = connectionRevision
 			}
