@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage the pinned Spotify worker with the licensed Vorbis decoder patch."""
+"""Stage the pinned Spotify worker with the licensed decoder and key-refusal patches."""
 
 import argparse
 import pathlib
@@ -9,7 +9,10 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 UPSTREAM = "57d7278d94a9233060c2a6238f5926ffd1e72de4"
-PATCH = ROOT / "wrappers/spotify/patches/licensed-vorbis.patch"
+PATCHES = [
+    ROOT / "wrappers/spotify/patches/licensed-vorbis.patch",
+    ROOT / "wrappers/spotify/patches/stop-key-refusal-skip.patch",
+]
 
 
 def stage(source: pathlib.Path, output: pathlib.Path) -> None:
@@ -36,19 +39,23 @@ def stage(source: pathlib.Path, output: pathlib.Path) -> None:
         try:
             with tarfile.open(archive) as contents:
                 contents.extractall(output, filter="data")
-            subprocess.run(
-                ["patch", "--batch", "--forward", "-p1", "-i", str(PATCH)],
-                cwd=output,
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
+            for patch in PATCHES:
+                subprocess.run(
+                    ["patch", "--batch", "--forward", "-p1", "-i", str(patch)],
+                    cwd=output,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
             if "github.com/xlab/vorbis-go" in (output / "go.mod").read_text():
                 raise ValueError("Unlicensed Vorbis binding remains in go.mod")
             for code in (output / "vorbis").glob("*.go"):
                 if "github.com/xlab/vorbis-go" in code.read_text():
                     raise ValueError(f"Unlicensed Vorbis binding remains in {code}")
             (output / "ZOMBIE_UPSTREAM_COMMIT").write_text(UPSTREAM + "\n")
-            (output / "ZOMBIE_PATCH").write_text(PATCH.name + "\n")
+            (output / "ZOMBIE_PATCH").write_text(PATCHES[0].name + "\n")
+            (output / "ZOMBIE_PATCHES").write_text(
+                "\n".join(patch.name for patch in PATCHES) + "\n"
+            )
         except BaseException:
             import shutil
 

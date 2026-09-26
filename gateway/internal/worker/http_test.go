@@ -468,3 +468,69 @@ func TestSpotifyStopCallbackHTTPTransportFailureAndResults(t *testing.T) {
 		t.Fatalf("expected http_error status 500 recorded: %+v", daemonField)
 	}
 }
+
+func TestSpotifyStatusAndHealthDoNotClaimPlaybackOnKeyRefusalWithZeroEncodedBytes(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/code" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path == "/status" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"stopped":false,"buffering":true,"track":null,"volume":80,"volume_steps":100,"username":"secret-account"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("ZOMBIE_SPOTIFY_DAEMON_URL", upstream.URL)
+
+	dir := t.TempDir()
+	c := Config{Mode: "spotify", Token: strings.Repeat("k", 32), StateDir: dir}
+	diagnostics := NewSpotifyDaemonDiagnostics()
+	handler := HandlerWithSpotifyDiagnostics(context.Background(), c, diagnostics)
+
+	diagnostics.Write([]byte("playback unavailable: Spotify refused the audio key (code 1) for this playback context: spotify:track:private-uri\n"))
+
+	req := httptest.NewRequest("GET", "/status", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /status, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var statusMap map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusMap); err != nil {
+		t.Fatalf("invalid json from /status: %v", err)
+	}
+	if statusMap["stopped"] != true {
+		t.Fatalf("expected stopped=true after key refusal with zero encoded bytes, got: %+v", statusMap)
+	}
+	if statusMap["buffering"] != false {
+		t.Fatalf("expected buffering=false after key refusal with zero encoded bytes, got: %+v", statusMap)
+	}
+
+	req = httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /health, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var healthMap map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &healthMap); err != nil {
+		t.Fatalf("invalid json from /health: %v", err)
+	}
+	if healthMap["stopped"] != true {
+		t.Fatalf("expected health stopped=true after key refusal with zero encoded bytes, got: %+v", healthMap)
+	}
+	if healthMap["bufferingWithoutTrack"] == true {
+		t.Fatalf("expected health bufferingWithoutTrack=false after key refusal with zero encoded bytes, got: %+v", healthMap)
+	}
+	for _, forbidden := range []string{"private-uri", "secret-account"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("secret leaked in /health response: %s", rec.Body.String())
+		}
+	}
+}

@@ -4,6 +4,7 @@ WORKDIR /upstream
 COPY --from=sources /go-librespot/ ./
 RUN test "$(cat ZOMBIE_UPSTREAM_COMMIT)" = 57d7278d94a9233060c2a6238f5926ffd1e72de4
 RUN test "$(cat ZOMBIE_PATCH)" = licensed-vorbis.patch && ! grep -q 'github.com/xlab/vorbis-go' go.mod
+RUN grep -qx 'licensed-vorbis.patch' ZOMBIE_PATCHES && grep -qx 'stop-key-refusal-skip.patch' ZOMBIE_PATCHES
 RUN --mount=type=cache,id=zombie-go-mod,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,id=zombie-go-build,target=/root/.cache/go-build,sharing=locked \
     CGO_ENABLED=1 GOMAXPROCS=2 go build -p 2 -trimpath -ldflags="-s -w" -o /go-librespot ./cmd/daemon && \
@@ -22,6 +23,7 @@ COPY --from=build /upstream/LICENSE /usr/share/licenses/go-librespot/LICENSE
 COPY --from=build /upstream/ZOMBIE_UPSTREAM_COMMIT /usr/share/licenses/go-librespot/COMMIT
 COPY --from=build /licenses/ /usr/share/licenses/spotify-decoders/
 COPY wrappers/spotify/patches/licensed-vorbis.patch /usr/share/doc/zombiebox/licensed-vorbis.patch
+COPY wrappers/spotify/patches/stop-key-refusal-skip.patch /usr/share/doc/zombiebox/stop-key-refusal-skip.patch
 COPY LICENSE NOTICE /usr/share/doc/zombiebox/
 COPY docs/licenses/DIAL-LICENSE /usr/share/doc/zombiebox/DIAL-LICENSE
 USER 65532:65532

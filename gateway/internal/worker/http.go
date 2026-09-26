@@ -126,13 +126,31 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 							bridge.OnTrack(st.Track.URI)
 						}
 					}
-					audioActive := bridge != nil && bridge.diagnostic().Active
-					diagnostics.observePlayback(st.Stopped, !st.Stopped && st.Buffering && st.Track == nil, audioActive)
+					var audioActive bool
+					var encodedBytes uint64
+					if bridge != nil {
+						audioDiag := bridge.diagnostic()
+						audioActive = audioDiag.Active
+						encodedBytes = audioDiag.EncodedBytes
+					}
+					if diagnostics != nil {
+						diagnostics.observePlayback(st.Stopped, !st.Stopped && st.Buffering && st.Track == nil, audioActive)
+					}
+					var snap *spotifyDaemonHealth
+					if diagnostics != nil {
+						snap = diagnostics.snapshot(!st.Stopped && st.Buffering && st.Track == nil, audioActive)
+					}
+					stopped := st.Stopped
+					buffering := st.Buffering
+					if snap != nil && (snap.RefusalLimited || snap.ConsecutiveRefusals > 0 || snap.FailureCounts["audioKeyRefused"] > 0) && encodedBytes == 0 {
+						stopped = true
+						buffering = false
+					}
 					// Forward only the fields the gateway needs. The daemon's raw
 					// status also contains account, device and track identifiers.
 					safe := map[string]any{
-						"stopped": st.Stopped, "paused": st.Paused,
-						"buffering": st.Buffering, "volume": st.Volume,
+						"stopped": stopped, "paused": st.Paused,
+						"buffering": buffering, "volume": st.Volume,
 						"volume_steps": st.VolumeSteps, "track": nil,
 					}
 					if st.Track != nil {
@@ -142,8 +160,8 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 							"position": st.Track.Position,
 						}
 					}
-					if diagnostics != nil {
-						safe["daemon"] = diagnostics.snapshot(!st.Stopped && st.Buffering && st.Track == nil, audioActive)
+					if snap != nil {
+						safe["daemon"] = snap
 					}
 					if sanitized, err := json.Marshal(safe); err == nil {
 						data = sanitized
@@ -226,7 +244,12 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			if diagnostics != nil {
 				diagnostics.observePlayback(health.Stopped, health.BufferingWithoutTrack, audio.Active)
 			}
-			_ = json.NewEncoder(w).Encode(spotifyWorkerHealth{spotifyHealthResult: health, Audio: audio, Daemon: diagnostics.snapshot(health.BufferingWithoutTrack, audio.Active)})
+			snap := diagnostics.snapshot(health.BufferingWithoutTrack, audio.Active)
+			if snap != nil && (snap.RefusalLimited || snap.ConsecutiveRefusals > 0 || snap.FailureCounts["audioKeyRefused"] > 0) && audio.EncodedBytes == 0 {
+				health.Stopped = true
+				health.BufferingWithoutTrack = false
+			}
+			_ = json.NewEncoder(w).Encode(spotifyWorkerHealth{spotifyHealthResult: health, Audio: audio, Daemon: snap})
 		})
 		mux.HandleFunc("GET /status", proxy)
 		mux.HandleFunc("GET /auth/code", proxy)

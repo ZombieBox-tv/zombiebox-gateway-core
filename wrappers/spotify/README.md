@@ -7,13 +7,41 @@ the gateway's live, non-seekable playback plan.
 The gateway translates track metadata and a finite command set into semantic
 models. Provider tokens and raw upstream identities never reach Android.
 
-The staged source applies [licensed-vorbis.patch](patches/licensed-vorbis.patch)
-to the exact upstream commit. It replaces the unlicensed `xlab/vorbis-go` binding
-with MIT-licensed `jfreymuth/oggvorbis` v1.0.5 and `jfreymuth/vorbis` v1.0.2.
-This uses a pure-Go Vorbis decoder, reducing native library requirements; CPU and
-memory behavior on the actual Android sender/receiver are still unmeasured. Run
-`make spotify-patch-check` for synthetic metadata, decoded samples, gain and seek
-checks. Corresponding-source packages must carry this patch and both MIT licenses.
+The staged source applies two first-party patches to the exact upstream commit:
+1. [licensed-vorbis.patch](patches/licensed-vorbis.patch) replaces the unlicensed
+`xlab/vorbis-go` binding with MIT-licensed `jfreymuth/oggvorbis` v1.0.5 and
+`jfreymuth/vorbis` v1.0.2. This uses a pure-Go Vorbis decoder, reducing native
+library requirements; CPU and memory behavior on the actual Android sender/receiver
+are still unmeasured. Corresponding-source packages must carry this patch and both
+MIT licenses.
+2. [stop-key-refusal-skip.patch](patches/stop-key-refusal-skip.patch) mitigates the
+Spotify Connect track skip storm on audio key refusal (`audio.KeyProviderError` /
+AES key errors). Pinned go-librespot originally treated key refusals as skippable
+unplayable media, causing rapid sequential skips when Spotify refused legacy AES
+keys for a context. The patch prevents key refusals from triggering automatic
+next-track advances in both initial load (`loadCurrentTrackOrSkip`) and sequential
+advance (`advanceTo`) paths. It stops the daemon player and clears optimistic
+playing/buffering state when a key refusal fails a load. Genuinely restricted
+tracks (`ErrMediaRestricted` and `ErrNoSupportedFormats`) retain bounded automatic
+skipping.
+
+The behavioral patch modifies GPL-3.0 go-librespot source. Corresponding-source
+packages must include this patch and the pinned upstream license.
+
+The Spotify worker marks its gateway-facing `/status` and `/health` responses
+stopped when diagnostics record a key refusal and `encodedBytes == 0`; the gateway
+maps that state to `STOPPED`. `encodedBytes` is cumulative for the worker process,
+so this guard only identifies a process that has encoded no audio yet. It does not
+measure per-track progress after earlier audio was encoded.
+
+Open limitations: public PlayPlay is a stub; this mitigation does not introduce a
+DRM workaround or claim that Spotify audio playback succeeds. Spotify makes
+per-track, context-dependent licensing decisions; account-specific license
+rejection remains possible, and actual Spotify Premium acceptance is unverified
+without a physical phone retest.
+Run `make spotify-patch-check` (or `python3 scripts/test-spotify-patch.py` from
+`gateway-core/`) for synthetic metadata, decoded samples, gain, seek, and key
+refusal unit checks.
 
 The Full package defaults new installations to Spotify Connect Zeroconf. With
 the optional Spotify profile running, choose Zombie Box from Spotify's device
