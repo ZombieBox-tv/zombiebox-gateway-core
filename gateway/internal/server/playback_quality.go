@@ -147,6 +147,13 @@ func (s *Server) playbackQualities(w http.ResponseWriter, r *http.Request, d dom
 		fail(w, 404, "session_not_found")
 		return
 	}
+	if sess.mode == "PCM_STREAM" {
+		respond(w, 200, domain.QualityInventory{
+			SelectedID: "auto",
+			Options:    []domain.QualityOption{{ID: "auto", Label: "Auto"}},
+		})
+		return
+	}
 	metadata := sess.metadata
 	if metadata == nil {
 		var value domain.Metadata
@@ -194,6 +201,10 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 	sess := s.ownedMediaSession(r, d.ID)
 	if sess == nil {
 		fail(w, 404, "session_not_found")
+		return
+	}
+	if sess.mode == "PCM_STREAM" {
+		fail(w, 409, "quality_unavailable")
 		return
 	}
 

@@ -23,6 +23,26 @@ activity currently derives from recent worker playlists (up to 15 seconds of idl
 lag); no unsupported sender identity/metadata/artwork is fabricated. Music artwork,
 full reconnect/queue policy and physical A/V evidence remain open.
 
+## Live audio transport selection (unreleased)
+
+For live audio-only AAC HLS, Auto first uses native HLS when current functional
+device evidence permits it. Otherwise it tries a copied AAC ADTS stream only with
+a fresh, advancing ADTS probe. If that is unplayable, it can decode to stereo
+44.1 kHz PCM16 and send it through the Client's AudioTrack HTTP reader, but only
+after that device's AudioTrack playback head advanced at least 500 ms in a fresh
+probe. Without that evidence the plan uses the external player fallback. An
+explicit REMUX request cannot silently select PCM, and an explicit TRANSCODE
+request bypasses the copied ADTS rung.
+
+Native HLS avoids conversion, and ADTS preserves the encoded AAC stream. PCM is
+the more compatible, higher-bandwidth rung (about 1.4 Mbit/s before HTTP
+overhead); it does not restore quality already lost in the source codec. The PCM
+plan is live and unseekable, with a strict private MIME contract and bounded
+conversion, HTTP reads, AudioTrack buffering and cancellation. The selected
+Vizio API 13 passed the silent AudioTrack probe with 2367 ms of playback-head
+advance on Client dev.58. That is device output-path evidence, not proof of
+audible Apple Music playback or automatic AirPlay handoff.
+
 ## AirPlay physical-QA boundary (September 24, 2026)
 
 The optional Full AirPlay worker can advertise and present its separate four-digit

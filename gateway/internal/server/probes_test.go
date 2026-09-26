@@ -1,7 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -357,5 +361,177 @@ func TestAudioOnlyMPEGTSProbeIsExtendedAndTyped(t *testing.T) {
 	}
 	if response.Body.String() != string(fixture) {
 		t.Fatalf("mpegts-aac body mismatch: expected %q, got %q", string(fixture), response.Body.String())
+	}
+}
+
+type flushCountingRecorder struct {
+	*httptest.ResponseRecorder
+	flushCount int
+}
+
+func (w *flushCountingRecorder) Flush() {
+	w.flushCount++
+	w.ResponseRecorder.Flush()
+}
+
+func TestChunkedMPEGTSAACProbeStreamsWithScopedTicket(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	fixture := bytes.Repeat([]byte("mpegts-aac-chunk-"), 4000)
+	if err := os.WriteFile(filepath.Join(s.opt.ProbeDir, "mpegts-aac.ts"), fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "mpegts-aac-chunked-device")
+
+	legacy := call(s, "GET", "/v1/probes", "", "mpegts-aac-chunked-device", token, "")
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("expected 200 for suite 1 manifest, got %d", legacy.Code)
+	}
+	var legacyManifest struct {
+		Probes []probeAsset
+	}
+	if err := json.Unmarshal(legacy.Body.Bytes(), &legacyManifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, probe := range legacyManifest.Probes {
+		if probe.ID == "mpegts-aac-chunked" {
+			t.Fatal("chunked playback probe must be absent from suite 1")
+		}
+	}
+
+	extended := call(s, "GET", "/v1/probes?suite=2", "", "mpegts-aac-chunked-device", token, "")
+	if extended.Code != http.StatusOK {
+		t.Fatalf("expected 200 for suite 2 manifest, got %d", extended.Code)
+	}
+	var extendedManifest struct {
+		Probes []probeAsset
+	}
+	if err := json.Unmarshal(extended.Body.Bytes(), &extendedManifest); err != nil {
+		t.Fatal(err)
+	}
+	var chunked *probeAsset
+	for i := range extendedManifest.Probes {
+		if extendedManifest.Probes[i].ID == "mpegts-aac-chunked" {
+			chunked = &extendedManifest.Probes[i]
+			break
+		}
+	}
+	if chunked == nil {
+		t.Fatal("chunked MPEG-TS AAC probe missing from suite 2 manifest")
+	}
+	if chunked.Video || chunked.Kind != "playback" {
+		t.Fatalf("expected audio-only playback probe, got %+v", *chunked)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, chunked.URL, nil)
+	recorder := &flushCountingRecorder{ResponseRecorder: httptest.NewRecorder()}
+	s.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200 for chunked probe, got %d: %s", recorder.Code, recorder.Body)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "video/mp2t" {
+		t.Fatalf("expected Content-Type video/mp2t, got %s", got)
+	}
+	if got := recorder.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected no Content-Length, got %s", got)
+	}
+	if recorder.flushCount < 2 {
+		t.Fatalf("expected multiple stream flushes, got %d", recorder.flushCount)
+	}
+	if !bytes.Equal(recorder.Body.Bytes(), fixture) {
+		t.Fatal("chunked probe body did not match fixture")
+	}
+
+	server := httptest.NewServer(s)
+	defer server.Close()
+	response, err := http.Get(server.URL + chunked.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 over HTTP, got %d", response.StatusCode)
+	}
+	if got := response.Header.Get("Content-Type"); got != "video/mp2t" {
+		t.Fatalf("expected HTTP Content-Type video/mp2t, got %s", got)
+	}
+	if response.ProtoMajor != 1 {
+		t.Fatalf("expected HTTP/1.x chunked transfer test, got %s", response.Proto)
+	}
+	if got := response.Header.Get("Content-Length"); got != "" || response.ContentLength >= 0 {
+		t.Fatalf("expected unknown Content-Length, header=%q length=%d", got, response.ContentLength)
+	}
+	if len(response.TransferEncoding) != 1 || response.TransferEncoding[0] != "chunked" {
+		t.Fatalf("expected HTTP chunked transfer encoding, got %v", response.TransferEncoding)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, fixture) {
+		t.Fatal("HTTP chunked probe body did not match fixture")
+	}
+
+	wrongAssetURL := strings.Replace(chunked.URL, "mpegts-aac-chunked", "mpegts-aac", 1)
+	for _, invalidURL := range []string{
+		wrongAssetURL,
+		strings.Split(chunked.URL, "&ticket=")[0],
+	} {
+		invalid, err := http.Get(server.URL + invalidURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, invalid.Body)
+		invalid.Body.Close()
+		if invalid.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected 403 for invalid or out-of-scope ticket, got %d", invalid.StatusCode)
+		}
+	}
+}
+
+func TestChunkedMP3ProbeUsesAudioMIMEAndUnknownLength(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	fixture := bytes.Repeat([]byte("synthetic-mp3-chunk"), 4000)
+	if err := os.WriteFile(filepath.Join(s.opt.ProbeDir, "mp3.mp3"), fixture, 0600); err != nil {
+		t.Fatal(err)
+	}
+	token := pair(t, s, "mp3-chunked-device")
+	manifest := call(s, http.MethodGet, "/v1/probes?suite=2", "", "mp3-chunked-device", token, "")
+	if manifest.Code != http.StatusOK {
+		t.Fatalf("expected probe manifest, got %d", manifest.Code)
+	}
+	var listing struct{ Probes []probeAsset }
+	if err := json.Unmarshal(manifest.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	for _, asset := range listing.Probes {
+		if asset.ID == "mp3-chunked" {
+			if asset.Video || asset.Kind != "playback" {
+				t.Fatalf("expected audio playback probe, got %+v", asset)
+			}
+			path = asset.URL
+		}
+	}
+	if path == "" {
+		t.Fatal("mp3-chunked probe missing")
+	}
+	server := httptest.NewServer(s)
+	defer server.Close()
+	response, err := http.Get(server.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "audio/mpeg" || response.ContentLength >= 0 {
+		t.Fatalf("unexpected chunked MP3 response: status=%d mime=%s length=%d", response.StatusCode, response.Header.Get("Content-Type"), response.ContentLength)
+	}
+	if len(response.TransferEncoding) != 1 || response.TransferEncoding[0] != "chunked" {
+		t.Fatalf("expected HTTP chunked encoding, got %v", response.TransferEncoding)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil || !bytes.Equal(body, fixture) {
+		t.Fatalf("chunked MP3 body mismatch: %v", err)
 	}
 }

@@ -17,6 +17,9 @@ import (
 
 var ErrBusy = errors.New("media worker busy")
 
+// PCMStreamMIME describes the internal raw audio stream emitted for legacy players.
+const PCMStreamMIME = "audio/x-zombiebox-pcm;format=s16le;rate=44100;channels=2"
+
 type Stream = domain.Stream
 type Metadata = domain.Metadata
 type Tools struct {
@@ -124,8 +127,17 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 		return ErrBusy
 	}
 	defer func() { <-t.jobs }()
-	if mode != "REMUX" && mode != "TRANSCODE" && mode != "HYBRID" {
+	pcmStream := mode == "PCM_STREAM"
+	if mode != "REMUX" && mode != "TRANSCODE" && mode != "HYBRID" && !pcmStream {
 		return errors.New("unsupported media mode")
+	}
+	if pcmStream {
+		if !remote {
+			return errors.New("unsupported media mode")
+		}
+		if selection.AudioID == nil {
+			return errors.New("PCM stream requires a selected audio stream")
+		}
 	}
 	if mode == "HYBRID" && liveAudio {
 		return errors.New("hybrid video is incompatible with audio-only output")
@@ -158,8 +170,16 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	if selection.AudioID != nil {
 		audio = "0:" + strconv.Itoa(*selection.AudioID)
 	}
-	args = append(args, "-map", "0:v:0?", "-map", audio, "-sn", "-dn", "-map_metadata", "-1")
-	if mode == "REMUX" {
+	if pcmStream {
+		// This private output is a single raw PCM audio stream. It is only
+		// admitted by RemoteTools after the live HLS bridge and probe checks.
+		args = append(args, "-map", audio, "-vn", "-sn", "-dn", "-map_metadata", "-1")
+	} else {
+		args = append(args, "-map", "0:v:0?", "-map", audio, "-sn", "-dn", "-map_metadata", "-1")
+	}
+	if pcmStream {
+		args = append(args, "-c:a", "pcm_s16le", "-ac", "2", "-ar", "44100")
+	} else if mode == "REMUX" {
 		args = append(args, "-c", "copy")
 		if adtsAAC && !liveAudio {
 			args = append(args, "-bsf:a", "aac_adtstoasc")
@@ -171,7 +191,9 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	} else {
 		args = append(args, videoEncoding(selection.Quality)...)
 	}
-	if liveAudio {
+	if pcmStream {
+		args = append(args, "-f", "s16le", "pipe:1")
+	} else if liveAudio {
 		// ADTS has no MP4 fragment index or moov dependency. Each AAC frame can
 		// reach an HTTP progressive player without waiting for a video keyframe.
 		args = append(args, "-f", "adts", "pipe:1")

@@ -253,7 +253,11 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	if resolved.Live {
 		resume = 0
 	}
-	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: mode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
+	clientMode := mode
+	if mode == "PCM_STREAM" {
+		clientMode = "TRANSCODE"
+	}
+	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: clientMode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
 	if (mode == "REMUX" || mode == "HYBRID") && (resume > 0 || req.Quality == "LOW" || (decision.metadata != nil && playback.RequiresTranscodeForQuality(*decision.metadata, req.Quality))) {
 		mode, plan.Mode, s.sessions[id].mode = "TRANSCODE", "TRANSCODE", "TRANSCODE"
 	}
@@ -271,6 +275,11 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			plan.TimelineOffsetMS = resume
 			s.sessions[id].selection.PositionMS = resume
 		}
+	}
+	if mode == "PCM_STREAM" {
+		plan.MIME = media.PCMStreamMIME
+		plan.Seekable = false
+		plan.ResumeMS = 0
 	}
 	if mode == "HYBRID" {
 		plan.MIME = "video/mp4"
@@ -494,7 +503,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(contextWriter{ResponseWriter: w, ctx: r.Context()}, r, "hybrid.mp4", spoolModTime, f)
 		return
 	}
-	if sess.mode == "REMUX" || sess.mode == "TRANSCODE" {
+	if sess.mode == "REMUX" || sess.mode == "TRANSCODE" || sess.mode == "PCM_STREAM" {
 		if r.Header.Get("Range") != "" && r.Header.Get("Range") != "bytes=0-" {
 			fail(w, 416, "conversion_not_seekable")
 			return
@@ -509,6 +518,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		}
 		if media.LiveAACRemux(src, sess.metadata, sess.mode) {
 			mime = "audio/aac"
+		}
+		if sess.mode == "PCM_STREAM" {
+			mime = media.PCMStreamMIME
 		}
 		w.Header().Set("Content-Type", mime)
 		if r.Method == "HEAD" {

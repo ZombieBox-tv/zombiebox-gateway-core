@@ -69,29 +69,56 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 	if source.Live && selection.PositionMS != 0 {
 		return errors.New("live input is not seekable")
 	}
+	pcmStream := mode == "PCM_STREAM"
+	if pcmStream && (!source.Live || ManifestKind(source) != "hls") {
+		return errors.New("PCM stream requires live HLS audio")
+	}
 	bridge, err := t.bridge(ctx, source)
 	if err != nil {
 		return err
 	}
 	defer bridge.close()
+	if pcmStream && bridge.kind != "hls" {
+		return errors.New("PCM stream requires live HLS audio")
+	}
 	// TS AAC carries ADTS headers; copying to fragmented MP4 needs ASC.
 	// Manifests may contain TS. Never apply an AAC filter to MP3/other audio.
 	adtsAAC := false
 	liveAudio := false
-	if mode == "REMUX" && (bridge.kind != "" || strings.EqualFold(strings.TrimSpace(strings.Split(source.MIME, ";")[0]), "video/mp2t")) {
+	needsProbe := pcmStream || (mode == "REMUX" &&
+		(bridge.kind != "" || strings.EqualFold(strings.TrimSpace(strings.Split(source.MIME, ";")[0]), "video/mp2t")))
+	if needsProbe {
 		metadata, err := t.tools.probe(ctx, bridge.video, true, bridge.kind)
 		if err != nil {
 			return err
 		}
+		if pcmStream && bridge.failedUpstream() {
+			return errors.New("remote input failed")
+		}
 		hasAudio, hasVideo := false, false
+		selectedAudio := -1
 		for _, stream := range metadata.Streams {
 			if stream.Type == "video" {
 				hasVideo = true
 			}
-			if stream.Type == "audio" && (selection.AudioID == nil || stream.Index == *selection.AudioID) {
-				hasAudio = true
-				adtsAAC = stream.Codec == "aac"
+			if stream.Type == "audio" {
+				if selection.AudioID == nil && selectedAudio < 0 {
+					selectedAudio = stream.Index
+				}
+				if selection.AudioID != nil && stream.Index == *selection.AudioID {
+					selectedAudio = stream.Index
+				}
+				if selection.AudioID == nil || stream.Index == *selection.AudioID {
+					hasAudio = true
+					adtsAAC = stream.Codec == "aac"
+				}
 			}
+		}
+		if pcmStream {
+			if hasVideo || selectedAudio < 0 {
+				return errors.New("PCM stream requires live audio-only HLS")
+			}
+			selection.AudioID = &selectedAudio
 		}
 		liveAudio = source.Live && hasAudio && adtsAAC && !hasVideo
 	}

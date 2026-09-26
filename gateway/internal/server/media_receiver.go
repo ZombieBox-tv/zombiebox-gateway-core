@@ -73,10 +73,10 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 	if media.ManifestKind(source) == "hls" && mode == "DIRECT_PLAY" && !playback.HasFreshHLSEvidence(d.Capabilities) {
 		mode = "REMUX"
 	}
-	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "HYBRID" && mode != "TRANSCODE" {
+	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "HYBRID" && mode != "TRANSCODE" && mode != "PCM_STREAM" {
 		return domain.Plan{}, errors.New("unsupported playback mode")
 	}
-	if (mode == "REMUX" || mode == "HYBRID" || mode == "TRANSCODE") && ((source.Path != "" && s.deps.Media == nil) || (source.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(source)))) {
+	if (mode == "REMUX" || mode == "HYBRID" || mode == "TRANSCODE" || mode == "PCM_STREAM") && ((source.Path != "" && s.deps.Media == nil) || (source.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(source)))) {
 		return domain.Plan{}, errors.New("conversion unavailable")
 	}
 
@@ -89,6 +89,9 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 		if media.LiveAACRemux(source, decision.metadata, mode) {
 			mime = "audio/aac"
 		}
+	}
+	if mode == "PCM_STREAM" {
+		mime = media.PCMStreamMIME
 	}
 	item := source.Item
 	if isAudioOnly(source, decision.metadata) && item.Kind == "" {
@@ -120,10 +123,14 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 		cancel:    cancel,
 		resources: map[string]string{},
 	}
+	clientMode := mode
+	if mode == "PCM_STREAM" {
+		clientMode = "TRANSCODE"
+	}
 	return domain.Plan{
 		Version:   1,
 		SessionID: id,
-		Mode:      mode,
+		Mode:      clientMode,
 		URL:       "/v1/streams/" + id + "?ticket=" + ticket,
 		MIME:      mime,
 		Live:      true,

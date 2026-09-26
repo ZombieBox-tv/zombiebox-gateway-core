@@ -15,6 +15,7 @@ import (
 
 	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
+	"zombiebox.local/gateway/internal/media"
 	"zombiebox.local/gateway/internal/providers"
 	"zombiebox.local/gateway/internal/receivers/inbox"
 )
@@ -376,6 +377,79 @@ func TestAirPlayReceiverVizioFallbackToGatewayRemux(t *testing.T) {
 	}
 	if strings.Contains(streamResp.Body.String(), privateToken) || strings.Contains(streamResp.Body.String(), upstream.URL) {
 		t.Fatal("secret leaked in stream response")
+	}
+}
+
+func TestAirPlayReceiverUsesProbedPCMWhenCompressedLiveRoutesAreUnknown(t *testing.T) {
+	privateToken := strings.Repeat("p", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+privateToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/status":
+			fmt.Fprint(w, `{"active":false,"audioActive":true,"metadata":{"title":"PCM Test","artist":"Sender"}}`)
+		case "/stream/audio.m3u8":
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\naudio.ts\n")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"airplay": {Enabled: true, URL: upstream.URL, Token: privateToken}}); err != nil {
+		t.Fatal(err)
+	}
+	s.deps.RemoteMedia = &mockReceiverRemoteMedia{
+		probeFunc: func(_ context.Context, _ domain.Source) (domain.Metadata, error) {
+			meta := domain.Metadata{Streams: []domain.Stream{{Type: "audio", Codec: "aac", Index: 0}}}
+			meta.Format.Name = "hls,applehttp"
+			return meta, nil
+		},
+		convertFunc: func(_ context.Context, _ domain.Source, mode string, _ domain.MediaSelection, out io.Writer) error {
+			if mode != "PCM_STREAM" {
+				t.Errorf("conversion mode = %s, want PCM_STREAM", mode)
+			}
+			_, err := out.Write([]byte{0, 0, 1, 0})
+			return err
+		},
+	}
+	token := pair(t, s, "pcm-audio-tv")
+	var dev domain.Device
+	if err := s.db.Get(t.Context(), "devices", "pcm-audio-tv", &dev); err != nil {
+		t.Fatal(err)
+	}
+	dev.Capabilities = domain.Capabilities{
+		SuiteVersion: 2,
+		CacheKey:     devices.ProbeCacheKey(dev),
+		Probes: []domain.Probe{
+			{ID: "http-fmp4", Status: "FAIL", TestedAt: time.Now().Unix()},
+			{ID: "aac-adts", Status: "UNKNOWN", TestedAt: time.Now().Unix()},
+			{ID: "audio-track-pcm-stream", Status: "PASS", PositionMS: 700, TestedAt: time.Now().Unix()},
+		},
+	}
+	if err := s.db.Put(t.Context(), "devices", dev.ID, dev); err != nil {
+		t.Fatal(err)
+	}
+	if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"airplay"}`, dev.ID, token, ""); w.Code != 200 {
+		t.Fatalf("PUT failed: %d %s", w.Code, w.Body)
+	}
+	resp := call(s, "GET", "/v1/media-receiver", "", dev.ID, token, "")
+	if resp.Code != 200 {
+		t.Fatalf("GET failed: %d %s", resp.Code, resp.Body)
+	}
+	var snapshot inbox.Snapshot
+	if err := json.Unmarshal(resp.Body.Bytes(), &snapshot); err != nil || snapshot.Plan == nil {
+		t.Fatalf("missing PCM plan: %s: %v", resp.Body, err)
+	}
+	if snapshot.Plan.Mode != "TRANSCODE" || snapshot.Plan.MIME != media.PCMStreamMIME || !snapshot.Plan.Live || snapshot.Plan.Seekable {
+		t.Fatalf("wrong PCM plan: %+v", snapshot.Plan)
+	}
+	stream := call(s, "GET", snapshot.Plan.URL, "", "", "", "")
+	if stream.Code != 200 || stream.Header().Get("Content-Type") != media.PCMStreamMIME || stream.Body.Len() != 4 {
+		t.Fatalf("wrong PCM stream: %d, %q, %d", stream.Code, stream.Header().Get("Content-Type"), stream.Body.Len())
 	}
 }
 

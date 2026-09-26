@@ -1530,3 +1530,49 @@ func TestLiveAACHLSUsesADTSWhenFragmentedMP4Fails(t *testing.T) {
 		t.Fatalf("video HLS must not bypass failed fMP4 probe, got %s", got)
 	}
 }
+
+func TestLiveAACHLSPCMIsLastEvidenceBackedAudioRoute(t *testing.T) {
+	now := time.Now().Unix()
+	metadata := domain.Metadata{Streams: []domain.Stream{{Type: "audio", Codec: "aac"}}}
+	metadata.Format.Name = "hls"
+	source := domain.Source{MIME: "application/vnd.apple.mpegurl", Live: true}
+	caps := domain.Capabilities{Probes: []domain.Probe{
+		{ID: "http-fmp4", Status: "FAIL", TestedAt: now},
+		{ID: "aac-adts", Status: "UNKNOWN", TestedAt: now},
+		{ID: "audio-track-pcm-stream", Status: "PASS", PositionMS: 500, TestedAt: now},
+	}}
+	if got := LocalModeSource(metadata, source, caps, "AUTO"); got != "PCM_STREAM" {
+		t.Fatalf("advancing local PCM probe should enable last audio route, got %s", got)
+	}
+	if got := LocalModeSource(metadata, source, caps, "REMUX"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("explicit REMUX must not silently transcode to PCM, got %s", got)
+	}
+	if got := LocalModeSource(metadata, source, caps, "TRANSCODE"); got != "PCM_STREAM" {
+		t.Fatalf("explicit TRANSCODE may use probed PCM, got %s", got)
+	}
+	caps.Probes[1] = domain.Probe{ID: "aac-adts", Status: "PASS", PositionMS: 1000, TestedAt: now}
+	if got := LocalModeSource(metadata, source, caps, "AUTO"); got != "REMUX" {
+		t.Fatalf("copied ADTS should precede PCM when both work, got %s", got)
+	}
+	caps.Probes[2].PositionMS = 0
+	caps.Probes[1].Status = "UNKNOWN"
+	if got := LocalModeSource(metadata, source, caps, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("PCM preparation without advancing evidence cannot enable route, got %s", got)
+	}
+	caps.Probes[2].PositionMS = 500
+	caps.Probes[2].TestedAt = now - 8*24*3600
+	if got := LocalModeSource(metadata, source, caps, "AUTO"); got != "EXTERNAL_PLAYER" {
+		t.Fatalf("stale PCM probe cannot enable route, got %s", got)
+	}
+	caps.Probes[2].TestedAt = now
+	video := metadata
+	video.Streams = append([]domain.Stream{}, metadata.Streams...)
+	video.Streams = append(video.Streams, domain.Stream{Type: "video", Codec: "h264", Width: 640, Height: 360})
+	if got := LocalModeSource(video, source, caps, "AUTO"); got == "PCM_STREAM" {
+		t.Fatal("video HLS cannot be sent to audio-only PCM route")
+	}
+	source.Live = false
+	if got := LocalModeSource(metadata, source, caps, "AUTO"); got == "PCM_STREAM" {
+		t.Fatal("finite media must preserve its normal playback ladder")
+	}
+}

@@ -22,6 +22,7 @@ expected = [
     "aac.m4a",
     "aac.adts",
     "mpegts-aac.ts",
+    "mp3.mp3",
     "baseline.ts",
     "fragmented.mp4",
 ]
@@ -102,6 +103,7 @@ for name, options in [
     ("aac.m4a", ["-vn", "-c:a", "copy"]),
     ("aac.adts", ["-vn", "-c:a", "copy", "-f", "adts"]),
     ("mpegts-aac.ts", ["-vn", "-c:a", "copy", "-f", "mpegts"]),
+    ("mp3.mp3", ["-vn", "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3"]),
     ("baseline.ts", ["-c", "copy", "-f", "mpegts"]),
     (
         "fragmented.mp4",

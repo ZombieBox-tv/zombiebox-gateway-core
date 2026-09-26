@@ -37,6 +37,8 @@ var probeAssets = []probeAsset{
 	{ID: "http-progressive", File: "baseline-360.mp4", Video: true, Kind: "playback"},
 	{ID: "aac-adts", File: "aac.adts", Kind: "playback"},
 	{ID: "mpegts-aac", File: "mpegts-aac.ts", Kind: "playback"},
+	{ID: "mpegts-aac-chunked", File: "mpegts-aac.ts", Kind: "playback"},
+	{ID: "mp3-chunked", File: "mp3.mp3", Kind: "playback"},
 	{ID: "seek", File: "baseline-360.mp4", Video: true, Kind: "seek"},
 	{ID: "pause-resume", File: "baseline-360.mp4", Video: true, Kind: "pause-resume"},
 	{ID: "surface-reattach", File: "baseline-360.mp4", Video: true, Kind: "surface-reattach"},
@@ -125,6 +127,14 @@ func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer f.Close()
+			if asset.ID == "mpegts-aac-chunked" || asset.ID == "mp3-chunked" {
+				contentType := "video/mp2t"
+				if asset.ID == "mp3-chunked" {
+					contentType = "audio/mpeg"
+				}
+				streamChunkedProbe(w, f, contentType)
+				return
+			}
 			if asset.Kind == "hls" {
 				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 				w.Header().Set("Cache-Control", "no-store")
@@ -149,4 +159,30 @@ func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	fail(w, 404, "probe_unavailable")
+}
+
+func streamChunkedProbe(w http.ResponseWriter, f *os.File, contentType string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		fail(w, http.StatusInternalServerError, "probe_stream_unavailable")
+		return
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Del("Content-Length")
+
+	buffer := make([]byte, 16<<10)
+	for {
+		n, err := f.Read(buffer)
+		if n > 0 {
+			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			return
+		}
+	}
 }
