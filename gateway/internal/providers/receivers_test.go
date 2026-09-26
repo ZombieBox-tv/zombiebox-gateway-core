@@ -259,12 +259,14 @@ func TestSpotifyStatusErrorHandling(t *testing.T) {
 func TestAirPlayMetadataOnlyAndPlayableReadiness(t *testing.T) {
 	var (
 		audioActive bool
+		connected   bool
 		metadata    map[string]string
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]any{
 			"active":      false,
 			"audioActive": audioActive,
+			"connected":   connected,
 		}
 		if metadata != nil {
 			resp["metadata"] = metadata
@@ -313,6 +315,12 @@ func TestAirPlayMetadataOnlyAndPlayableReadiness(t *testing.T) {
 	if err != nil || source != nil || state.State != "STOPPED" {
 		t.Fatalf("metadata-only AirPlay must not start playback: source=%v state=%+v err=%v", source, state, err)
 	}
+	connected = true
+	source, state, err = testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || source != nil || state.State != "BUFFERING" {
+		t.Fatalf("connected AirPlay without fresh audio must preserve a non-stopped state: source=%v state=%+v err=%v", source, state, err)
+	}
+	connected = false
 
 	// 3. Playable valid state: audioActive is true
 	audioActive = true
@@ -331,6 +339,73 @@ func TestAirPlayMetadataOnlyAndPlayableReadiness(t *testing.T) {
 	source, state, err = testAdapters.Reception(context.Background(), "airplay", c)
 	if err != nil || source == nil || state.State != "PLAYING" || source.Item.Title != "Sample Track" {
 		t.Fatalf("playable AirPlay should start playback: source=%v state=%+v err=%v", source, state, err)
+	}
+}
+
+func TestAirPlayRevisionIsOpaqueAndConnectionScoped(t *testing.T) {
+	metadata := map[string]string{"title": "Track A", "artist": "Artist A", "album": "Album A"}
+	connectionRevision := "0123456789abcdef"
+	connected := true
+	connectionKnown := true
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active": false, "audioActive": true, "connected": connected, "connectionKnown": connectionKnown,
+			"connectionRevision": connectionRevision, "metadata": metadata,
+		})
+	}))
+	defer upstream.Close()
+	c := Config{Enabled: true, URL: upstream.URL, Token: strings.Repeat("a", 32)}
+
+	readAudio := func() Source {
+		t.Helper()
+		sources, err := testAdapters.AirPlay(context.Background(), c)
+		if err != nil || len(sources) != 2 {
+			t.Fatalf("AirPlay sources: %+v, %v", sources, err)
+		}
+		return sources[1]
+	}
+	first := readAudio()
+	if first.Item.ID != "airplay-audio" || !first.Item.Playable {
+		t.Fatalf("fixed receiver item or fresh audio evidence changed: %+v", first.Item)
+	}
+	firstRevision := strings.TrimPrefix(first.URL, upstream.URL+"/stream/audio.m3u8?rev=")
+	if !validAirplayConnectionRevision(firstRevision) || strings.Contains(first.URL, "Track A") || strings.Contains(first.URL, "Artist A") {
+		t.Fatalf("source URL revision is not bounded and opaque: %q", first.URL)
+	}
+	if repeated := readAudio(); repeated.URL != first.URL {
+		t.Fatalf("same track and connection changed source URL: %q != %q", repeated.URL, first.URL)
+	}
+
+	metadata["title"] = "Track B"
+	second := readAudio()
+	if second.Item.ID != first.Item.ID || second.URL == first.URL {
+		t.Fatalf("track change did not revise source while preserving item identity: first=%+v second=%+v", first, second)
+	}
+	if strings.Contains(second.URL, "Track B") || strings.Contains(second.URL, "Artist A") {
+		t.Fatalf("track metadata leaked through source URL: %q", second.URL)
+	}
+
+	metadata["title"] = "Track A"
+	connectionRevision = "fedcba9876543210"
+	reconnected := readAudio()
+	if reconnected.URL == first.URL {
+		t.Fatal("same track on a new private connection reused the old source revision")
+	}
+
+	// Fresh audio plus track metadata identifies audio when old mirror HLS is
+	// still inside its freshness window.
+	_, state, err := testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || state.State != "PLAYING" || state.Item == nil || state.Item.Kind != "audio" {
+		t.Fatalf("fresh titled audio did not take priority over a fresh mirror tail: %+v %v", state, err)
+	}
+	connected = false
+	sources, err := testAdapters.AirPlay(context.Background(), c)
+	if err != nil || sources[1].Item.Playable {
+		t.Fatalf("a vanished known connection kept its stale audio tail playable: %+v %v", sources, err)
+	}
+	_, state, err = testAdapters.Reception(context.Background(), "airplay", c)
+	if err != nil || state.State != "STOPPED" {
+		t.Fatalf("a known disconnect retained stale track metadata: %+v %v", state, err)
 	}
 }
 

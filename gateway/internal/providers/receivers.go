@@ -305,33 +305,75 @@ func (a *Adapters) SpotifyCommand(ctx context.Context, c Config, command PlayerC
 }
 
 func (a *Adapters) AirPlay(ctx context.Context, c Config) ([]Source, error) {
+	sources, _, _, _, err := a.airplaySources(ctx, c)
+	return sources, err
+}
+
+func (a *Adapters) airplaySources(ctx context.Context, c Config) ([]Source, bool, bool, bool, error) {
 	headers, err := wrapperHeaders(c)
 	if err != nil {
-		return nil, err
+		return nil, false, false, false, err
 	}
 	body, err := a.request(ctx, strings.TrimRight(c.URL, "/")+"/status", headers)
 	if err != nil {
-		return nil, err
+		return nil, false, false, false, err
 	}
 	var status struct {
-		Active      bool                                  `json:"active"`
-		AudioActive bool                                  `json:"audioActive"`
-		Metadata    struct{ Title, Artist, Album string } `json:"metadata"`
+		Active             bool                                  `json:"active"`
+		AudioActive        bool                                  `json:"audioActive"`
+		Connected          bool                                  `json:"connected"`
+		ConnectionKnown    bool                                  `json:"connectionKnown"`
+		ConnectionRevision string                                `json:"connectionRevision"`
+		Metadata           struct{ Title, Artist, Album string } `json:"metadata"`
 	}
 	if json.Unmarshal(body, &status) != nil {
-		return nil, errors.New("invalid receiver status")
+		return nil, false, false, false, errors.New("invalid receiver status")
 	}
+	audioActive := status.AudioActive && !(status.ConnectionKnown && !status.Connected)
 	item := domain.Item{ID: "airplay-live", Provider: "airplay", Kind: "video", Title: "AirPlay", Subtitle: "Start Screen Mirroring on your Apple device", Playable: status.Active}
-	audio := domain.Item{ID: "airplay-audio", Provider: "airplay", Kind: "audio", Title: "AirPlay audio", Subtitle: "Select Zombie Box as the audio output on your Apple device", Playable: status.AudioActive}
+	audio := domain.Item{ID: "airplay-audio", Provider: "airplay", Kind: "audio", Title: "AirPlay audio", Subtitle: "Select Zombie Box as the audio output on your Apple device", Playable: audioActive}
 	artwork := ""
 	if status.Metadata.Title != "" {
 		audio.Title = truncate(status.Metadata.Title, 500)
 		audio.Subtitle = truncate(status.Metadata.Artist, 500)
 		audio.Description = truncate(status.Metadata.Album, 500)
-		sum := sha256.Sum256([]byte(audio.Title + "\x00" + audio.Subtitle))
-		artwork = strings.TrimRight(c.URL, "/") + "/artwork?rev=" + hex.EncodeToString(sum[:8])
+		artworkRevision := airplayArtworkRevision(audio.Title, audio.Subtitle, audio.Description)
+		artwork = strings.TrimRight(c.URL, "/") + "/artwork?rev=" + artworkRevision
 	}
-	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/stream/index.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}, {Item: audio, ArtworkURL: artwork, ArtworkHeaders: headers, URL: strings.TrimRight(c.URL, "/") + "/stream/audio.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}}, nil
+	audioURL := strings.TrimRight(c.URL, "/") + "/stream/audio.m3u8"
+	if revision := airplayTrackRevision(audio.Title, audio.Subtitle, audio.Description, status.ConnectionRevision); revision != "" {
+		audioURL += "?rev=" + revision
+	}
+	return []Source{{Item: item, URL: strings.TrimRight(c.URL, "/") + "/stream/index.m3u8", Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}, {Item: audio, ArtworkURL: artwork, ArtworkHeaders: headers, URL: audioURL, Headers: headers, MIME: "application/vnd.apple.mpegurl", Live: true}}, status.Connected, audioActive, status.Metadata.Title != "", nil
+}
+
+// Track revisions include a private connection epoch when UxPlay supplies one.
+// Metadata is the sender's track label, not a unique recording identifier.
+func airplayTrackRevision(title, artist, album, connectionRevision string) string {
+	if !validAirplayConnectionRevision(connectionRevision) {
+		connectionRevision = ""
+	}
+	if title == "" && connectionRevision == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(title + "\x00" + artist + "\x00" + album + "\x00" + connectionRevision))
+	return hex.EncodeToString(sum[:8])
+}
+
+func airplayArtworkRevision(title, artist, album string) string {
+	if title == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(title + "\x00" + artist + "\x00" + album))
+	return hex.EncodeToString(sum[:8])
+}
+
+func validAirplayConnectionRevision(revision string) bool {
+	if len(revision) != 16 {
+		return false
+	}
+	_, err := hex.DecodeString(revision)
+	return err == nil
 }
 
 // AirPlayPIN reads only the private worker's pairing route, never its config file.

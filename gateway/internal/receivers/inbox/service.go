@@ -152,8 +152,10 @@ func (s *Service) Snapshot(ctx context.Context, owner string) (Snapshot, error) 
 		return Snapshot{}, request.Err()
 	}
 	if source == nil {
-		s.stopPlan()
-		s.blocked = ""
+		if selected != "airplay" || status.State != "BUFFERING" {
+			s.stopPlan()
+			s.blocked = ""
+		}
 	} else if source.Item.ID != s.blocked && (provider != "auto" || s.selection.blocked[selected] != source.Item.ID) {
 		keyData, _ := json.Marshal(struct {
 			URL     string

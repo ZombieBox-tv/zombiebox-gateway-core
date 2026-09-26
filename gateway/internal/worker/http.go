@@ -65,6 +65,7 @@ func spotifyDaemonURL() string {
 func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics) http.Handler {
 	mux := http.NewServeMux()
 	var bridge *spotifyBridge
+	var airplayEvidence *airplayConnectionEvidence
 	daemonURL := spotifyDaemonURL()
 	client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	proxy := func(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +265,7 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			bridge.ServeHTTP(w, r)
 		})
 	} else {
+		airplayEvidence = newAirplayConnectionEvidence()
 		mux.HandleFunc("GET /pairing", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(struct {
@@ -271,23 +273,30 @@ func HandlerWithSpotifyDiagnostics(ctx context.Context, c Config, diagnostics *S
 			}{PIN: c.Pin})
 		})
 		mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
-			active, audioActive := airplayStreamActivity(c.StateDir)
+			active, audioFlow := airplayStreamActivity(c.StateDir)
+			connected, connectionRevision, connectionKnown := airplayEvidence.observe(c.StateDir, time.Now(), audioFlow)
+			audioActive := audioFlow && !(connectionKnown && !connected)
 			w.Header().Set("Content-Type", "application/json")
-			status := map[string]any{"active": active, "audioActive": audioActive}
-			if active || audioActive {
-				if meta := airplayMetadata(c.StateDir); len(meta) > 0 {
+			status := map[string]any{"active": active, "audioActive": audioActive, "connected": connected, "connectionKnown": connectionKnown}
+			if connected && connectionRevision != "" {
+				status["connectionRevision"] = connectionRevision
+			}
+			if audioActive || connected {
+				if meta := airplayMetadataForConnection(c.StateDir, connected); len(meta) > 0 {
 					status["metadata"] = meta
 				}
 			}
 			_ = json.NewEncoder(w).Encode(status)
 		})
 		mux.HandleFunc("GET /artwork", func(w http.ResponseWriter, r *http.Request) {
-			active, audioActive := airplayStreamActivity(c.StateDir)
-			if !active && !audioActive {
+			active, audioFlow := airplayStreamActivity(c.StateDir)
+			connected, _, connectionKnown := airplayEvidence.observe(c.StateDir, time.Now(), audioFlow)
+			audioActive := audioFlow && !(connectionKnown && !connected)
+			if !active && !audioActive && !connected {
 				http.NotFound(w, r)
 				return
 			}
-			airplayArtwork(c.StateDir, w, r)
+			airplayArtworkForRevision(c.StateDir, connected, r.URL.Query().Get("rev"), w, r)
 		})
 		mux.HandleFunc("GET /stream/{file}", func(w http.ResponseWriter, r *http.Request) {
 			name := r.PathValue("file")

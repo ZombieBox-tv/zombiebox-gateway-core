@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -259,6 +260,14 @@ func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "coverart"), cover, 0600); err != nil {
 		t.Fatal(err)
 	}
+	metadataTime := time.Now().Add(-2 * time.Second)
+	coverTime := metadataTime.Add(time.Second)
+	if err := os.Chtimes(filepath.Join(dir, "metadata.txt"), metadataTime, metadataTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "coverart"), coverTime, coverTime); err != nil {
+		t.Fatal(err)
+	}
 	manifest := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1.000000,\naudio0.ts\n"
 	if err := os.WriteFile(filepath.Join(hlsDir, "audio.m3u8"), []byte(manifest), 0600); err != nil {
 		t.Fatal(err)
@@ -293,7 +302,10 @@ func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
 	if active || !audioActive || metadata["title"] != "Current Song" {
 		t.Fatalf("active audio status lost current metadata: active=%v audioActive=%v metadata=%v", active, audioActive, metadata)
 	}
-	artwork := request("/artwork")
+	artworkRevision := airplayArtworkRevision(map[string]string{
+		"title": "Current Song", "artist": "Current Artist",
+	})
+	artwork := request("/artwork?rev=" + artworkRevision)
 	if artwork.Code != http.StatusOK || string(artwork.Body.Bytes()) != string(cover) {
 		t.Fatalf("active stream artwork unavailable: code=%d body=%x", artwork.Code, artwork.Body.Bytes())
 	}
@@ -305,9 +317,112 @@ func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
 	if active || audioActive || len(metadata) != 0 {
 		t.Fatalf("idle transition retained track metadata: active=%v audioActive=%v metadata=%v", active, audioActive, metadata)
 	}
-	artwork = request("/artwork")
+	artwork = request("/artwork?rev=" + artworkRevision)
 	if artwork.Code != http.StatusNotFound {
 		t.Fatalf("idle stream served stale artwork: code=%d body=%x", artwork.Code, artwork.Body.Bytes())
+	}
+}
+
+func TestAirplayStatusReturnsOnlyOpaqueConnectionEvidence(t *testing.T) {
+	dir := t.TempDir()
+	privateData := []byte{0x51, '\n', 0x62, '\n'}
+	if err := os.WriteFile(filepath.Join(dir, "receiver.dacp"), privateData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{Mode: "airplay", Token: strings.Repeat("t", 32), StateDir: dir, Pin: "1234"}
+	h := Handler(context.Background(), c)
+	r := httptest.NewRequest("GET", "/status", nil)
+	r.Header.Set("Authorization", "Bearer "+c.Token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status returned %d", w.Code)
+	}
+	if bytes.Contains(w.Body.Bytes(), privateData) {
+		t.Fatal("private connection file bytes escaped through status")
+	}
+	var status map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	var connected bool
+	if err := json.Unmarshal(status["connected"], &connected); err != nil || !connected {
+		t.Fatalf("connection presence missing: %s", w.Body.Bytes())
+	}
+	var known bool
+	if err := json.Unmarshal(status["connectionKnown"], &known); err != nil || !known {
+		t.Fatalf("connection evidence state missing: %s", w.Body.Bytes())
+	}
+	var revision string
+	if err := json.Unmarshal(status["connectionRevision"], &revision); err != nil || len(revision) != 16 {
+		t.Fatalf("opaque revision missing or unbounded: %s", w.Body.Bytes())
+	}
+	if len(status) != 5 {
+		t.Fatalf("unexpected private status fields: %s", w.Body.Bytes())
+	}
+}
+
+func TestAirplayMetadataWaitsForNewConnectionAndClearsAfterDisconnect(t *testing.T) {
+	dir := t.TempDir()
+	hlsDir := filepath.Join(dir, "hls")
+	if err := os.MkdirAll(hlsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hlsDir, "index.m3u8"), []byte("#EXTM3U\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(dir, "metadata.txt")
+	connectionPath := filepath.Join(dir, "receiver.dacp")
+	if err := os.WriteFile(metadataPath, []byte("Title: Old Track\nArtist: Artist\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(connectionPath, []byte("x\ny\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(metadataPath, now.Add(-time.Second), now.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(connectionPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{Mode: "airplay", Token: strings.Repeat("t", 32), StateDir: dir, Pin: "1234"}
+	h := Handler(context.Background(), c)
+	request := func() map[string]any {
+		t.Helper()
+		r := httptest.NewRequest("GET", "/status", nil)
+		r.Header.Set("Authorization", "Bearer "+c.Token)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status returned %d", w.Code)
+		}
+		var status map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+	if status := request(); status["metadata"] != nil {
+		t.Fatalf("previous connection metadata leaked into a new connection: %+v", status)
+	}
+	if err := os.WriteFile(metadataPath, []byte("Title: New Track\nArtist: Artist\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(metadataPath, now.Add(time.Second), now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	status := request()
+	metadata, ok := status["metadata"].(map[string]any)
+	if !ok || metadata["title"] != "New Track" {
+		t.Fatalf("metadata written after the connection was not exposed: %+v", status)
+	}
+	if err := os.Remove(connectionPath); err != nil {
+		t.Fatal(err)
+	}
+	status = request()
+	if status["metadata"] != nil {
+		t.Fatalf("metadata remained exposed after connection evidence disappeared: %+v", status)
 	}
 }
 
