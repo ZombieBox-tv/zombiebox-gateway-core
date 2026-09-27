@@ -5,6 +5,17 @@ const TIERS = ["1080p", "720p", "480p", "360p"];
 const DEFAULT_VALIDATION_DEADLINE_MS = 13_500;
 const DEFAULT_MANUAL_CLIENT_BUDGET_MS = 4_000;
 const MAX_VALIDATION_CHECKS = 25;
+const RESOLVE_CLIENTS = Object.freeze(["IOS", "VISIONOS", "ANDROID", "WEB"]);
+
+function writeDiagnostics(diagnostics, reason, outcomes) {
+  if (!diagnostics || typeof diagnostics !== "object") return;
+  try {
+    diagnostics.reason = reason;
+    diagnostics.clients = outcomes.map(({ client, outcome }) => ({ client, outcome }));
+  } catch {
+    // Diagnostic collection must not affect the resolution result.
+  }
+}
 
 // The anonymous WEB client can return format shells without decipherable URLs.
 // Try clients with playable MP4 origins, while preserving the existing format gate.
@@ -99,11 +110,17 @@ export async function resolveVideo(
   // selection prioritizes iOS/VisionOS, which commonly expose adaptive H.264/AAC.
   const clients =
     manualQuality && targetQuality !== "360p"
-      ? ["IOS", "VISIONOS", "ANDROID", "WEB"]
+      ? RESOLVE_CLIENTS
       : ["ANDROID", "IOS", "VISIONOS", "WEB"];
+  const clientOutcomes = clients.map((client) => ({ client, outcome: "not_reached" }));
+  let stoppedByDeadline = false;
 
-  for (const client of clients) {
-    if (manualQuality && Date.now() >= deadlineAt) break;
+  for (let clientIndex = 0; clientIndex < clients.length; clientIndex++) {
+    const client = clients[clientIndex];
+    if (manualQuality && Date.now() >= deadlineAt) {
+      stoppedByDeadline = true;
+      break;
+    }
     if (resolvedResult && Date.now() - startTime >= deadlineMs) {
       break;
     }
@@ -117,6 +134,7 @@ export async function resolveVideo(
       info = await yt.getBasicInfo(id, { client });
     } catch (error) {
       lastError = error;
+      if (!resolvedResult) clientOutcomes[clientIndex].outcome = "basic_info_failed";
       continue;
     }
 
@@ -130,14 +148,24 @@ export async function resolveVideo(
             : boundValidate,
           targetQuality,
         );
+        if (resolvedResult) clientOutcomes[clientIndex].outcome = "selected";
       } catch (error) {
+        const errorMessage = typeof error?.message === "string" ? error.message : "";
+        const previousErrorMessage =
+          typeof lastError?.message === "string" ? lastError.message : "";
         if (
           !lastError ||
-          error.message === "audio_unavailable" ||
-          lastError.message !== "audio_unavailable"
+          errorMessage === "audio_unavailable" ||
+          previousErrorMessage !== "audio_unavailable"
         ) {
           lastError = error;
         }
+        clientOutcomes[clientIndex].outcome =
+          manualQuality && Date.now() >= clientDeadlineAt
+            ? "client_budget_exhausted"
+            : errorMessage === "audio_unavailable"
+              ? "audio_unavailable"
+              : "format_unavailable";
       }
     }
 
@@ -177,14 +205,29 @@ export async function resolveVideo(
   }
 
   if (!resolvedResult) {
+    const attemptedOutcomes = clientOutcomes
+      .map(({ outcome }) => outcome)
+      .filter((outcome) => outcome !== "not_reached");
+    const reason =
+      stoppedByDeadline || attemptedOutcomes.includes("client_budget_exhausted")
+        ? "client_budget_exhausted"
+        : attemptedOutcomes.includes("audio_unavailable")
+          ? "audio_unavailable"
+          : attemptedOutcomes.length > 0 &&
+              attemptedOutcomes.every((outcome) => outcome === "basic_info_failed")
+            ? "basic_info_failed"
+            : "format_unavailable";
+    writeDiagnostics(options.diagnostics, reason, clientOutcomes);
     throw lastError ?? new Error("video_unavailable");
   }
 
   if (manualQuality) {
+    writeDiagnostics(options.diagnostics, "selected", clientOutcomes);
     return { ...resolvedResult, quality: targetQuality };
   }
 
   const variants = TIERS.filter((t) => discoveredVariants.has(t));
+  writeDiagnostics(options.diagnostics, "selected", clientOutcomes);
   if (variants.length > 0) {
     return { ...resolvedResult, variants };
   }

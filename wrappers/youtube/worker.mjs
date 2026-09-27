@@ -6,6 +6,7 @@ import { evaluate } from "./interpreter.mjs";
 
 Platform.shim.eval = evaluate;
 Log.setLevel(Log.Level.NONE);
+let resolveDiagnostics = null;
 
 async function run() {
   const { operation, query, id, quality, cookie, poToken, visitorData } = workerData;
@@ -19,7 +20,9 @@ async function run() {
     visitor_data: visitorData,
   });
   if (operation === "browse")
-    return browse(yt, workerData.parent ?? "", query ?? "", workerData.offset ?? 0);
+    return {
+      value: await browse(yt, workerData.parent ?? "", query ?? "", workerData.offset ?? 0),
+    };
   if (operation === "catalog") {
     const feed = query ? await yt.search(query, { type: "video" }) : await yt.getHomeFeed();
     const items = [];
@@ -35,13 +38,20 @@ async function run() {
       });
       if (items.length === 40) break;
     }
-    return { items };
+    return { value: { items } };
   }
-  return resolveVideo(yt, id, undefined, quality);
+  resolveDiagnostics = { reason: "provider_failed", clients: [] };
+  return {
+    value: await resolveVideo(yt, id, undefined, quality, { diagnostics: resolveDiagnostics }),
+    diagnostic: resolveDiagnostics,
+  };
 }
 
 try {
-  parentPort.postMessage({ ok: true, value: await run() });
+  parentPort.postMessage({ ok: true, ...(await run()) });
 } catch {
-  parentPort.postMessage({ ok: false });
+  parentPort.postMessage({
+    ok: false,
+    ...(resolveDiagnostics ? { diagnostic: resolveDiagnostics } : {}),
+  });
 }

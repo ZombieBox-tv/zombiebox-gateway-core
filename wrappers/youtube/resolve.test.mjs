@@ -210,6 +210,7 @@ test("manual 720p reaches VisionOS before a slow Android validation can consume 
 
 test("a manual client budget aborts its active range validation before trying VisionOS", async () => {
   const clients = [];
+  const diagnostics = {};
   let iosSignal;
   const yt = {
     session: { player: {} },
@@ -262,6 +263,7 @@ test("a manual client budget aborts its active range validation before trying Vi
   const result = await resolveVideo(yt, "dQw4w9WgXcQ", validate, "720p", {
     deadlineMs: 500,
     manualClientBudgetMs: 20,
+    diagnostics,
   });
 
   assert.equal(result.url, "visionos-720-after-timeout");
@@ -269,6 +271,110 @@ test("a manual client budget aborts its active range validation before trying Vi
   assert.equal(result.quality, "720p");
   assert.equal(iosSignal.aborted, true);
   assert.deepEqual(clients, ["IOS", "VISIONOS"]);
+  assert.deepEqual(diagnostics, {
+    reason: "selected",
+    clients: [
+      { client: "IOS", outcome: "client_budget_exhausted" },
+      { client: "VISIONOS", outcome: "selected" },
+      { client: "ANDROID", outcome: "not_reached" },
+      { client: "WEB", outcome: "not_reached" },
+    ],
+  });
+});
+
+test("resolve diagnostics report categorical client outcomes without exception text", async () => {
+  const diagnostics = {};
+  const yt = {
+    session: { player: {} },
+    async getBasicInfo(_, { client }) {
+      if (client === "IOS") throw new Error("cookie=private title=hidden");
+      return {
+        chooseFormat(options) {
+          if (options.type !== "video+audio" || options.quality !== "720p")
+            throw new Error("signed-url=private");
+          return {
+            itag: 22,
+            has_audio: true,
+            has_video: true,
+            ...videoMetadata(options),
+            decipher: async () => "https://secret.example/video",
+          };
+        },
+      };
+    },
+  };
+
+  const result = await resolveVideo(yt, "dQw4w9WgXcQ", async () => true, "720p", {
+    diagnostics,
+  });
+  assert.equal(result.url, "https://secret.example/video");
+  assert.deepEqual(diagnostics, {
+    reason: "selected",
+    clients: [
+      { client: "IOS", outcome: "basic_info_failed" },
+      { client: "VISIONOS", outcome: "selected" },
+      { client: "ANDROID", outcome: "not_reached" },
+      { client: "WEB", outcome: "not_reached" },
+    ],
+  });
+  assert.equal(JSON.stringify(diagnostics).includes("private"), false);
+});
+
+test("resolve diagnostics distinguish unavailable formats and paired audio", async () => {
+  const clients = ["IOS", "VISIONOS", "ANDROID", "WEB"];
+  const unavailableFormats = {};
+  const noFormats = {
+    session: { player: {} },
+    async getBasicInfo() {
+      return {
+        chooseFormat() {
+          throw new Error("private format details");
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    resolveVideo(noFormats, "dQw4w9WgXcQ", async () => true, "720p", {
+      diagnostics: unavailableFormats,
+    }),
+    /video_unavailable/,
+  );
+  assert.deepEqual(unavailableFormats, {
+    reason: "format_unavailable",
+    clients: clients.map((client) => ({ client, outcome: "format_unavailable" })),
+  });
+
+  const unavailableAudio = {};
+  const noAudio = {
+    session: { player: {} },
+    async getBasicInfo() {
+      return {
+        chooseFormat(options) {
+          if (options.type === "video" && options.quality === "720p") {
+            return {
+              itag: 136,
+              has_audio: false,
+              has_video: true,
+              ...videoMetadata(options),
+              decipher: async () => "private-video-url",
+            };
+          }
+          throw new Error("private format details");
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    resolveVideo(noAudio, "dQw4w9WgXcQ", async () => true, "720p", {
+      diagnostics: unavailableAudio,
+    }),
+    /audio_unavailable/,
+  );
+  assert.deepEqual(unavailableAudio, {
+    reason: "audio_unavailable",
+    clients: clients.map((client) => ({ client, outcome: "audio_unavailable" })),
+  });
+  assert.equal(JSON.stringify(unavailableAudio).includes("private"), false);
 });
 
 test("auto resolve discovers HD variants across clients while keeping Android 360p source", async () => {
