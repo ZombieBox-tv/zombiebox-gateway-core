@@ -105,13 +105,27 @@ func TestHLSProbeScopesItsSegmentAndRejectsStaleResults(t *testing.T) {
 		if response.Code != 200 || !strings.Contains(response.Body.String(), "#EXT-X-ENDLIST") {
 			t.Fatal(response.Body)
 		}
+		foundSegment := false
+		base, err := url.Parse(probe.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, line := range strings.Split(response.Body.String(), "\n") {
-			if strings.HasPrefix(line, "/v1/probes/") {
-				segment := call(s, "GET", line, "", "", "", "")
-				if segment.Code != 200 || segment.Body.String() != "transport fixture" {
-					t.Fatal(segment.Body)
-				}
+			if !strings.HasPrefix(line, "mpegts-h264-aac?") {
+				continue
 			}
+			foundSegment = true
+			reference, err := url.Parse(line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			segment := call(s, "GET", base.ResolveReference(reference).String(), "", "", "", "")
+			if segment.Code != 200 || segment.Body.String() != "transport fixture" {
+				t.Fatal(segment.Body)
+			}
+		}
+		if !foundSegment {
+			t.Fatal("HLS playlist did not contain a relative segment URI")
 		}
 	}
 	body := `{"capabilitiesVersion":1,"deviceId":"probe-device","suiteVersion":2,"cacheKey":"wrong","probes":[]}`
@@ -808,4 +822,289 @@ func TestChunkedProbeStopsReadingAfterRequestCancellation(t *testing.T) {
 	if !bytes.Equal(recorder.Body.Bytes(), fixture[:16<<10]) {
 		t.Fatal("canceled stream wrote bytes outside the first chunk")
 	}
+}
+
+func TestHLSEventProbeUsesIsolatedTimedRunsAndBoundedEvidence(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(s.opt.ProbeDir, "baseline.ts"), []byte("finite-hls-segment"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	segments := writeHLSEventFixtures(t, s.opt.ProbeDir)
+	token := pair(t, s, "hls-event-probe-device")
+	manifestTime := time.Now()
+	manifest := call(s, http.MethodGet, "/v1/probes?suite=2", "", "hls-event-probe-device", token, "")
+	if manifest.Code != http.StatusOK {
+		t.Fatalf("expected extended manifest, got %d: %s", manifest.Code, manifest.Body)
+	}
+	var listing struct {
+		SuiteVersion int
+		Probes       []probeAsset
+	}
+	if err := json.Unmarshal(manifest.Body.Bytes(), &listing); err != nil {
+		t.Fatal(err)
+	}
+	var finite, eventA, eventB *probeAsset
+	for index := range listing.Probes {
+		probe := &listing.Probes[index]
+		switch probe.ID {
+		case "hls-h264-aac":
+			finite = probe
+		case hlsEventProbeID:
+			if eventA == nil {
+				eventA = probe
+			} else {
+				eventB = probe
+			}
+		}
+	}
+	if listing.SuiteVersion != 2 || finite == nil || eventA == nil {
+		t.Fatalf("suite 2 must preserve finite HLS and expose HLS EVENT: %+v", listing)
+	}
+	if eventA.Kind != "hls-event" || !eventA.Video || eventA.EvidenceURL == "" {
+		t.Fatalf("unexpected HLS EVENT manifest item: %+v", eventA)
+	}
+	finitePlaylist := call(s, http.MethodGet, finite.URL, "", "", "", "")
+	if finitePlaylist.Code != http.StatusOK || !strings.Contains(finitePlaylist.Body.String(), "#EXT-X-ENDLIST") {
+		t.Fatalf("existing finite HLS probe lost its ENDLIST: %d %s", finitePlaylist.Code, finitePlaylist.Body)
+	}
+	if strings.Contains(finitePlaylist.Body.String(), "#EXT-X-PLAYLIST-TYPE:EVENT") {
+		t.Fatal("existing finite HLS probe changed into an EVENT playlist")
+	}
+
+	manifestB := call(s, http.MethodGet, "/v1/probes?suite=2", "", "hls-event-probe-device", token, "")
+	if manifestB.Code != http.StatusOK {
+		t.Fatalf("expected repeated-device manifest, got %d", manifestB.Code)
+	}
+	var listingB struct{ Probes []probeAsset }
+	if err := json.Unmarshal(manifestB.Body.Bytes(), &listingB); err != nil {
+		t.Fatal(err)
+	}
+	for index := range listingB.Probes {
+		if listingB.Probes[index].ID == hlsEventProbeID {
+			eventB = &listingB.Probes[index]
+			break
+		}
+	}
+	if eventB == nil {
+		t.Fatal("second manifest did not receive an HLS EVENT run")
+	}
+	queryA, err := url.Parse(eventA.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryB, err := url.Parse(eventB.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queryA.Query().Get("run") == queryB.Query().Get("run") {
+		t.Fatal("repeated manifest requests for one device shared an HLS EVENT run ID")
+	}
+
+	// Model an idle period before the first authorized playlist GET without
+	// sleeping; the run starts at that GET and still exposes only two segments.
+	idleAt := manifestTime.Add(91 * time.Second)
+	serveAt := func(path string, at time.Time, rangeHeader string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		if rangeHeader != "" {
+			request.Header.Set("Range", rangeHeader)
+		}
+		recorder := httptest.NewRecorder()
+		s.hlsEventProbeAt(recorder, request, at)
+		return recorder
+	}
+
+	beforeStartEvidence := serveAt(eventA.EvidenceURL, idleAt, "")
+	if beforeStartEvidence.Code != http.StatusOK {
+		t.Fatalf("evidence before start failed: %d %s", beforeStartEvidence.Code, beforeStartEvidence.Body)
+	}
+	evidence := decodeHLSEventEvidence(t, beforeStartEvidence)
+	if evidence.Started || evidence.PublishedSegmentCount != 0 || evidence.InitialSegmentCount != 0 {
+		t.Fatalf("evidence GET started or published the run: %+v", evidence)
+	}
+	if response := serveAt(eventA.URL+"&segment=2", idleAt, ""); response.Code != http.StatusNotFound {
+		t.Fatalf("segment before first playlist GET must be hidden, got %d", response.Code)
+	}
+
+	firstPlaylist := serveAt(eventA.URL, idleAt, "")
+	if firstPlaylist.Code != http.StatusOK || firstPlaylist.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" {
+		t.Fatalf("unexpected first EVENT playlist response: %d %s", firstPlaylist.Code, firstPlaylist.Body)
+	}
+	if !strings.Contains(firstPlaylist.Body.String(), "#EXT-X-PLAYLIST-TYPE:EVENT\n") || strings.Contains(firstPlaylist.Body.String(), "#EXT-X-ENDLIST") {
+		t.Fatalf("first playlist is not an open HLS EVENT: %s", firstPlaylist.Body)
+	}
+	if got := strings.Count(firstPlaylist.Body.String(), "#EXTINF:"); got != hlsEventInitialSegments {
+		t.Fatalf("expected two initial complete segments, got %d", got)
+	}
+	resolvedSegments := 0
+	for _, line := range strings.Split(firstPlaylist.Body.String(), "\n") {
+		if !strings.HasPrefix(line, hlsEventProbeID+"?") {
+			continue
+		}
+		resolvedSegments++
+		base, err := url.Parse(eventA.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reference, err := url.Parse(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved := base.ResolveReference(reference)
+		if resolved.Path != base.Path || resolved.Query().Get("segment") == "" {
+			t.Fatalf("EVENT segment URI did not resolve against playlist: %q -> %q", line, resolved.String())
+		}
+	}
+	if resolvedSegments != hlsEventInitialSegments {
+		t.Fatalf("expected %d relative EVENT segment URIs, got %d", hlsEventInitialSegments, resolvedSegments)
+	}
+	startedEvidence := decodeHLSEventEvidence(t, serveAt(eventA.EvidenceURL, idleAt, ""))
+	if !startedEvidence.Started || startedEvidence.InitialSegmentCount != 2 || startedEvidence.PublishedSegmentCount != 2 || startedEvidence.LaterPlaylistReloadObserved {
+		t.Fatalf("unexpected evidence after initial playlist only: %+v", startedEvidence)
+	}
+
+	firstPublicationAt := idleAt.Add(hlsEventPublishInterval)
+	reloadedPlaylist := serveAt(eventA.URL, firstPublicationAt, "")
+	if reloadedPlaylist.Code != http.StatusOK || strings.Count(reloadedPlaylist.Body.String(), "#EXTINF:") != 3 {
+		t.Fatalf("expected the third complete segment at the first interval, got %d %s", reloadedPlaylist.Code, reloadedPlaylist.Body)
+	}
+	if hidden := serveAt(eventA.URL+"&segment=3", firstPublicationAt, ""); hidden.Code != http.StatusNotFound {
+		t.Fatalf("fourth segment should remain unpublished at the first interval, got %d", hidden.Code)
+	}
+	if hidden := serveAt(eventB.URL+"&segment=2", firstPublicationAt, ""); hidden.Code != http.StatusNotFound {
+		t.Fatalf("one run exposed another run's third segment, got %d", hidden.Code)
+	}
+
+	partial := serveAt(eventA.URL+"&segment=2", firstPublicationAt, "bytes=0-5")
+	if partial.Code != http.StatusPartialContent || partial.Header().Get("Content-Length") != "6" || partial.Body.Len() != 6 {
+		t.Fatalf("expected exact ranged segment bytes, got status=%d length=%q body=%d", partial.Code, partial.Header().Get("Content-Length"), partial.Body.Len())
+	}
+	partialEvidence := decodeHLSEventEvidence(t, serveAt(eventA.EvidenceURL, firstPublicationAt, ""))
+	if partialEvidence.LaterSegmentDeliveryObserved || len(partialEvidence.DeliveredSegmentIndexes) != 0 {
+		t.Fatalf("partial range counted as a completed segment delivery: %+v", partialEvidence)
+	}
+
+	complete := serveAt(eventA.URL+"&segment=2", firstPublicationAt, "")
+	if complete.Code != http.StatusOK || complete.Header().Get("Content-Length") != strconv.Itoa(len(segments[2])) || complete.Body.String() != string(segments[2]) {
+		t.Fatalf("unexpected complete segment response: status=%d length=%q body=%q", complete.Code, complete.Header().Get("Content-Length"), complete.Body.String())
+	}
+	completeEvidenceResponse := serveAt(eventA.EvidenceURL, firstPublicationAt, "")
+	completeEvidence := decodeHLSEventEvidence(t, completeEvidenceResponse)
+	if !completeEvidence.LaterPlaylistReloadObserved || !completeEvidence.LaterSegmentDeliveryObserved || completeEvidence.LaterPlaylistReloadCount != 1 || !containsInt(completeEvidence.DeliveredSegmentIndexes, 2) {
+		t.Fatalf("server did not record a later playlist reload and complete post-initial segment: %+v", completeEvidence)
+	}
+	if bytes.Contains(completeEvidenceResponse.Body.Bytes(), segments[2]) {
+		t.Fatal("evidence included raw segment data")
+	}
+
+	completeAt := idleAt.Add(time.Duration(hlsEventSegmentCount-hlsEventInitialSegments) * hlsEventPublishInterval)
+	completePlaylist := serveAt(eventA.URL, completeAt, "")
+	if completePlaylist.Code != http.StatusOK || strings.Count(completePlaylist.Body.String(), "#EXTINF:") != hlsEventSegmentCount || !strings.Contains(completePlaylist.Body.String(), "#EXT-X-ENDLIST") {
+		t.Fatalf("expected seven segments and ENDLIST at completion: %d %s", completePlaylist.Code, completePlaylist.Body)
+	}
+	finalEvidence := decodeHLSEventEvidence(t, serveAt(eventA.EvidenceURL, completeAt, ""))
+	if finalEvidence.PublishedSegmentCount != hlsEventSegmentCount || !finalEvidence.PublicationComplete {
+		t.Fatalf("publication did not complete within its fixed seven-segment bound: %+v", finalEvidence)
+	}
+
+	// Even though another run has been active for longer, its first GET begins
+	// at two segments and receives a separate publication clock.
+	secondRunAt := completeAt.Add(20 * time.Second)
+	secondRunPlaylist := serveAt(eventB.URL, secondRunAt, "")
+	if secondRunPlaylist.Code != http.StatusOK || strings.Count(secondRunPlaylist.Body.String(), "#EXTINF:") != hlsEventInitialSegments {
+		t.Fatalf("second run inherited publication progress: %d %s", secondRunPlaylist.Code, secondRunPlaylist.Body)
+	}
+	secondRunEvidence := decodeHLSEventEvidence(t, serveAt(eventB.EvidenceURL, secondRunAt, ""))
+	if secondRunEvidence.PublishedSegmentCount != hlsEventInitialSegments || secondRunEvidence.LaterPlaylistReloadObserved {
+		t.Fatalf("second run inherited another run's evidence: %+v", secondRunEvidence)
+	}
+
+	for _, mutate := range []func(url.Values){
+		func(query url.Values) { query.Set("ticket", "tampered") },
+		func(query url.Values) { query.Set("device", "another-device") },
+		func(query url.Values) { query.Set("run", "ffffffffffffffffffffffffffffffff") },
+		func(query url.Values) {
+			query.Set("expires", "1")
+			query.Set("ticket", s.hlsEventSignature(query.Get("device"), "1", query.Get("run")))
+		},
+	} {
+		invalidURL, parseErr := url.Parse(eventA.URL)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		query := invalidURL.Query()
+		mutate(query)
+		invalidURL.RawQuery = query.Encode()
+		if response := serveAt(invalidURL.String(), idleAt, ""); response.Code != http.StatusForbidden {
+			t.Fatalf("invalid or expired EVENT ticket was accepted: %d %s", response.Code, response.Body)
+		}
+	}
+}
+
+func TestHLSEventProbeRouteServesManifestTicketAndTypedEvidence(t *testing.T) {
+	s := testServer(t, nil, "")
+	s.opt.ProbeDir = t.TempDir()
+	writeHLSEventFixtures(t, s.opt.ProbeDir)
+	token := pair(t, s, "hls-event-route-device")
+	manifest := call(s, http.MethodGet, "/v1/probes?suite=2", "", "hls-event-route-device", token, "")
+	var listing struct{ Probes []probeAsset }
+	if manifest.Code != http.StatusOK || json.Unmarshal(manifest.Body.Bytes(), &listing) != nil {
+		t.Fatalf("could not load event manifest: %d %s", manifest.Code, manifest.Body)
+	}
+	var event *probeAsset
+	for index := range listing.Probes {
+		if listing.Probes[index].ID == hlsEventProbeID {
+			event = &listing.Probes[index]
+			break
+		}
+	}
+	if event == nil {
+		t.Fatal("HLS EVENT probe missing from routed manifest")
+	}
+	playlist := call(s, http.MethodGet, event.URL, "", "", "", "")
+	if playlist.Code != http.StatusOK || strings.Count(playlist.Body.String(), "#EXTINF:") != hlsEventInitialSegments {
+		t.Fatalf("routed EVENT playlist did not start with two segments: %d %s", playlist.Code, playlist.Body)
+	}
+	evidence := call(s, http.MethodGet, event.EvidenceURL, "", "", "", "")
+	if evidence.Code != http.StatusOK || evidence.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unexpected evidence response: %d %s", evidence.Code, evidence.Body)
+	}
+	var decoded hlsEventProbeEvidence
+	if err := json.Unmarshal(evidence.Body.Bytes(), &decoded); err != nil || !decoded.Started || decoded.RunID == "" || decoded.ProbeID != hlsEventProbeID {
+		t.Fatalf("evidence endpoint returned an invalid typed response: %+v (%v)", decoded, err)
+	}
+	if strings.Contains(evidence.Body.String(), "hls-event-00.ts") {
+		t.Fatal("evidence endpoint leaked a media path")
+	}
+}
+
+func writeHLSEventFixtures(t *testing.T, directory string) [][]byte {
+	t.Helper()
+	segments := make([][]byte, hlsEventSegmentCount)
+	for index, name := range hlsEventSegmentFiles {
+		segments[index] = bytes.Repeat([]byte("event-segment-"+strconv.Itoa(index)+"-"), 12)
+		if err := os.WriteFile(filepath.Join(directory, name), segments[index], 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return segments
+}
+
+func decodeHLSEventEvidence(t *testing.T, response *httptest.ResponseRecorder) hlsEventProbeEvidence {
+	t.Helper()
+	var evidence hlsEventProbeEvidence
+	if err := json.Unmarshal(response.Body.Bytes(), &evidence); err != nil {
+		t.Fatalf("invalid HLS EVENT evidence: %v: %s", err, response.Body)
+	}
+	return evidence
+}
+
+func containsInt(values []int, expected int) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }

@@ -70,8 +70,12 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 		return domain.Plan{}, err
 	}
 	mode := decision.mode
-	if media.ManifestKind(source) == "hls" && mode == "DIRECT_PLAY" && !playback.HasFreshHLSEvidence(d.Capabilities) {
-		mode = "REMUX"
+	if media.ManifestKind(source) == "hls" && mode == "DIRECT_PLAY" {
+		if source.Live && source.Item.Kind != "audio" && !playback.HasFreshLiveVideoHLSEvidence(d.Capabilities) {
+			mode = "REMUX"
+		} else if (!source.Live || source.Item.Kind == "audio") && !playback.HasFreshHLSEvidence(d.Capabilities) {
+			mode = "REMUX"
+		}
 	}
 	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "HYBRID" && mode != "TRANSCODE" && mode != "PCM_STREAM" {
 		return domain.Plan{}, errors.New("unsupported playback mode")

@@ -624,6 +624,11 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 			}
 		}
 	}
+	useYouTubeHLS := s.canPublishYouTubeHLS(d, targetSource, targetMetadata, request.QualityID)
+	if useYouTubeHLS {
+		mode = youtubeHLSSessionMode
+		chosenQuality = request.QualityID
+	}
 	if mode == "EXTERNAL_PLAYER" {
 		fail(w, 409, "quality_unavailable")
 		return
@@ -652,6 +657,7 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		fail(w, 429, "session_limit")
 		return
 	}
+	oldHLSPublisher := oldSess.youtubeHLSPublisher
 
 	id, ticket := randomID(16), randomID(24)
 	ctx, cancel := context.WithDeadline(context.Background(), oldSess.expires)
@@ -719,13 +725,63 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 		}
 		plan.Seekable = !targetSource.Live
 		plan.ResumeMS = 0
+	} else if mode == youtubeHLSSessionMode {
+		plan.Mode = "DIRECT_PLAY"
+		plan.MIME = "application/vnd.apple.mpegurl"
+		plan.Seekable = false
+		plan.ResumeMS = 0
+		plan.TimelineOffsetMS = positionMS
+		newSess.selection.PositionMS = positionMS
 	} else {
 		plan.Seekable = !targetSource.Live
 		plan.ResumeMS = request.PositionMS
 	}
 
-	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
 	s.mu.Unlock()
+
+	if useYouTubeHLS {
+		// A quality replacement supersedes the prior source. If it was another
+		// private HLS publication, reap it first to free the conversion slot and
+		// bounded output directory before starting the replacement.
+		if oldHLSPublisher != nil {
+			oldHLSPublisher.Close()
+		}
+		publication, err := s.startYouTubeHLSPublication(ctx, targetSource, selection)
+		if err != nil {
+			s.mu.Lock()
+			if created := s.sessions[id]; created == newSess {
+				created.cancel()
+				delete(s.sessions, id)
+			}
+			if previous := s.sessions[oldID]; previous == oldSess && previous.supersededBy == id {
+				previous.supersededBy = ""
+			}
+			s.mu.Unlock()
+			if oldHLSPublisher != nil && oldSess.ctx.Err() == nil {
+				// If the replacement cannot publish its first segment, attempt to
+				// restore the previous rendition so the client can keep playing.
+				restored, restoreErr := s.startYouTubeHLSPublication(oldSess.ctx, oldSess.source, oldSess.selection)
+				if restoreErr == nil {
+					s.mu.Lock()
+					if s.sessions[oldID] == oldSess && oldSess.ctx.Err() == nil {
+						oldSess.youtubeHLSPublisher = restored
+						restored = nil
+					}
+					s.mu.Unlock()
+					if restored != nil {
+						restored.Close()
+					}
+				}
+			}
+			if errors.Is(err, media.ErrBusy) {
+				fail(w, 429, "media_busy")
+			} else {
+				fail(w, 502, "conversion_failed")
+			}
+			return
+		}
+		newSess.youtubeHLSPublisher = publication
+	}
 
 	// Persist preference to SQLite outside s.mu to avoid blocking global server state on DB I/O.
 	// Make failure semantics explicit: roll back created session if preference write fails.
@@ -744,9 +800,16 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 			s.sessions[oldID].supersededBy = ""
 		}
 		s.mu.Unlock()
+		if newSess.youtubeHLSPublisher != nil {
+			newSess.youtubeHLSPublisher.Close()
+		}
 		fail(w, 500, "storage_error")
 		return
 	}
+	if !useYouTubeHLS && oldHLSPublisher != nil {
+		oldHLSPublisher.Close()
+	}
+	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
 	if provider == "youtube" {
 		// Correlate a manual rendition change with its actual transport and
 		// position policy. Never include the source URL, session ID or ticket.

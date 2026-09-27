@@ -65,6 +65,39 @@ type RemoteMedia interface {
 	ProbeRemote(context.Context, domain.Source) (domain.Metadata, error)
 	ConvertRemote(context.Context, domain.Source, string, domain.MediaSelection, io.Writer) error
 }
+
+// RemoteHLSPublisher is a consumer-owned port for progressive publication of
+// finite split video sources. The server owns ticketed HTTP delivery and
+// session lifetime; implementations own conversion processes and private files.
+type RemoteHLSPublisher interface {
+	StartRemoteHLSPublisher(context.Context, domain.Source, domain.MediaSelection, string) (RemoteHLSPublication, error)
+}
+
+type RemoteHLSPublication interface {
+	Snapshot() (RemoteHLSPublicationSnapshot, error)
+	OpenSegment(string) (ReadSeekCloser, int64, error)
+	Close()
+}
+
+type ReadSeekCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}
+
+type RemoteHLSPublishedSegment struct {
+	Name  string
+	Bytes int64
+}
+
+type RemoteHLSPublicationSnapshot struct {
+	State    string
+	Playlist []byte
+	Segments []RemoteHLSPublishedSegment
+	Error    string
+	Complete bool
+}
+
 type RemoteSubtitles interface {
 	SubtitlesRemote(context.Context, domain.Source, int) ([]domain.SubtitleCue, error)
 }
@@ -84,23 +117,24 @@ type MediaUploads interface {
 }
 
 type Dependencies struct {
-	PublicMediaHTTP HTTPClient
-	Uploads         MediaUploads
-	RemoteSubtitles RemoteSubtitles
-	Reception       Reception
-	AirPlayPairing  AirPlayPairing
-	RemoteMedia     RemoteMedia
-	Browse          catalog.Backend
-	YouTubeReceiver YouTubeReceiver
-	Artwork         Artwork
-	Catalog         Catalog
-	Search          Search
-	Resolver        Resolver
-	Player          Player
-	Browser         Browser
-	Media           Media
-	ControlHTTP     HTTPClient
-	StreamHTTP      HTTPClient
+	PublicMediaHTTP    HTTPClient
+	Uploads            MediaUploads
+	RemoteSubtitles    RemoteSubtitles
+	Reception          Reception
+	AirPlayPairing     AirPlayPairing
+	RemoteMedia        RemoteMedia
+	RemoteHLSPublisher RemoteHLSPublisher
+	Browse             catalog.Backend
+	YouTubeReceiver    YouTubeReceiver
+	Artwork            Artwork
+	Catalog            Catalog
+	Search             Search
+	Resolver           Resolver
+	Player             Player
+	Browser            Browser
+	Media              Media
+	ControlHTTP        HTTPClient
+	StreamHTTP         HTTPClient
 }
 
 func (d Dependencies) validate(db Persistence) {

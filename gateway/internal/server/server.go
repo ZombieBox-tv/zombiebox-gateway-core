@@ -31,6 +31,7 @@ type Options struct {
 	PollWait                                       time.Duration
 	CatalogWait                                    time.Duration
 	HybridSpoolDir                                 string
+	YouTubeHLSPublishDir                           string
 	HybridAggregateQuotaBytes                      int64
 	HybridMaxSpoolBytes                            int64
 	HybridMaxConversions                           int
@@ -40,44 +41,45 @@ type attempt struct {
 	until time.Time
 }
 type Server struct {
-	mediaQueue         mediaqueue.Service
-	companions         *companion.Service
-	networkSamples     map[string]networkSample
-	networkJobs        chan struct{}
-	searchJobs         chan struct{}
-	receiverClaims     sync.Mutex
-	heroes             *home.Heroes
-	mediaReceiverInbox *inbox.Service
-	browse             *catalog.Browser
-	youtubeReceiver    *youtubereceiver.Service
-	youtubeAccount     *youtubeaccount.Service
-	probeKey           string
-	browser            *browserSession
-	integrationChecks  chan struct{}
-	relayJobs          chan struct{}
-	casts              map[string]*castSession
-	seen               map[string]time.Time
-	done               chan struct{}
-	closeOnce          sync.Once
-	db                 Persistence
-	deps               Dependencies
-	opt                Options
-	events             *eventLog
-	mux                *http.ServeMux
-	mu                 sync.Mutex
-	attempts           map[string]attempt
-	sessions           map[string]*session
-	polls              chan struct{}
-	catalogCache       map[string]catalogEntry
-	searchResults      map[string]searchResult
-	youtubeHomeFeeds   map[string]searchResult
-	youtubeContexts    map[string]recentYouTubeContext
-	relatedCache       map[string]relatedCacheEntry
-	configRevision     map[string]uint64
-	managed            map[string]bool
-	streams            chan struct{}
-	hybridSpools       *hybridSpoolManager
-	hybridStartupWait  time.Duration
+	mediaQueue           mediaqueue.Service
+	companions           *companion.Service
+	networkSamples       map[string]networkSample
+	networkJobs          chan struct{}
+	searchJobs           chan struct{}
+	receiverClaims       sync.Mutex
+	heroes               *home.Heroes
+	mediaReceiverInbox   *inbox.Service
+	browse               *catalog.Browser
+	youtubeReceiver      *youtubereceiver.Service
+	youtubeAccount       *youtubeaccount.Service
+	probeKey             string
+	browser              *browserSession
+	integrationChecks    chan struct{}
+	relayJobs            chan struct{}
+	casts                map[string]*castSession
+	seen                 map[string]time.Time
+	done                 chan struct{}
+	closeOnce            sync.Once
+	db                   Persistence
+	deps                 Dependencies
+	opt                  Options
+	events               *eventLog
+	mux                  *http.ServeMux
+	mu                   sync.Mutex
+	attempts             map[string]attempt
+	sessions             map[string]*session
+	polls                chan struct{}
+	catalogCache         map[string]catalogEntry
+	searchResults        map[string]searchResult
+	youtubeHomeFeeds     map[string]searchResult
+	youtubeContexts      map[string]recentYouTubeContext
+	relatedCache         map[string]relatedCacheEntry
+	configRevision       map[string]uint64
+	managed              map[string]bool
+	streams              chan struct{}
+	hybridSpools         *hybridSpoolManager
+	hybridStartupWait    time.Duration
+	youtubeHLSPublishers chan struct{}
 }
 
 func New(db Persistence, opt Options, deps Dependencies) *Server {
@@ -89,16 +91,17 @@ func New(db Persistence, opt Options, deps Dependencies) *Server {
 		opt.CatalogWait = 5 * time.Second
 	}
 	s := &Server{
-		db:                db,
-		opt:               opt,
-		deps:              deps,
-		events:            newEvents(),
-		mux:               http.NewServeMux(),
-		attempts:          map[string]attempt{},
-		sessions:          map[string]*session{},
-		polls:             make(chan struct{}, 32),
-		catalogCache:      map[string]catalogEntry{},
-		hybridStartupWait: maxHybridStartupWait,
+		db:                   db,
+		opt:                  opt,
+		deps:                 deps,
+		events:               newEvents(),
+		mux:                  http.NewServeMux(),
+		attempts:             map[string]attempt{},
+		sessions:             map[string]*session{},
+		polls:                make(chan struct{}, 32),
+		catalogCache:         map[string]catalogEntry{},
+		hybridStartupWait:    maxHybridStartupWait,
+		youtubeHLSPublishers: make(chan struct{}, 1),
 	}
 	s.youtubeReceiver = youtubereceiver.New(deps.YouTubeReceiver, s.config, func() string { return randomID(16) })
 	s.youtubeAccount = youtubeaccount.New(db, deps.ControlHTTP, opt.YouTubeOAuthClientID, opt.YouTubeOAuthClientSecret, youtubeaccount.GoogleEndpoints(), time.Now)

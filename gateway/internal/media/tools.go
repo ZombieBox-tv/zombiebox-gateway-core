@@ -115,16 +115,8 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	if selection.PositionMS < 0 || selection.PositionMS > 7*24*60*60*1000 || (selection.AudioID != nil && *selection.AudioID < 0) {
 		return errors.New("invalid media selection")
 	}
-	// A replacement stream may arrive while cancellation reaps the previous
-	// FFmpeg process. Give it a bounded grace period without adding capacity.
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	select {
-	case t.jobs <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return ErrBusy
+	if err := t.acquireJob(ctx); err != nil {
+		return err
 	}
 	defer func() { <-t.jobs }()
 	pcmStream := mode == "PCM_STREAM"
@@ -220,6 +212,22 @@ func (t *Tools) convert(ctx context.Context, input, audioInput string, remote, a
 	}
 	return nil
 }
+
+// acquireJob bounds FFmpeg conversion concurrency while allowing a canceled
+// process a short, bounded window to be reaped before a replacement starts.
+func (t *Tools) acquireJob(ctx context.Context) error {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case t.jobs <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ErrBusy
+	}
+}
+
 func toolError(ctx context.Context, message string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()

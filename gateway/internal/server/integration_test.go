@@ -222,15 +222,20 @@ func TestHLSRelaysURLsAndKeyWithoutLeakingCredentials(t *testing.T) {
 	if len(key) != 2 {
 		t.Fatal(body)
 	}
-	if w := call(s, "GET", key[1], "", "", "", ""); w.Body.String() != "0123456789abcdef" {
+	if w := call(s, "GET", resolveHLSResource(t, plan.URL, key[1]), "", "", "", ""); w.Body.String() != "0123456789abcdef" {
 		t.Fatal(w.Body)
 	}
+	segmentFound := false
 	for _, line := range strings.Split(body, "\n") {
-		if strings.HasPrefix(line, "/v1/streams/") {
-			if w := call(s, "GET", line, "", "", "", ""); w.Body.String() != "video-bytes" {
+		if strings.HasPrefix(line, plan.SessionID+"/") {
+			segmentFound = true
+			if w := call(s, "GET", resolveHLSResource(t, plan.URL, line), "", "", "", ""); w.Body.String() != "video-bytes" {
 				t.Fatal(w.Body)
 			}
 		}
+	}
+	if !segmentFound {
+		t.Fatal("rewritten playlist lacked a relative segment URI")
 	}
 }
 func TestEventsIsolationAndExpiredCursor(t *testing.T) {

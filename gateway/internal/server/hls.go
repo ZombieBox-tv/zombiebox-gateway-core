@@ -11,7 +11,7 @@ var hlsURI = regexp.MustCompile(`URI="([^"]+)"`)
 
 // Replace every URI with an opaque, session-scoped relay path. Provider URLs,
 // authorization headers and subscription keys never enter the client playlist.
-func (s *Server) rewritePlaylist(sess *session, id, base, body string) (string, error) {
+func (s *Server) rewritePlaylist(sess *session, id, base, body string, nested bool) (string, error) {
 	if !strings.HasPrefix(strings.TrimSpace(body), "#EXTM3U") {
 		return "", errors.New("not HLS")
 	}
@@ -52,7 +52,13 @@ func (s *Server) rewritePlaylist(sess *session, id, base, body string) (string, 
 			sess.resources[key] = u.String()
 			sess.resourceOrder = append(sess.resourceOrder, key)
 		}
-		return "/v1/streams/" + id + "/" + key + "?ticket=" + sess.ticket
+		// Legacy HLS parsers append an absolute-looking path to the playlist
+		// directory. A basename-relative URI resolves correctly for both the
+		// session playlist and playlists nested under one opaque resource.
+		if nested {
+			return key + "?ticket=" + sess.ticket
+		}
+		return id + "/" + key + "?ticket=" + sess.ticket
 	}
 	lines := strings.Split(body, "\n")
 	for i, line := range lines {

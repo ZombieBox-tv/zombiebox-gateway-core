@@ -9,6 +9,10 @@ import (
 )
 
 func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabilities, requested string) string {
+	return localMode(metadata, mime, capabilities, requested, true)
+}
+
+func localMode(metadata domain.Metadata, mime string, capabilities domain.Capabilities, requested string, allowNativeHLS bool) string {
 	if requested == "REMUX" || requested == "TRANSCODE" {
 		return requested
 	}
@@ -19,7 +23,7 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 
 	// 1. Direct play check
 	if isHLS(metadata.Format.Name, mime) {
-		if nativeHLSCandidate(metadata, mime, capabilities) {
+		if allowNativeHLS && nativeHLSCandidate(metadata, mime, capabilities) {
 			return "DIRECT_PLAY"
 		}
 	} else {
@@ -56,7 +60,12 @@ func LocalMode(metadata domain.Metadata, mime string, capabilities domain.Capabi
 // from the general fragmented-MP4 conversion path. Native HLS and probed
 // chunked MP3 stay first; live audio falls back to PCM only on a local PASS.
 func LocalModeSource(metadata domain.Metadata, source domain.Source, capabilities domain.Capabilities, requested string) string {
-	mode := LocalMode(metadata, source.MIME, capabilities, requested)
+	// A single finite HLS segment cannot certify reload and continuation of a
+	// live video channel. Preserve that evidence for finite HLS, but require
+	// the completed EVENT probe before direct play of a live video source.
+	allowNativeHLS := !source.Live || source.Item.Kind == "audio" ||
+		HasFreshLiveVideoHLSEvidence(capabilities)
+	mode := localMode(metadata, source.MIME, capabilities, requested, allowNativeHLS)
 	if isLiveMP3Audio(metadata, source) && (requested == "" || requested == "AUTO" || requested == "REMUX" || requested == "TRANSCODE") {
 		if requested == "REMUX" {
 			return mode

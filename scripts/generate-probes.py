@@ -5,6 +5,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -25,7 +26,7 @@ expected = [
     "mp3.mp3",
     "baseline.ts",
     "fragmented.mp4",
-]
+] + [f"hls-event-{index:02d}.ts" for index in range(7)]
 if not args.force and all(
     (root / name).is_file()
     and not (root / name).is_symlink()
@@ -125,4 +126,90 @@ for name, options in [
         timeout=20,
     )
     os.replace(temporary, target)
+
+event_segments = [root / f"hls-event-{index:02d}.ts" for index in range(7)]
+if args.force or any(
+    not segment.is_file()
+    or segment.is_symlink()
+    or not 100 < segment.stat().st_size <= 8 << 20
+    for segment in event_segments
+):
+    with tempfile.TemporaryDirectory(prefix=".hls-event-", dir=root) as temporary_dir:
+        temporary_pattern = str(Path(temporary_dir) / "hls-event-%02d.ts")
+        subprocess.run(
+            base
+            + [
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=1280x720:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=660:sample_rate=48000",
+                "-t",
+                "28",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "2",
+                "-preset",
+                "veryfast",
+                "-profile:v",
+                "high",
+                "-level:v",
+                "3.1",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "120",
+                "-keyint_min",
+                "120",
+                "-sc_threshold",
+                "0",
+                "-force_key_frames",
+                "expr:gte(t,n_forced*4)",
+                "-b:v",
+                "1800k",
+                "-maxrate",
+                "2200k",
+                "-bufsize",
+                "4400k",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-f",
+                "segment",
+                "-segment_time",
+                "4",
+                "-segment_time_delta",
+                "0.05",
+                "-segment_format",
+                "mpegts",
+                "-reset_timestamps",
+                "0",
+                "-segment_start_number",
+                "0",
+                temporary_pattern,
+            ],
+            check=True,
+            timeout=120,
+        )
+        generated_segments = [
+            Path(temporary_dir) / f"hls-event-{index:02d}.ts" for index in range(7)
+        ]
+        for temporary, target in zip(generated_segments, event_segments, strict=True):
+            if (
+                not temporary.is_file()
+                or temporary.is_symlink()
+                or not 100 < temporary.stat().st_size <= 8 << 20
+            ):
+                raise RuntimeError(f"invalid HLS EVENT probe segment: {temporary.name}")
+        for temporary, target in zip(generated_segments, event_segments, strict=True):
+            os.replace(temporary, target)
 print(f"Generated {len(expected)} probe fixtures in {root}")

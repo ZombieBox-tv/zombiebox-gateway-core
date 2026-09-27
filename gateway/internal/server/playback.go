@@ -21,27 +21,28 @@ import (
 )
 
 type session struct {
-	networkAdaptation bool
-	adaptation        playback.Adaptation
-	metadata          *domain.Metadata
-	subtitleID        *int
-	selection         domain.MediaSelection
-	mode              string
-	knownLengthRemux  bool
-	receiverID        string
-	castID            string
-	device            string
-	ticket            string
-	expires           time.Time
-	source            providers.Source
-	ctx               context.Context
-	cancel            context.CancelFunc
-	resources         map[string]string
-	resourceOrder     []string
-	supersedes        string
-	supersededBy      string
-	hybridSpool       *hybridSpool
-	rangeTrace        *mediaTraceCounters
+	networkAdaptation   bool
+	adaptation          playback.Adaptation
+	metadata            *domain.Metadata
+	subtitleID          *int
+	selection           domain.MediaSelection
+	mode                string
+	knownLengthRemux    bool
+	receiverID          string
+	castID              string
+	device              string
+	ticket              string
+	expires             time.Time
+	source              providers.Source
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	resources           map[string]string
+	resourceOrder       []string
+	supersedes          string
+	supersededBy        string
+	hybridSpool         *hybridSpool
+	youtubeHLSPublisher RemoteHLSPublication
+	rangeTrace          *mediaTraceCounters
 }
 
 func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Device) {
@@ -97,28 +98,68 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			break
 		}
 	}
-	if found == nil || !found.Item.Playable {
+	if found == nil {
+		fail(w, 404, "item_not_found")
+		return
+	}
+	mode := ""
+	var youtubeDiagnostic *youtubePlaybackDiagnostic
+	if found.Item.Provider == "youtube" {
+		youtubeDiagnostic = newYouTubePlaybackDiagnostic(req.Quality)
+		defer func() { youtubeDiagnostic.finish(req.Quality, mode) }()
+		r = r.WithContext(providers.WithYouTubeDiagnosticID(r.Context(), youtubeDiagnostic.event.TraceID))
+	}
+	if !found.Item.Playable {
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.terminal("source", "item_unavailable")
+		}
 		fail(w, 404, "item_not_found")
 		return
 	}
 	receiverCommand := s.youtubeReceiver.SourceCommand(d.ID, req.ItemID)
 	resolved, err := s.deps.Resolver.Resolve(r.Context(), *found)
 	if err != nil {
+		if youtubeDiagnostic != nil {
+			failure := providers.YouTubeResolverFailureOutcome(err)
+			youtubeDiagnostic.resolver(failure)
+			youtubeDiagnostic.terminal("resolver", "resolver_"+failure)
+		}
 		fail(w, 502, "stream_unavailable")
 		return
 	}
+	if youtubeDiagnostic != nil {
+		youtubeDiagnostic.resolver("passed")
+	}
 	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE") && ((resolved.Path != "" && s.deps.Media == nil) || (resolved.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(resolved)))) {
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.terminal("planning", "conversion_unavailable")
+		}
 		fail(w, 409, "conversion_unavailable")
 		return
 	}
 	decision, err := s.playbackMode(r.Context(), resolved, d, req.Mode)
 	if err != nil {
 		if errors.Is(err, media.ErrBusy) {
+			if youtubeDiagnostic != nil {
+				youtubeDiagnostic.streamProbe("busy")
+				youtubeDiagnostic.terminal("stream_probe", "stream_probe_busy")
+			}
 			fail(w, 429, "media_busy")
 		} else {
+			if youtubeDiagnostic != nil {
+				youtubeDiagnostic.streamProbe("failed")
+				youtubeDiagnostic.terminal("stream_probe", "stream_probe_failed")
+			}
 			fail(w, 502, "media_probe_failed")
 		}
 		return
+	}
+	if youtubeDiagnostic != nil {
+		if decision.metadata == nil {
+			youtubeDiagnostic.streamProbe("not_required")
+		} else {
+			youtubeDiagnostic.streamProbe("passed")
+		}
 	}
 	if req.Quality != "" && req.Quality != "auto" {
 		var meta domain.Metadata
@@ -127,11 +168,14 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 		inv := playback.Qualities(meta, resolved, d, "")
 		if !playback.HasQuality(inv, req.Quality) {
+			if youtubeDiagnostic != nil {
+				youtubeDiagnostic.terminal("quality", "quality_unavailable")
+			}
 			fail(w, 409, "quality_unavailable")
 			return
 		}
 	}
-	mode := decision.mode
+	mode = decision.mode
 	if (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation) {
 		if quality := s.networkQuality(d, decision); quality != "" {
 			mode, req.Quality = "TRANSCODE", quality
@@ -155,10 +199,16 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 				if resolved.Item.Provider == "youtube" && (len(resolved.Variants) > 0 || resolved.ResolveURL != "") {
 					targetSource, probedMeta, ok := s.resolveAndProbeYouTubeSource(r.Context(), resolved, preferred)
 					if ok {
+						if youtubeDiagnostic != nil {
+							youtubeDiagnostic.qualityResolution("passed")
+						}
 						resolved = targetSource
 						decision.metadata = &probedMeta
 						resolvedHD = true
 					} else {
+						if youtubeDiagnostic != nil {
+							youtubeDiagnostic.qualityResolution("unavailable")
+						}
 						_ = s.revertQualityPreference(r.Context(), d.ID, provider, kind)
 						resolved = originalResolved
 						decision.metadata = originalMetadata
@@ -166,7 +216,13 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 				}
 				if resolvedHD || (resolved.Item.Provider != "youtube" && playback.HasQuality(inv, preferred)) {
 					newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, preferred, 0, originalMode)
-					if newMode != "EXTERNAL_PLAYER" {
+					canPublishHLS, hlsReason := s.youtubeHLSIneligibility(d, resolved, decision.metadata, preferred)
+					if youtubeDiagnostic != nil {
+						youtubeDiagnostic.hlsGate(canPublishHLS, hlsReason)
+					}
+					if canPublishHLS {
+						mode, req.Quality = youtubeHLSSessionMode, preferred
+					} else if newMode != "EXTERNAL_PLAYER" {
 						mode, req.Quality = newMode, newQuality
 					} else {
 						resolved = originalResolved
@@ -186,17 +242,33 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			if resolved.Item.Provider == "youtube" && (len(resolved.Variants) > 0 || resolved.ResolveURL != "") {
 				targetSource, probedMeta, ok := s.resolveAndProbeYouTubeSource(r.Context(), resolved, req.Quality)
 				if ok {
+					if youtubeDiagnostic != nil {
+						youtubeDiagnostic.qualityResolution("passed")
+					}
 					resolved = targetSource
 					decision.metadata = &probedMeta
 					resolvedQuality = true
 				} else {
+					if youtubeDiagnostic != nil {
+						youtubeDiagnostic.qualityResolution("unavailable")
+						youtubeDiagnostic.terminal("quality_resolution", "quality_resolution_unavailable")
+					}
 					fail(w, 502, "quality_resolution_failed")
 					return
 				}
 			}
 			if resolvedQuality || resolved.Item.Provider != "youtube" {
 				newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, req.Quality, 0, originalMode)
-				if newMode != "EXTERNAL_PLAYER" {
+				canPublishHLS, hlsReason := s.youtubeHLSIneligibility(d, resolved, decision.metadata, req.Quality)
+				if youtubeDiagnostic != nil {
+					youtubeDiagnostic.hlsGate(canPublishHLS, hlsReason)
+				}
+				if canPublishHLS {
+					mode = youtubeHLSSessionMode
+					if newQuality != "" {
+						req.Quality = newQuality
+					}
+				} else if newMode != "EXTERNAL_PLAYER" {
 					mode, req.Quality = newMode, newQuality
 				} else {
 					req.Quality = ""
@@ -210,6 +282,9 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	s.receiverClaims.Lock()
 	defer s.receiverClaims.Unlock()
 	if receiverID != "" && (s.youtubeReceiver.SourceLease(d.ID, req.ItemID) != receiverID || s.youtubeReceiver.SourceCommand(d.ID, req.ItemID) != receiverCommand) {
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.terminal("receiver", "receiver_changed")
+		}
 		fail(w, 409, "receiver_changed")
 		return
 	}
@@ -218,33 +293,22 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		full := len(s.sessions) >= 64
 		s.mu.Unlock()
 		if full {
+			if youtubeDiagnostic != nil {
+				youtubeDiagnostic.terminal("session", "session_limit")
+			}
 			fail(w, 429, "session_limit")
 			return
 		}
 		var current domain.Device
 		if s.db.Get(r.Context(), "devices", d.ID, &current) != nil || !current.Preferences.AllowReceiverHandoff || !current.Preferences.AllowCasting {
+			if youtubeDiagnostic != nil {
+				youtubeDiagnostic.terminal("receiver", "handoff_disabled")
+			}
 			fail(w, 409, "receiver_handoff_disabled")
 			return
 		}
 		s.retireReceivers(r.Context(), d.ID, "youtube")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, x := range s.sessions {
-		if time.Now().After(x.expires) {
-			x.cancel()
-			delete(s.sessions, id)
-		}
-	}
-	if len(s.sessions) >= 64 {
-		fail(w, 429, "session_limit")
-		return
-	}
-	id := randomID(16)
-	ticket := randomID(24)
-	expires := time.Now().Add(6 * time.Hour)
-	ctx, cancel := context.WithDeadline(context.Background(), expires)
-	s.sessions[id] = &session{networkAdaptation: (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation), receiverID: receiverID, mode: mode, metadata: decision.metadata, subtitleID: decision.subtitleID, selection: domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality}, device: d.ID, ticket: ticket, expires: expires, source: resolved, ctx: ctx, cancel: cancel, resources: map[string]string{}, rangeTrace: &mediaTraceCounters{}}
 	var p domain.Progress
 	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
 	resume := p.PositionMS
@@ -257,11 +321,6 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	if resolved.Live {
 		resume = 0
 	}
-	clientMode := mode
-	if mode == "PCM_STREAM" {
-		clientMode = "TRANSCODE"
-	}
-	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: clientMode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
 	qualityRequiresTranscode := req.Quality == "LOW" || (decision.metadata != nil && playback.RequiresTranscodeForQuality(*decision.metadata, req.Quality))
 	knownLengthResume := mode == "REMUX" && resume > 0 && !qualityRequiresTranscode && supportsKnownLengthYouTubeSeek(d, resolved, decision.metadata, mode, time.Now())
 	if mode == "REMUX" && resume > 0 && !knownLengthResume && !qualityRequiresTranscode &&
@@ -271,13 +330,62 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		// known-length spool, but cannot seek within it. Start at zero instead
 		// of silently replacing the selected rendition with chunked TRANSCODE.
 		resume = 0
-		plan.ResumeMS = 0
 	}
-	if (mode == "REMUX" || mode == "HYBRID") && (resume > 0 || qualityRequiresTranscode) && !knownLengthResume {
-		mode, plan.Mode, s.sessions[id].mode = "TRANSCODE", "TRANSCODE", "TRANSCODE"
+	if mode != youtubeHLSSessionMode && (mode == "REMUX" || mode == "HYBRID") && (resume > 0 || qualityRequiresTranscode) && !knownLengthResume {
+		mode = "TRANSCODE"
 	}
+
+	var expiredHLSPublishers []RemoteHLSPublication
+	s.mu.Lock()
+	for oldID, old := range s.sessions {
+		if time.Now().After(old.expires) {
+			old.cancel()
+			if old.youtubeHLSPublisher != nil {
+				expiredHLSPublishers = append(expiredHLSPublishers, old.youtubeHLSPublisher)
+			}
+			delete(s.sessions, oldID)
+		}
+	}
+	sessionLimitReached := len(s.sessions) >= 64
+	s.mu.Unlock()
+	for _, publisher := range expiredHLSPublishers {
+		publisher.Close()
+	}
+	if sessionLimitReached {
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.terminal("session", "session_limit")
+		}
+		fail(w, 429, "session_limit")
+		return
+	}
+
+	id := randomID(16)
+	ticket := randomID(24)
+	expires := time.Now().Add(6 * time.Hour)
+	ctx, cancel := context.WithDeadline(context.Background(), expires)
+	sess := &session{
+		networkAdaptation: (req.Mode == "" || req.Mode == "AUTO") && (req.NetworkAdaptation == nil || *req.NetworkAdaptation),
+		receiverID:        receiverID,
+		mode:              mode,
+		metadata:          decision.metadata,
+		subtitleID:        decision.subtitleID,
+		selection:         domain.MediaSelection{AudioID: decision.audioID, Quality: req.Quality},
+		device:            d.ID,
+		ticket:            ticket,
+		expires:           expires,
+		source:            resolved,
+		ctx:               ctx,
+		cancel:            cancel,
+		resources:         map[string]string{},
+		rangeTrace:        &mediaTraceCounters{},
+	}
+	clientMode := mode
+	if mode == "PCM_STREAM" {
+		clientMode = "TRANSCODE"
+	}
+	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: clientMode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
 	knownLengthRemux := requiresKnownLengthYouTubeRemux(d, resolved, decision.metadata, mode, time.Now())
-	s.sessions[id].knownLengthRemux = knownLengthRemux
+	sess.knownLengthRemux = knownLengthRemux
 	plan.PrepareBeforePlayback = knownLengthRemux || mode == "HYBRID"
 	if mode == "REMUX" || mode == "TRANSCODE" {
 		plan.MIME = "video/mp4"
@@ -294,7 +402,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 		if mode == "TRANSCODE" {
 			plan.TimelineOffsetMS = resume
-			s.sessions[id].selection.PositionMS = resume
+			sess.selection.PositionMS = resume
 		}
 	}
 	if mode == "PCM_STREAM" {
@@ -310,11 +418,77 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		plan.Seekable = !resolved.Live
 		plan.ResumeMS = 0
 	}
+	if mode == youtubeHLSSessionMode {
+		plan.Mode = "DIRECT_PLAY"
+		plan.MIME = "application/vnd.apple.mpegurl"
+		plan.PrepareBeforePlayback = false
+		plan.Seekable = false
+		plan.ResumeMS = 0
+		plan.TimelineOffsetMS = resume
+		sess.selection.PositionMS = resume
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.publisher("starting")
+		}
+		publication, err := s.startYouTubeHLSPublication(ctx, resolved, sess.selection)
+		if err != nil {
+			cancel()
+			if youtubeDiagnostic != nil {
+				publisherState, outcome := youtubeHLSPublisherFailureDiagnostic(err)
+				youtubeDiagnostic.publisher(publisherState)
+				youtubeDiagnostic.terminal("publisher", outcome)
+			}
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			if errors.Is(err, media.ErrBusy) {
+				fail(w, 429, "media_busy")
+			} else {
+				fail(w, 502, "conversion_failed")
+			}
+			return
+		}
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.publisher("ready_first_segment")
+		}
+		sess.youtubeHLSPublisher = publication
+	}
 	if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" && !knownLengthRemux {
 		log.Printf("media plan provider=%s mode=%s split=%t quality=%s resume_ms=%d known_length_remux=%t", resolved.Item.Provider, mode, resolved.AudioURL != "", req.Quality, resume, knownLengthRemux)
 	}
+	s.mu.Lock()
+	if len(s.sessions) >= 64 {
+		s.mu.Unlock()
+		cancel()
+		if sess.youtubeHLSPublisher != nil {
+			sess.youtubeHLSPublisher.Close()
+		}
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.terminal("session", "session_limit")
+		}
+		fail(w, 429, "session_limit")
+		return
+	}
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		cancel()
+		if sess.youtubeHLSPublisher != nil {
+			sess.youtubeHLSPublisher.Close()
+		}
+		if youtubeDiagnostic != nil {
+			youtubeDiagnostic.terminal("session", "server_stopping")
+		}
+		fail(w, 503, "server_stopping")
+		return
+	default:
+	}
+	s.sessions[id] = sess
 	s.events.publish(d.ID, "playback.created", map[string]string{"sessionId": id})
+	s.mu.Unlock()
 	respond(w, 201, plan)
+	if youtubeDiagnostic != nil {
+		youtubeDiagnostic.terminal("playback", "success")
+	}
 }
 func (s *Server) progress(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	var p domain.Progress
@@ -388,13 +562,14 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	id := r.PathValue("session")
 	sess := s.sessions[id]
 	if sess == nil || sess.device != d.ID {
+		s.mu.Unlock()
 		fail(w, 404, "session_not_found")
 		return
 	}
+	var publishers []RemoteHLSPublication
 	if c := s.casts[sess.castID]; c != nil {
 		s.endCastLocked(c)
 	}
@@ -402,6 +577,9 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		sess.supersedes = ""
 		if supersededSess := s.sessions[supersededID]; supersededSess != nil {
 			supersededSess.cancel()
+			if supersededSess.youtubeHLSPublisher != nil {
+				publishers = append(publishers, supersededSess.youtubeHLSPublisher)
+			}
 			delete(s.sessions, supersededID)
 		}
 	}
@@ -411,8 +589,15 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request, d domain.Device) {
 		}
 	}
 	sess.cancel()
+	if sess.youtubeHLSPublisher != nil {
+		publishers = append(publishers, sess.youtubeHLSPublisher)
+	}
 	delete(s.sessions, id)
 	s.events.publish(d.ID, "playback.stopped", map[string]string{"sessionId": id})
+	s.mu.Unlock()
+	for _, publisher := range publishers {
+		publisher.Close()
+	}
 	respond(w, 200, map[string]string{"state": "STOPPED"})
 }
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
@@ -423,13 +608,26 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		fail(w, 401, "invalid_stream_ticket")
 		return
 	}
+	var supersededPublisher RemoteHLSPublication
 	if supersededID := sess.supersedes; supersededID != "" {
 		sess.supersedes = ""
 		if supersededSess := s.sessions[supersededID]; supersededSess != nil {
 			supersededSess.cancel()
+			supersededPublisher = supersededSess.youtubeHLSPublisher
 			delete(s.sessions, supersededID)
 			s.events.publish(supersededSess.device, "playback.stopped", map[string]string{"sessionId": supersededID})
 		}
+	}
+	if sess.youtubeHLSPublisher != nil {
+		publisherSession := sess
+		sessionID := r.PathValue("session")
+		resource := r.PathValue("resource")
+		s.mu.Unlock()
+		if supersededPublisher != nil {
+			supersededPublisher.Close()
+		}
+		s.serveYouTubeHLSPublication(w, r, sessionID, resource, publisherSession)
+		return
 	}
 	src := sess.source
 	resource := r.PathValue("resource")
@@ -437,6 +635,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		raw, ok := sess.resources[resource]
 		if !ok {
 			s.mu.Unlock()
+			if supersededPublisher != nil {
+				supersededPublisher.Close()
+			}
 			fail(w, 404, "resource_not_found")
 			return
 		}
@@ -455,6 +656,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	knownLengthRemux := sess.knownLengthRemux && resource == ""
 	prepareRequested := r.Method == http.MethodHead && r.URL.Query().Get("prepare") == "1" && resource == ""
 	s.mu.Unlock()
+	if supersededPublisher != nil {
+		supersededPublisher.Close()
+	}
 	if os.Getenv("ZOMBIE_MEDIA_TRACE") == "1" {
 		rangeKind := "none"
 		if value := r.Header.Get("Range"); value != "" {
@@ -697,7 +901,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			fail(w, 502, "invalid_playlist")
 			return
 		}
-		rewritten, err := s.rewritePlaylist(sess, r.PathValue("session"), res.Request.URL.String(), string(body))
+		rewritten, err := s.rewritePlaylist(sess, r.PathValue("session"), res.Request.URL.String(), string(body), resource != "")
 		if err != nil {
 			fail(w, 502, "invalid_playlist")
 			return
@@ -775,7 +979,7 @@ func (s *Server) Close() {
 	s.youtubeReceiver.Close(ctx)
 	cancel()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var youtubeHLSPublishers []RemoteHLSPublication
 	if s.browser != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_, _ = s.deps.Browser.BrowserRequest(ctx, s.browser.config, "DELETE", "/session/"+s.browser.id, nil)
@@ -787,10 +991,17 @@ func (s *Server) Close() {
 	}
 	for id, x := range s.sessions {
 		x.cancel()
+		if x.youtubeHLSPublisher != nil {
+			youtubeHLSPublishers = append(youtubeHLSPublishers, x.youtubeHLSPublisher)
+		}
 		delete(s.sessions, id)
 	}
 	if s.hybridSpools != nil {
 		s.hybridSpools.Close()
+	}
+	s.mu.Unlock()
+	for _, publisher := range youtubeHLSPublishers {
+		publisher.Close()
 	}
 }
 

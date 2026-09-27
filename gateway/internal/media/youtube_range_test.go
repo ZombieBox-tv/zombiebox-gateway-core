@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 
 	"zombiebox.local/gateway/internal/domain"
@@ -112,6 +113,46 @@ func TestYouTubeOpenRangeRejectsBrokenUpstream(t *testing.T) {
 	started, err := relayYouTubeOpenRange(response, request, upstream.Client(), upstream.URL, nil)
 	if !started || err == nil || response.Body.Len() != int(youtubeRangeChunk) {
 		t.Fatalf("broken upstream accepted: started=%t err=%v bytes=%d", started, err, response.Body.Len())
+	}
+}
+
+func TestYouTubeOpenRangeResumesTruncatedBodyWithoutDuplicateBytes(t *testing.T) {
+	content := bytes.Repeat([]byte("zombie-hd-audio-video"), 15_000)
+	requests := make([]string, 0, 3)
+	var requestsMu sync.Mutex
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var start, end int
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil || start < 0 || end < start || start >= len(content) {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		requestsMu.Lock()
+		requests = append(requests, r.Header.Get("Range"))
+		requestCount := len(requests)
+		requestsMu.Unlock()
+		if end >= len(content) {
+			end = len(content) - 1
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(content)))
+		w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
+		w.WriteHeader(http.StatusPartialContent)
+		if requestCount == 1 {
+			_, _ = w.Write(content[start : start+32_768])
+			return // Force an early EOF inside the first bounded range.
+		}
+		_, _ = w.Write(content[start : end+1])
+	}))
+	defer upstream.Close()
+	request := httptest.NewRequest(http.MethodGet, "http://bridge/video", nil)
+	response := httptest.NewRecorder()
+	started, err := relayYouTubeOpenRange(response, request, upstream.Client(), upstream.URL, nil)
+	if err != nil || !started || !bytes.Equal(response.Body.Bytes(), content) {
+		t.Fatalf("partial upstream range was not resumed exactly: started=%t err=%v bytes=%d", started, err, response.Body.Len())
+	}
+	requestsMu.Lock()
+	defer requestsMu.Unlock()
+	if len(requests) < 3 || requests[0] != "bytes=0-262143" || requests[1] != "bytes=32768-294911" {
+		t.Fatalf("unexpected resumed upstream byte ranges: %q", requests)
 	}
 }
 

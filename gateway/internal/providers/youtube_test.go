@@ -41,6 +41,66 @@ func TestYouTubeResolutionUsesPrivateTransport(t *testing.T) {
 	}
 }
 
+func TestYouTubeResolutionPropagatesValidatedDiagnosticContextID(t *testing.T) {
+	const diagnosticID = "0123456789abcdef"
+	var observed string
+	private := youtubeHTTPClient(func(request *http.Request) (*http.Response, error) {
+		observed = request.Header.Get("X-Zombie-Diagnostic-Id")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"url":"https://r1.googlevideo.com/video","mimeType":"video/mp4"}`)),
+		}, nil
+	})
+	adapter := New(private, private)
+	source := Source{
+		URL:     "http://wrapper.local/resolve/video",
+		MIME:    "application/x-zombie-youtube",
+		Headers: http.Header{"X-Zombie-Diagnostic-Id": {"untrusted-header-value"}},
+	}
+
+	ctx := WithYouTubeDiagnosticID(context.Background(), diagnosticID)
+	if _, err := adapter.Resolve(ctx, source); err != nil {
+		t.Fatalf("resolve with diagnostic context: %v", err)
+	}
+	if observed != diagnosticID {
+		t.Fatalf("private resolver diagnostic ID = %q, want %q", observed, diagnosticID)
+	}
+
+	for _, invalid := range []string{"attacker-supplied-id", "0123456789ABCDEf", "0123456789abcde"} {
+		observed = ""
+		ctx := WithYouTubeDiagnosticID(context.Background(), invalid)
+		if _, err := adapter.Resolve(ctx, source); err != nil {
+			t.Fatalf("resolve with invalid diagnostic context: %v", err)
+		}
+		if observed != "" {
+			t.Fatalf("invalid diagnostic context forwarded %q as %q", invalid, observed)
+		}
+	}
+}
+
+func TestYouTubeResolverFailureOutcomeIsCategorical(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "busy", err: errProviderBusy, want: "busy"},
+		{name: "http busy", err: errors.New("provider HTTP 503"), want: "busy"},
+		{name: "unavailable", err: errors.New("provider unavailable: https://private.invalid/?token=secret"), want: "unavailable"},
+		{name: "http unavailable", err: errors.New("provider HTTP 502 with body secret"), want: "unavailable"},
+		{name: "unknown", err: nil, want: "unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := YouTubeResolverFailureOutcome(test.err); got != test.want {
+				t.Fatalf("outcome = %q, want %q", got, test.want)
+			}
+			if strings.Contains(YouTubeResolverFailureOutcome(test.err), "secret") {
+				t.Fatal("resolver outcome included private error content")
+			}
+		})
+	}
+}
+
 func TestYouTubeResolutionRetriesOnlyTransientBusy(t *testing.T) {
 	source := Source{URL: "http://wrapper.local/resolve/aqz-KE-bpKQ", MIME: "application/x-zombie-youtube"}
 	requests := 0

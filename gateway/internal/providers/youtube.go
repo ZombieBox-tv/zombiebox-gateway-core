@@ -15,6 +15,57 @@ import (
 
 var youtubeID = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 
+type youtubeDiagnosticIDContextKey struct{}
+
+// WithYouTubeDiagnosticID attaches a gateway-generated correlation ID to the
+// private YouTube resolver request context. Invalid IDs are ignored.
+func WithYouTubeDiagnosticID(ctx context.Context, id string) context.Context {
+	if ctx == nil || !validYouTubeDiagnosticID(id) {
+		return ctx
+	}
+	return context.WithValue(ctx, youtubeDiagnosticIDContextKey{}, id)
+}
+
+// YouTubeDiagnosticIDFromContext returns only a validated gateway correlation
+// ID. It is never read from an incoming HTTP header.
+func YouTubeDiagnosticIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(youtubeDiagnosticIDContextKey{}).(string)
+	if !validYouTubeDiagnosticID(id) {
+		return ""
+	}
+	return id
+}
+
+func validYouTubeDiagnosticID(id string) bool {
+	if len(id) != 16 {
+		return false
+	}
+	for _, character := range id {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// YouTubeResolverFailureOutcome maps private worker failures to bounded
+// categories suitable for diagnostics. It never returns error text.
+func YouTubeResolverFailureOutcome(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if errors.Is(err, errProviderBusy) || err.Error() == "provider HTTP 503" {
+		return "busy"
+	}
+	if err.Error() == "provider unavailable" || strings.HasPrefix(err.Error(), "provider HTTP ") {
+		return "unavailable"
+	}
+	return "unavailable"
+}
+
 func (a *Adapters) YouTube(ctx context.Context, c Config) ([]Source, error) {
 	if c.URL == "" || len(c.Token) < 32 {
 		return nil, errors.New("wrapper configuration required")
@@ -65,6 +116,10 @@ func (a *Adapters) resolveYouTube(ctx context.Context, source Source) (Source, e
 			separator = "&"
 		}
 		resolveURL += separator + "quality=" + url.QueryEscape(source.ResolveQuality)
+	}
+	resolveHeaders.Del("X-Zombie-Diagnostic-Id")
+	if diagnosticID := YouTubeDiagnosticIDFromContext(ctx); diagnosticID != "" {
+		resolveHeaders.Set("X-Zombie-Diagnostic-Id", diagnosticID)
 	}
 
 	var body []byte

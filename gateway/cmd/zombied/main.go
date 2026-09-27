@@ -38,6 +38,7 @@ func main() {
 	stateCheck := flag.Bool("state-check", false, "check existing state read-only without migration, then exit")
 	state := flag.String("state", ".local/gateway.db", "private SQLite database path")
 	hybridSpoolDir := flag.String("hybrid-spool-dir", "", "private HYBRID conversion spool directory (default: hybrid-spools beside state database)")
+	youtubeHLSPublishDir := flag.String("youtube-hls-dir", "", "private YouTube HLS output directory (default: youtube-hls beside state database)")
 	probes := flag.String("probe-dir", "", "directory of synthetic capability fixtures")
 	media := flag.String("media-dir", ".local/media", "directory containing local media")
 	config := flag.String("config", "", "optional private provider configuration JSON")
@@ -149,11 +150,20 @@ func main() {
 	var tools server.Media
 	var remoteTools server.RemoteMedia
 	var remoteSubtitles server.RemoteSubtitles
+	var remoteHLSPublisher server.RemoteHLSPublisher
+	var youtubeHLSPublishPath string
 	if *enableMedia {
 		localTools := mediatools.New("ffmpeg", "ffprobe")
 		tools = localTools
 		remote := mediatools.NewRemote(localTools, httpclient.Streaming())
 		remoteTools, remoteSubtitles = remote, remote
+		publishDir := resolvedYouTubeHLSPublishDir(*state, *youtubeHLSPublishDir)
+		if err := prepareYouTubeHLSPublishDir(publishDir); err != nil {
+			slog.Warn("YouTube HLS publishing unavailable; preserving the current playback ladder")
+		} else {
+			remoteHLSPublisher = remoteHLSPublisherAdapter{remote: remote}
+			youtubeHLSPublishPath = publishDir
+		}
 	}
 	if *artworkMiB < 0 || *artworkMiB > 512 {
 		slog.Error("invalid artwork disk cache budget")
@@ -188,23 +198,24 @@ func main() {
 	}
 	adapters := providers.New(httpclient.Metadata(), httpclient.Private())
 	deps := server.Dependencies{
-		PublicMediaHTTP: httpclient.PublicDownloads(),
-		Uploads:         uploads,
-		Reception:       adapters,
-		AirPlayPairing:  adapters,
-		Browse:          adapters,
-		YouTubeReceiver: adapters,
-		Artwork:         artwork.NewWithWebPEncoder(httpclient.Metadata(), artworkCache, artworkWebPEncoder),
-		Catalog:         adapters,
-		Search:          adapters,
-		Resolver:        adapters,
-		Player:          adapters,
-		Browser:         adapters,
-		Media:           tools,
-		RemoteMedia:     remoteTools,
-		RemoteSubtitles: remoteSubtitles,
-		ControlHTTP:     httpclient.Private(),
-		StreamHTTP:      httpclient.Streaming(),
+		PublicMediaHTTP:    httpclient.PublicDownloads(),
+		Uploads:            uploads,
+		Reception:          adapters,
+		AirPlayPairing:     adapters,
+		Browse:             adapters,
+		YouTubeReceiver:    adapters,
+		Artwork:            artwork.NewWithWebPEncoder(httpclient.Metadata(), artworkCache, artworkWebPEncoder),
+		Catalog:            adapters,
+		Search:             adapters,
+		Resolver:           adapters,
+		Player:             adapters,
+		Browser:            adapters,
+		Media:              tools,
+		RemoteMedia:        remoteTools,
+		RemoteHLSPublisher: remoteHLSPublisher,
+		RemoteSubtitles:    remoteSubtitles,
+		ControlHTTP:        httpclient.Private(),
+		StreamHTTP:         httpclient.Streaming(),
 	}
 	spoolDir := *hybridSpoolDir
 	if spoolDir == "" {
@@ -213,6 +224,7 @@ func main() {
 	app := server.New(db, server.Options{
 		ProbeDir:                 *probes,
 		HybridSpoolDir:           spoolDir,
+		YouTubeHLSPublishDir:     youtubeHLSPublishPath,
 		ThreadfinURL:             *threadfin,
 		PairingCode:              pairing,
 		YouTubeOAuthClientID:     os.Getenv("ZOMBIE_YOUTUBE_OAUTH_CLIENT_ID"),

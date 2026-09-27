@@ -47,6 +47,19 @@ func HasFreshHLSEvidence(caps domain.Capabilities) bool {
 	return probeStatus(caps, "hls-h264-aac", now) == "PASS"
 }
 
+// HasFreshLiveVideoHLSEvidence accepts the longer EVENT probe only for video
+// HLS. Its completion and progress requirements prevent a prepared player or
+// an initial segment from being treated as continuous live playback evidence.
+func HasFreshLiveVideoHLSEvidence(caps domain.Capabilities) bool {
+	if caps.SuiteVersion != 2 || caps.CacheKey == "" {
+		return false
+	}
+	now := time.Now().Unix()
+	probe := selectLatestProbe(caps.Probes, "hls-event-h264-aac", now)
+	return probe != nil && probeStatus(caps, "hls-event-h264-aac", now) == "PASS" &&
+		probe.Completed && probe.PositionMS >= 20_000
+}
+
 // nativeHLSCandidate validates that:
 // 1. The stream is an HLS manifest.
 // 2. The device has fresh, functional probe evidence for HLS (hls-h264-aac PASS).
@@ -59,9 +72,6 @@ func nativeHLSCandidate(metadata domain.Metadata, mime string, caps domain.Capab
 		return false
 	}
 	if isFMP4(metadata) {
-		return false
-	}
-	if !HasFreshHLSEvidence(caps) {
 		return false
 	}
 	now := time.Now().Unix()
@@ -83,7 +93,10 @@ func nativeHLSCandidate(metadata domain.Metadata, mime string, caps domain.Capab
 			}
 		}
 	}
-	return hasVideo || hasAudio
+	if hasVideo {
+		return HasFreshHLSEvidence(caps) || HasFreshLiveVideoHLSEvidence(caps)
+	}
+	return hasAudio && HasFreshHLSEvidence(caps)
 }
 
 // The HLS fixture certifies Baseline 360p only. Higher resolutions and other

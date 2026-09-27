@@ -238,6 +238,7 @@ func TestAirPlayVideoToAudioReplacesOwnedStreamAndRetiresOldTicket(t *testing.T)
 		CacheKey:     devices.ProbeCacheKey(dev),
 		Probes: []domain.Probe{
 			{ID: "hls-h264-aac", Status: "PASS", PositionMS: 1500, TestedAt: now},
+			{ID: "hls-event-h264-aac", Status: "PASS", Completed: true, PositionMS: 26000, TestedAt: now},
 			{ID: "h264-720-main", Status: "PASS", PositionMS: 1500, TestedAt: now},
 			{ID: "aac", Status: "PASS", PositionMS: 800, TestedAt: now},
 		},
@@ -267,10 +268,10 @@ func TestAirPlayVideoToAudioReplacesOwnedStreamAndRetiresOldTicket(t *testing.T)
 		}
 		lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
 		segment := lines[len(lines)-1]
-		if !strings.HasPrefix(segment, "/v1/streams/") {
+		if !strings.HasPrefix(segment, plan.SessionID+"/") {
 			t.Fatal("segment was not rewritten to the local gateway", segment)
 		}
-		w = call(s, "GET", segment, "", "", "", "")
+		w = call(s, "GET", resolveHLSResource(t, plan.URL, segment), "", "", "", "")
 		if w.Code != 200 || w.Body.String() != expected {
 			t.Fatal("receiver segment unavailable", w.Code, w.Body)
 		}
@@ -674,7 +675,7 @@ func TestAirPlayReceiverFreshHLSPASSDirect(t *testing.T) {
 	// Read segment
 	lines := strings.Split(strings.TrimSpace(streamResp.Body.String()), "\n")
 	segmentPath := lines[len(lines)-1]
-	segResp := call(s, "GET", segmentPath, "", "", "", "")
+	segResp := call(s, "GET", resolveHLSResource(t, plan.URL, segmentPath), "", "", "", "")
 	if segResp.Code != 200 || segResp.Body.String() != "direct-hls-ts-data" {
 		t.Fatalf("segment fetch failed: %d %s", segResp.Code, segResp.Body)
 	}

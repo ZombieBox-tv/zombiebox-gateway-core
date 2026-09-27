@@ -19,12 +19,13 @@ import (
 )
 
 type probeAsset struct {
-	ID       string `json:"id"`
-	File     string `json:"-"`
-	URL      string `json:"url"`
-	Video    bool   `json:"video"`
-	Kind     string `json:"kind,omitempty"`
-	Requires string `json:"requires,omitempty"`
+	ID          string `json:"id"`
+	File        string `json:"-"`
+	URL         string `json:"url"`
+	EvidenceURL string `json:"evidenceUrl,omitempty"`
+	Video       bool   `json:"video"`
+	Kind        string `json:"kind,omitempty"`
+	Requires    string `json:"requires,omitempty"`
 }
 
 const (
@@ -53,6 +54,7 @@ var probeAssets = []probeAsset{
 	{ID: "pause-resume", File: "baseline-360.mp4", Video: true, Kind: "pause-resume"},
 	{ID: "surface-reattach", File: "baseline-360.mp4", Video: true, Kind: "surface-reattach"},
 	{ID: "hls-h264-aac", File: "baseline.ts", Video: true, Kind: "hls"},
+	{ID: hlsEventProbeID, File: "hls-event-00.ts", Video: true, Kind: "hls-event"},
 	{ID: "h264-2160-high", File: "high-2160.mp4", Video: true, Requires: "h264-1080-high"},
 	{ID: "hevc-1080-main", File: "hevc-1080.mp4", Video: true, Requires: "h264-baseline-360"},
 	{ID: "hevc-2160-main", File: "hevc-2160.mp4", Video: true, Requires: "hevc-1080-main"},
@@ -91,6 +93,15 @@ func (s *Server) probeManifest(w http.ResponseWriter, r *http.Request, d domain.
 		if suite == 1 && asset.Kind != "" {
 			continue
 		}
+		if asset.ID == hlsEventProbeID {
+			if !s.hlsEventAssetsAvailable() {
+				continue
+			}
+			runID := randomID(16)
+			asset.URL, asset.EvidenceURL = s.hlsEventURLs(d.ID, expires, runID)
+			assets = append(assets, asset)
+			continue
+		}
 		f, err := s.probeFile(asset)
 		if err != nil {
 			continue
@@ -124,6 +135,10 @@ func probeCandidate(d domain.Device, id string) bool {
 // provider credentials or relying on the API14 setDataSource(headers) overload.
 func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 	id, expires := r.PathValue("probe"), r.URL.Query().Get("expires")
+	if id == hlsEventProbeID {
+		s.hlsEventProbe(w, r)
+		return
+	}
 	expiry, err := strconv.ParseInt(expires, 10, 64)
 	if err != nil || time.Now().Unix() > expiry || expiry > time.Now().Add(10*time.Minute).Unix() || !hmac.Equal([]byte(s.probeSignature(id, expires)), []byte(r.URL.Query().Get("ticket"))) {
 		fail(w, 403, "invalid_probe_ticket")
@@ -154,7 +169,7 @@ func (s *Server) probeStream(w http.ResponseWriter, r *http.Request) {
 			if asset.Kind == "hls" {
 				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 				w.Header().Set("Cache-Control", "no-store")
-				segment := "/v1/probes/mpegts-h264-aac?expires=" + expires + "&ticket=" + s.probeSignature("mpegts-h264-aac", expires)
+				segment := "mpegts-h264-aac?expires=" + expires + "&ticket=" + s.probeSignature("mpegts-h264-aac", expires)
 				fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:3.1,\n%s\n#EXT-X-ENDLIST\n", segment)
 				return
 			}

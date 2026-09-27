@@ -225,7 +225,7 @@ func TestNativeHLSServesProxiedManifestWithoutExposingOrigin(t *testing.T) {
 	if strings.Contains(body, "secret-token") || strings.Contains(body, upstream.URL) {
 		t.Fatalf("origin secret or URL leaked in proxied manifest: %s", body)
 	}
-	if !strings.Contains(body, "/v1/streams/"+sessID+"/") {
+	if !strings.Contains(body, sessID+"/") || strings.Contains(body, "/v1/streams/") {
 		t.Fatalf("expected rewritten proxy segment URL in manifest: %s", body)
 	}
 }
