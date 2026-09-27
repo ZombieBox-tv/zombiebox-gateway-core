@@ -178,6 +178,180 @@ func TestSoloistPlaybackSnapshotWithoutItemPreservesActiveTrack(t *testing.T) {
 	}
 }
 
+func TestSoloistDocumentedEntityMetadataAndPrivateCoverCandidate(t *testing.T) {
+	state := NewSoloistState(nil)
+	session := state.BeginSession()
+	applySoloistFrame(t, state, session, `{"type":"auth_state","logged_in":true,"is_active":true}`)
+	// This entity follows Spotify's documented Soloist WebSocket entity example.
+	applySoloistFrame(t, state, session, `{"type":"playback_state","status":"playing","item":{"uri":"spotify:track:2JRo0gjbX4GrCqBYdRohoo","entity_type":"track","decorations":{"identity":{"name":"My Song"},"visual_identity":{"cover":[{"url":"https://i.scdn.co/image/ab67616d00001e02...","size":"large"}]},"parent":{"entity":{"uri":"spotify:album:4aawyAB9vmqN3uQ7FjRGTy","entity_type":"album","decorations":{"identity":{"name":"Album Name"}}}},"creators":[{"entity":{"uri":"spotify:artist:documented","entity_type":"artist","decorations":{"identity":{"name":"Artist Name"}}}}],"playback":{"duration_ms":210000,"content_ratings":[]}}}}`)
+
+	snapshot := state.Snapshot()
+	if snapshot.Track == nil || snapshot.Track.Title != "My Song" || snapshot.Track.Artist != "Artist Name" || snapshot.Track.Album != "Album Name" || snapshot.Track.DurationMS != 210000 {
+		t.Fatalf("documented semantic entity fields were not parsed: %+v", snapshot.Track)
+	}
+	if snapshot.Track.Explicit == nil || *snapshot.Track.Explicit {
+		t.Fatalf("present empty content_ratings should mean known non-explicit: %+v", snapshot.Track.Explicit)
+	}
+	candidate, ok, err := state.artworkCandidate(session)
+	if err != nil || !ok || candidate.url != "https://i.scdn.co/image/ab67616d00001e02..." || candidate.size != "large" || candidate.sessionGeneration != session.generation || candidate.trackRevision != snapshot.TrackRevision {
+		t.Fatalf("private artwork candidate was not fenced to current track/session: %+v, %v, %v", candidate, ok, err)
+	}
+
+	for name, value := range map[string]any{"snapshot": snapshot, "diagnostics": state.Diagnostics()} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, private := range []string{"spotify:track:2JRo0gjbX4GrCqBYdRohoo", "spotify:album:4aawyAB9vmqN3uQ7FjRGTy", "https://i.scdn.co/image/ab67616d00001e02..."} {
+			if strings.Contains(string(encoded), private) {
+				t.Fatalf("%s serialized a private URI or artwork URL: %s", name, encoded)
+			}
+		}
+	}
+
+	*snapshot.Track.Explicit = true
+	if got := state.Snapshot().Track.Explicit; got == nil || *got {
+		t.Fatalf("snapshot caller mutated reducer's tri-state metadata: %v", got)
+	}
+}
+
+func TestSoloistSameTrackPartialMetadataAndNewTrackClearing(t *testing.T) {
+	state := NewSoloistState(nil)
+	session := state.BeginSession()
+	applySoloistFrame(t, state, session, `{"type":"auth_state","logged_in":true,"is_active":true}`)
+	applySoloistFrame(t, state, session, `{"type":"playback_state","status":"playing","item":{"uri":"spotify:track:partial","entity_type":"track","decorations":{"identity":{"name":"Original"},"visual_identity":{"cover":[{"url":"https://i.scdn.co/image/original","size":"default"}]},"parent":{"entity":{"uri":"spotify:album:one","entity_type":"album","decorations":{"identity":{"name":"First Album"}}}},"playback":{"duration_ms":120000,"content_ratings":["explicit"]}}}}`)
+
+	applySoloistFrame(t, state, session, `{"type":"playback_state","status":"paused","item":{"uri":"spotify:track:partial","entity_type":"track","decorations":{"playback":{"duration_ms":0}}}}`)
+	partial := state.Snapshot().Track
+	if partial == nil || partial.Title != "Original" || partial.Album != "First Album" || partial.DurationMS != 0 || partial.Explicit == nil || !*partial.Explicit {
+		t.Fatalf("same-track partial snapshot discarded metadata or explicit duration: %+v", partial)
+	}
+	if _, ok, err := state.artworkCandidate(session); err != nil || !ok {
+		t.Fatalf("same-track partial snapshot discarded omitted artwork: candidate=%v err=%v", ok, err)
+	}
+
+	applySoloistFrame(t, state, session, `{"type":"playback_state","status":"playing","item":{"uri":"spotify:track:partial","entity_type":"track","decorations":{"playback":{"content_ratings":null}}}}`)
+	if got := state.Snapshot().Track.Explicit; got != nil {
+		t.Fatalf("explicit null should represent unknown rating status: %v", *got)
+	}
+
+	applySoloistFrame(t, state, session, `{"type":"track_changed","item":{"uri":"spotify:track:new","entity_type":"track","decorations":{"identity":{"name":"New Track"}}}}`)
+	newTrack := state.Snapshot().Track
+	if newTrack == nil || newTrack.Title != "New Track" || newTrack.Album != "" || newTrack.DurationMS != 0 || newTrack.Explicit != nil {
+		t.Fatalf("new track retained omitted metadata from its predecessor: %+v", newTrack)
+	}
+	if _, ok, err := state.artworkCandidate(session); err != nil || ok {
+		t.Fatalf("new track retained old artwork candidate: candidate=%v err=%v", ok, err)
+	}
+}
+
+func TestSoloistCoverSelectionValidationAndSessionRevisionFence(t *testing.T) {
+	covers := json.RawMessage(`[{"url":"https://i.scdn.co/image/small","size":"small"},{"url":"https://image-cdn-ak.spotifycdn.com/image/xlarge","size":"xlarge"},{"url":"https://image-cdn-fa.scdn.co/image/large","size":"large"},{"url":"https://scdn.co/image/default","size":"default"}]`)
+	candidate, err := parseSoloistCoverCandidates(covers)
+	if err != nil || candidate == nil || candidate.url != "https://image-cdn-fa.scdn.co/image/large" || candidate.size != "large" {
+		t.Fatalf("preferred cover size was not selected: %+v (%v)", candidate, err)
+	}
+	invalidURLs := []string{
+		"http://i.scdn.co/image/insecure",
+		"https://i.scdn.co.attacker.com/image/host",
+		"https://evil-scdn.co/image/host",
+		"https://user:pass@i.scdn.co/image/userinfo",
+		"https://i.scdn.co:8443/image/port",
+		"https://i.scdn.co:/image/empty-port",
+		"https://i.scdn.co/image/id?ticket=secret",
+		"https://i.scdn.co/image/id#fragment",
+		"https://i.scdn.co/other/id",
+		"https://i.scdn.co/image/../escape",
+	}
+	for _, value := range invalidURLs {
+		if validSoloistCoverURL(value) {
+			t.Errorf("unsafe artwork URL was accepted: %q", value)
+		}
+	}
+	tooManyCovers := make([]string, maxSoloistCoverCandidates+1)
+	for i := range tooManyCovers {
+		tooManyCovers[i] = fmt.Sprintf(`{"url":"https://i.scdn.co/image/%d","size":"large"}`, i)
+	}
+	if _, err := parseSoloistCoverCandidates(json.RawMessage("[" + strings.Join(tooManyCovers, ",") + "]")); !errors.Is(err, ErrSoloistMalformedEvent) {
+		t.Fatalf("over-limit cover list was not rejected: %v", err)
+	}
+
+	state := NewSoloistState(nil)
+	first := state.BeginSession()
+	applySoloistFrame(t, state, first, `{"type":"auth_state","logged_in":true,"is_active":true}`)
+	applySoloistFrame(t, state, first, `{"type":"playback_state","status":"playing","item":{"uri":"spotify:track:fenced","entity_type":"track","decorations":{"visual_identity":{"cover":[{"url":"https://i.scdn.co/image/fenced","size":"large"}]}}}}`)
+	if _, ok, err := state.artworkCandidate(first); err != nil || !ok {
+		t.Fatalf("current session could not access its cover candidate: candidate=%v err=%v", ok, err)
+	}
+	state.mu.Lock()
+	state.coverCandidate.trackRevision--
+	state.mu.Unlock()
+	if _, ok, err := state.artworkCandidate(first); err != nil || ok {
+		t.Fatalf("revision-mismatched artwork candidate was returned: candidate=%v err=%v", ok, err)
+	}
+
+	second := state.BeginSession()
+	if _, ok, err := state.artworkCandidate(first); !errors.Is(err, ErrSoloistStaleSession) || ok {
+		t.Fatalf("stale session could read artwork candidate: candidate=%v err=%v", ok, err)
+	}
+	if _, ok, err := state.artworkCandidate(second); err != nil || ok {
+		t.Fatalf("reconnected session inherited prior artwork candidate: candidate=%v err=%v", ok, err)
+	}
+	if err := state.EndSession(second); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := state.artworkCandidate(second); !errors.Is(err, ErrSoloistDisconnected) || ok {
+		t.Fatalf("disconnected session could read artwork candidate: candidate=%v err=%v", ok, err)
+	}
+}
+
+func TestSoloistContentRatingsTriStateAndMalformedInput(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want *bool
+	}{
+		{name: "empty is false", raw: `[]`, want: boolPointer(false)},
+		{name: "explicit is true", raw: `["south_korea_19","explicit"]`, want: boolPointer(true)},
+		{name: "other rating is false", raw: `["south_korea_19"]`, want: boolPointer(false)},
+		{name: "null is unknown", raw: `null`, want: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseSoloistContentRatings(json.RawMessage(test.raw))
+			if err != nil || !equalOptionalBool(got, test.want) {
+				t.Fatalf("ratings parse = %v, %v; want %v", got, err, test.want)
+			}
+		})
+	}
+
+	invalid := []string{
+		`"explicit"`,
+		`[1]`,
+		`["EXPLICIT"]`,
+		`["bad label"]`,
+		`["explicit","explicit"]`,
+		`["this_rating_label_is_far_too_long_to_accept"]`,
+	}
+	for _, raw := range invalid {
+		if _, err := parseSoloistContentRatings(json.RawMessage(raw)); !errors.Is(err, ErrSoloistMalformedEvent) {
+			t.Errorf("malformed content_ratings %s was accepted: %v", raw, err)
+		}
+	}
+	tooMany := make([]string, maxSoloistRatingCount+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf(`"rating_%d"`, i)
+	}
+	if _, err := parseSoloistContentRatings(json.RawMessage("[" + strings.Join(tooMany, ",") + "]")); !errors.Is(err, ErrSoloistMalformedEvent) {
+		t.Fatalf("over-limit content_ratings was accepted: %v", err)
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func equalOptionalBool(left, right *bool) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
 func TestSoloistDiagnosticsSeparateLocalOutputFromTVAudioAndOmitPrivateFields(t *testing.T) {
 	clock := &fakeSoloistClock{now: time.UnixMilli(1780000000000)}
 	state := NewSoloistState(clock.Now)

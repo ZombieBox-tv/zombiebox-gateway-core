@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,12 @@ const (
 	maxSoloistCreators        = 8
 	maxSoloistArtistBytes     = maxSoloistCreatorBytes*maxSoloistCreators + 2*(maxSoloistCreators-1)
 	maxSoloistURIBytes        = 512
+	maxSoloistAlbumBytes      = maxSoloistNameBytes
+	maxSoloistCoverCandidates = 8
+	maxSoloistCoverURLBytes   = 2048
+	maxSoloistCoverIDBytes    = 256
+	maxSoloistRatingCount     = 16
+	maxSoloistRatingBytes     = 32
 	maxSoloistPositionMS      = int64(7 * 24 * time.Hour / time.Millisecond)
 	maxSoloistDurationMS      = maxSoloistPositionMS
 	maxSoloistPlaybackSpeed   = 4.0
@@ -63,12 +70,22 @@ const (
 	SoloistBuffering SoloistPlaybackStatus = "buffering"
 )
 
-// SoloistMetadata is a bounded semantic subset of a Soloist entity. It omits
-// Spotify URIs, account/device identity, and artwork URLs.
+// SoloistMetadata is a bounded semantic subset of a Soloist entity. Explicit
+// is nil when no rating list is known, otherwise it records whether that list
+// contains the explicit label. Spotify URIs and artwork URLs are omitted.
 type SoloistMetadata struct {
 	Title      string `json:"title,omitempty"`
 	Artist     string `json:"artist,omitempty"`
+	Album      string `json:"album,omitempty"`
 	DurationMS int64  `json:"durationMs,omitempty"`
+	Explicit   *bool  `json:"explicit,omitempty"`
+}
+
+type soloistArtworkCandidate struct {
+	url               string
+	size              string
+	sessionGeneration uint64
+	trackRevision     uint64
 }
 
 // SoloistSnapshot is local-playback state. TVAudioVerified is intentionally
@@ -124,10 +141,11 @@ type SoloistState struct {
 	active              bool
 	status              SoloistPlaybackStatus
 
-	track         *SoloistMetadata
-	trackIdentity [32]byte
-	trackKnown    bool
-	trackRevision uint64
+	track          *SoloistMetadata
+	trackIdentity  [32]byte
+	trackKnown     bool
+	trackRevision  uint64
+	coverCandidate *soloistArtworkCandidate
 
 	positionKnown       bool
 	positionMS          int64
@@ -321,6 +339,7 @@ func (s *SoloistState) Snapshot() SoloistSnapshot {
 	}
 	if s.track != nil {
 		track := *s.track
+		track.Explicit = cloneSoloistBool(s.track.Explicit)
 		snapshot.Track = &track
 	}
 	if s.positionKnown {
@@ -339,6 +358,27 @@ func (s *SoloistState) Snapshot() SoloistSnapshot {
 		}
 	}
 	return snapshot
+}
+
+// artworkCandidate returns private upstream artwork only to an internal caller
+// holding the current Soloist session. It is never included in snapshots.
+func (s *SoloistState) artworkCandidate(session SoloistSession) (soloistArtworkCandidate, bool, error) {
+	if s == nil {
+		return soloistArtworkCandidate{}, false, ErrSoloistStaleSession
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.matchesSession(session) {
+		return soloistArtworkCandidate{}, false, ErrSoloistStaleSession
+	}
+	if !s.connected {
+		return soloistArtworkCandidate{}, false, ErrSoloistDisconnected
+	}
+	candidate := s.coverCandidate
+	if candidate == nil || candidate.sessionGeneration != session.generation || candidate.trackRevision != s.trackRevision || !s.trackKnown {
+		return soloistArtworkCandidate{}, false, nil
+	}
+	return *candidate, true, nil
 }
 
 // Diagnostics returns only fixed playback/evidence fields and never track text,
@@ -375,6 +415,7 @@ func (s *SoloistState) resetSessionState() {
 	s.trackIdentity = [32]byte{}
 	s.trackKnown = false
 	s.trackRevision = 0
+	s.coverCandidate = nil
 	s.clearPosition()
 	s.positionTimestampMS = 0
 	s.commandResults = 0
@@ -395,6 +436,7 @@ func (s *SoloistState) clearTrack(revise bool) {
 	s.track = nil
 	s.trackIdentity = [32]byte{}
 	s.trackKnown = false
+	s.coverCandidate = nil
 	s.clearPosition()
 }
 
@@ -403,22 +445,64 @@ func (s *SoloistState) updateTrack(track *soloistParsedTrack) {
 		s.clearTrack(true)
 		return
 	}
-	if !s.trackKnown || s.trackIdentity != track.identity {
+	changed := !s.trackKnown || s.trackIdentity != track.identity
+	if changed {
 		s.trackRevision++
 		s.clearPosition()
+		s.coverCandidate = nil
 	}
 	s.trackKnown = true
 	s.trackIdentity = track.identity
-	copy := track.metadata
-	s.track = &copy
+	s.mergeTrackMetadata(track, changed)
+	if track.coverPresent {
+		s.setCoverCandidate(track.coverCandidate)
+	}
 }
 
 func (s *SoloistState) updateTrackForced(track *soloistParsedTrack) {
 	s.trackRevision++
 	s.trackKnown = true
 	s.trackIdentity = track.identity
-	copy := track.metadata
-	s.track = &copy
+	s.coverCandidate = nil
+	s.mergeTrackMetadata(track, true)
+	if track.coverPresent {
+		s.setCoverCandidate(track.coverCandidate)
+	}
+}
+
+func (s *SoloistState) mergeTrackMetadata(track *soloistParsedTrack, replace bool) {
+	metadata := SoloistMetadata{}
+	if !replace && s.track != nil {
+		metadata = *s.track
+		metadata.Explicit = cloneSoloistBool(s.track.Explicit)
+	}
+	if replace || track.hasTitle {
+		metadata.Title = track.metadata.Title
+	}
+	if replace || track.hasArtist {
+		metadata.Artist = track.metadata.Artist
+	}
+	if replace || track.hasAlbum {
+		metadata.Album = track.metadata.Album
+	}
+	if replace || track.hasDuration {
+		metadata.DurationMS = track.metadata.DurationMS
+	}
+	if replace || track.hasExplicit {
+		metadata.Explicit = cloneSoloistBool(track.metadata.Explicit)
+	}
+	s.track = &metadata
+}
+
+func (s *SoloistState) setCoverCandidate(candidate *soloistArtworkCandidate) {
+	s.coverCandidate = nil
+	if candidate == nil {
+		return
+	}
+	copy := *candidate
+	copy.sessionGeneration = s.generation
+	copy.trackRevision = s.trackRevision
+	s.coverCandidate = &copy
 }
 
 func (s *SoloistState) setPlaybackStatus(status SoloistPlaybackStatus, now time.Time) {
@@ -498,8 +582,15 @@ type soloistParsedEvent struct {
 }
 
 type soloistParsedTrack struct {
-	metadata SoloistMetadata
-	identity [32]byte
+	metadata       SoloistMetadata
+	identity       [32]byte
+	hasTitle       bool
+	hasArtist      bool
+	hasAlbum       bool
+	hasDuration    bool
+	hasExplicit    bool
+	coverPresent   bool
+	coverCandidate *soloistArtworkCandidate
 }
 
 type soloistParsedPosition struct {
@@ -572,7 +663,7 @@ type soloistDecorationsWire struct {
 }
 
 type soloistIdentityWire struct {
-	Name string `json:"name"`
+	Name *string `json:"name"`
 }
 
 type soloistPlaybackDecorationsWire struct {
@@ -582,6 +673,19 @@ type soloistPlaybackDecorationsWire struct {
 
 type soloistCreatorWire struct {
 	Entity json.RawMessage `json:"entity"`
+}
+
+type soloistParentWire struct {
+	Entity json.RawMessage `json:"entity"`
+}
+
+type soloistVisualIdentityWire struct {
+	Cover json.RawMessage `json:"cover"`
+}
+
+type soloistCoverWire struct {
+	URL  string `json:"url"`
+	Size string `json:"size"`
 }
 
 func parseSoloistEvent(frame []byte) (soloistParsedEvent, error) {
@@ -692,13 +796,15 @@ func parseSoloistTrack(raw json.RawMessage) (*soloistParsedTrack, error) {
 	if len(entity.Decorations) > 0 && !isSoloistNull(entity.Decorations) && decodeSoloistStrict(entity.Decorations, &decorations) != nil {
 		return nil, ErrSoloistMalformedEvent
 	}
+	parsed := &soloistParsedTrack{}
 	metadata := SoloistMetadata{}
 	if len(decorations.Identity) > 0 && !isSoloistNull(decorations.Identity) {
 		var identity soloistIdentityWire
-		if decodeSoloistStrict(decorations.Identity, &identity) != nil || !validSoloistLabel(identity.Name, maxSoloistNameBytes) {
+		if decodeSoloistStrict(decorations.Identity, &identity) != nil || identity.Name == nil || !validSoloistLabel(*identity.Name, maxSoloistNameBytes) {
 			return nil, ErrSoloistMalformedEvent
 		}
-		metadata.Title = cleanSoloistLabel(identity.Name)
+		metadata.Title = cleanSoloistLabel(*identity.Name)
+		parsed.hasTitle = true
 	}
 	if len(decorations.Playback) > 0 && !isSoloistNull(decorations.Playback) {
 		var playback soloistPlaybackDecorationsWire
@@ -710,6 +816,15 @@ func parseSoloistTrack(raw json.RawMessage) (*soloistParsedTrack, error) {
 				return nil, ErrSoloistMalformedEvent
 			}
 			metadata.DurationMS = *playback.DurationMS
+			parsed.hasDuration = true
+		}
+		if len(playback.ContentRatings) > 0 {
+			explicit, err := parseSoloistContentRatings(playback.ContentRatings)
+			if err != nil {
+				return nil, ErrSoloistMalformedEvent
+			}
+			metadata.Explicit = explicit
+			parsed.hasExplicit = true
 		}
 	}
 	if len(decorations.Creators) > 0 && !isSoloistNull(decorations.Creators) {
@@ -731,9 +846,35 @@ func parseSoloistTrack(raw json.RawMessage) (*soloistParsedTrack, error) {
 		if len(metadata.Artist) > maxSoloistArtistBytes {
 			return nil, ErrSoloistMalformedEvent
 		}
+		parsed.hasArtist = true
 	}
-	identity := soloistTrackIdentity(entity.URI, metadata)
-	return &soloistParsedTrack{metadata: metadata, identity: identity}, nil
+	if len(decorations.Parent) > 0 {
+		album, err := parseSoloistAlbum(decorations.Parent)
+		if err != nil {
+			return nil, ErrSoloistMalformedEvent
+		}
+		if album.present {
+			metadata.Album = album.name
+			parsed.hasAlbum = true
+		}
+	}
+	if len(decorations.VisualIdentity) > 0 && !isSoloistNull(decorations.VisualIdentity) {
+		var visual soloistVisualIdentityWire
+		if decodeSoloistStrict(decorations.VisualIdentity, &visual) != nil {
+			return nil, ErrSoloistMalformedEvent
+		}
+		if len(visual.Cover) > 0 {
+			candidate, err := parseSoloistCoverCandidates(visual.Cover)
+			if err != nil {
+				return nil, ErrSoloistMalformedEvent
+			}
+			parsed.coverPresent = true
+			parsed.coverCandidate = candidate
+		}
+	}
+	parsed.metadata = metadata
+	parsed.identity = soloistTrackIdentity(entity.URI, metadata)
+	return parsed, nil
 }
 
 func parseSoloistCreatorName(raw json.RawMessage) (string, error) {
@@ -749,16 +890,177 @@ func parseSoloistCreatorName(raw json.RawMessage) (string, error) {
 		return "", ErrSoloistMalformedEvent
 	}
 	var identity soloistIdentityWire
-	if decodeSoloistStrict(decorations.Identity, &identity) != nil || !validSoloistLabel(identity.Name, maxSoloistCreatorBytes) {
+	if decodeSoloistStrict(decorations.Identity, &identity) != nil || identity.Name == nil || !validSoloistLabel(*identity.Name, maxSoloistCreatorBytes) {
 		return "", ErrSoloistMalformedEvent
 	}
-	return cleanSoloistLabel(identity.Name), nil
+	return cleanSoloistLabel(*identity.Name), nil
+}
+
+type soloistAlbumResult struct {
+	name    string
+	present bool
+}
+
+func parseSoloistAlbum(raw json.RawMessage) (soloistAlbumResult, error) {
+	if len(raw) == 0 || isSoloistNull(raw) {
+		return soloistAlbumResult{}, nil
+	}
+	var parent soloistParentWire
+	if decodeSoloistStrict(raw, &parent) != nil || len(parent.Entity) == 0 || isSoloistNull(parent.Entity) {
+		return soloistAlbumResult{}, ErrSoloistMalformedEvent
+	}
+	var entity soloistEntityWire
+	if decodeSoloistStrict(parent.Entity, &entity) != nil || !validSoloistURI(entity.URI) || !validSoloistEntityType(entity.EntityType) {
+		return soloistAlbumResult{}, ErrSoloistMalformedEvent
+	}
+	if entity.EntityType != "album" {
+		return soloistAlbumResult{}, nil
+	}
+	var decorations soloistDecorationsWire
+	if len(entity.Decorations) == 0 || isSoloistNull(entity.Decorations) || decodeSoloistStrict(entity.Decorations, &decorations) != nil || len(decorations.Identity) == 0 || isSoloistNull(decorations.Identity) {
+		return soloistAlbumResult{}, ErrSoloistMalformedEvent
+	}
+	var identity soloistIdentityWire
+	if decodeSoloistStrict(decorations.Identity, &identity) != nil || identity.Name == nil || !validSoloistLabel(*identity.Name, maxSoloistAlbumBytes) {
+		return soloistAlbumResult{}, ErrSoloistMalformedEvent
+	}
+	return soloistAlbumResult{name: cleanSoloistLabel(*identity.Name), present: true}, nil
+}
+
+func parseSoloistContentRatings(raw json.RawMessage) (*bool, error) {
+	if isSoloistNull(raw) {
+		return nil, nil
+	}
+	var ratings []string
+	if decodeSoloistStrict(raw, &ratings) != nil || ratings == nil || len(ratings) > maxSoloistRatingCount {
+		return nil, ErrSoloistMalformedEvent
+	}
+	seen := make(map[string]struct{}, len(ratings))
+	explicit := false
+	for _, rating := range ratings {
+		if !validSoloistRating(rating) {
+			return nil, ErrSoloistMalformedEvent
+		}
+		if _, exists := seen[rating]; exists {
+			return nil, ErrSoloistMalformedEvent
+		}
+		seen[rating] = struct{}{}
+		if rating == "explicit" {
+			explicit = true
+		}
+	}
+	return &explicit, nil
+}
+
+func validSoloistRating(value string) bool {
+	if len(value) == 0 || len(value) > maxSoloistRatingBytes {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseSoloistCoverCandidates(raw json.RawMessage) (*soloistArtworkCandidate, error) {
+	if isSoloistNull(raw) {
+		return nil, nil
+	}
+	var covers []soloistCoverWire
+	if decodeSoloistStrict(raw, &covers) != nil || covers == nil || len(covers) > maxSoloistCoverCandidates {
+		return nil, ErrSoloistMalformedEvent
+	}
+	var selected *soloistArtworkCandidate
+	for _, cover := range covers {
+		if !validSoloistCoverSize(cover.Size) || !validSoloistCoverURL(cover.URL) {
+			continue
+		}
+		candidate := &soloistArtworkCandidate{url: cover.URL, size: cover.Size}
+		if selected == nil || soloistCoverPreference(candidate.size) < soloistCoverPreference(selected.size) {
+			selected = candidate
+		}
+	}
+	return selected, nil
+}
+
+func validSoloistCoverSize(value string) bool {
+	switch value {
+	case "small", "default", "large", "xlarge":
+		return true
+	default:
+		return false
+	}
+}
+
+func soloistCoverPreference(size string) int {
+	switch size {
+	case "large":
+		return 0
+	case "xlarge":
+		return 1
+	case "default":
+		return 2
+	case "small":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func validSoloistCoverURL(value string) bool {
+	if len(value) == 0 || len(value) > maxSoloistCoverURLBytes || strings.ContainsAny(value, "?#") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Opaque != "" || parsed.User != nil || parsed.Host == "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if !allowlistedSoloistCoverHost(host) {
+		return false
+	}
+	parsedHost := strings.ToLower(parsed.Host)
+	if parsedHost != host && parsedHost != host+":443" {
+		return false
+	}
+	if parsed.RawPath != "" && parsed.RawPath != parsed.Path {
+		return false
+	}
+	if !strings.HasPrefix(parsed.Path, "/image/") {
+		return false
+	}
+	imageID := strings.TrimPrefix(parsed.Path, "/image/")
+	if len(imageID) == 0 || len(imageID) > maxSoloistCoverIDBytes || imageID == "." || imageID == ".." {
+		return false
+	}
+	for _, character := range imageID {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func allowlistedSoloistCoverHost(host string) bool {
+	return host == "i.scdn.co" || host == "scdn.co" || strings.HasSuffix(host, ".scdn.co") || host == "spotifycdn.com" || strings.HasSuffix(host, ".spotifycdn.com")
+}
+
+func cloneSoloistBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func soloistTrackIdentity(uri string, metadata SoloistMetadata) [32]byte {
 	if uri != "" {
 		return sha256.Sum256([]byte("uri\x00" + uri))
 	}
+	// Album artwork and album name can arrive after the track identity. They
+	// must not create a new playback revision when the URI is unavailable.
 	return sha256.Sum256([]byte("metadata\x00" + metadata.Title + "\x00" + metadata.Artist + "\x00" + stringInt64(metadata.DurationMS)))
 }
 
