@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"zombiebox.local/gateway/internal/worker"
 )
 
 func TestMirrorSessionScopesAudioAndStopsOldForwarding(t *testing.T) {
@@ -332,9 +334,10 @@ func TestMirrorStopWaitsForEncoderExit(t *testing.T) {
 }
 
 func TestMirrorRTPAndPlaylistFence(t *testing.T) {
-	packet := make([]byte, 12)
+	packet := make([]byte, 13)
 	packet[0] = 0x80
 	packet[1] = 96
+	packet[12] = 0x65
 	binary.BigEndian.PutUint32(packet[8:12], 17)
 	if !validMirrorRTP(packet, 96) || validMirrorRTP(packet, 97) {
 		t.Fatal("RTP payload type validation failed")
@@ -370,11 +373,220 @@ func TestMirrorRTPAndPlaylistFence(t *testing.T) {
 	}
 }
 
+func TestMirrorRTPParsingHandlesCSRCHeaderExtensionAndPadding(t *testing.T) {
+	packet := make([]byte, 27)
+	packet[0] = 0xb1
+	packet[1] = 0x80 | 96
+	binary.BigEndian.PutUint16(packet[2:4], 301)
+	binary.BigEndian.PutUint32(packet[4:8], 9000)
+	// One CSRC occupies bytes 12–15. A one-word extension begins at byte 16.
+	packet[16] = 0xbe
+	packet[17] = 0xde
+	binary.BigEndian.PutUint16(packet[18:20], 1)
+	packet[24] = 0x65
+	packet[25] = 0
+	packet[26] = 2
+
+	rtp, ok := parseMirrorRTP(packet, 96)
+	if !ok || !rtp.marker || rtp.sequence != 301 || rtp.timestamp != 9000 || len(rtp.payload) != 1 || rtp.payload[0] != 0x65 {
+		t.Fatalf("RTP extension or padding was not parsed: packet=%+v ok=%v", rtp, ok)
+	}
+	packet[19] = 3
+	if validMirrorRTP(packet, 96) {
+		t.Fatal("RTP extension length beyond packet was accepted")
+	}
+}
+
+func TestMirrorH264EvidenceTracksPacketizationGapsAndSessionReset(t *testing.T) {
+	start := time.Unix(1_800_000_100, 0)
+	b := &mirrorBridge{}
+	packets := []struct {
+		sequence  uint16
+		timestamp uint32
+		payload   []byte
+		marker    bool
+	}{
+		{sequence: 10, timestamp: 100, payload: []byte{0x67}},
+		{sequence: 11, timestamp: 200, payload: []byte{0x78, 0, 1, 0x68, 0, 1, 0x65}, marker: true},
+		{sequence: 12, timestamp: 300, payload: []byte{0x7c, 0x85}},
+		{sequence: 14, timestamp: 300, payload: []byte{0x7c, 0x45}, marker: true},
+	}
+	for index, packet := range packets {
+		result := b.observeVideoIngress(start.Add(time.Duration(index)*10*time.Millisecond), 71, packet.sequence, packet.timestamp, packet.payload, packet.marker)
+		if !result.accepted || result.generation != 1 {
+			t.Fatalf("packet %d was not accepted into generation 1: %+v", index, result)
+		}
+	}
+	summary := b.sessionSummarySnapshot(start.Add(time.Second))
+	if summary.VideoRTPAcceptedPackets != 4 || summary.VideoRTPPacketCount != 4 || summary.VideoRTPSingleNALPackets != 1 || summary.VideoRTPSTAPAPackets != 1 || summary.VideoRTPFUAPackets != 2 {
+		t.Fatalf("packetization counters do not match the RTP fixture: %+v", summary)
+	}
+	if !summary.VideoRTPSPSObserved || !summary.VideoRTPPPSObserved || !summary.VideoRTPIDRObserved {
+		t.Fatalf("SPS/PPS/IDR evidence was not extracted: %+v", summary)
+	}
+	if summary.VideoRTPMarkerPackets != 2 || summary.VideoRTPSequenceGaps != 1 || summary.VideoRTPIncompleteFUs != 1 || summary.VideoRTPFUAOpen {
+		t.Fatalf("marker, sequence-gap, or incomplete-fragment evidence is wrong: %+v", summary)
+	}
+	if summary.VideoRTPUnclassifiedPackets != 0 {
+		t.Fatalf("well-formed packetization was unclassified: %+v", summary)
+	}
+
+	result := b.observeVideoIngress(start.Add(time.Second), 72, 1, 90_000, []byte{0x61}, true)
+	if !result.accepted || result.generation != 2 {
+		t.Fatalf("sender replacement did not start a fenced generation: %+v", result)
+	}
+	reset := b.sessionSummarySnapshot(start.Add(1100 * time.Millisecond))
+	if reset.Generation != 2 || reset.VideoRTPAcceptedPackets != 1 || reset.VideoRTPSequenceGaps != 0 || reset.VideoRTPIncompleteFUs != 0 || reset.VideoRTPSTAPAPackets != 0 || reset.VideoRTPSingleNALPackets != 1 || reset.VideoRTPSPSObserved || reset.VideoRTPPPSObserved || reset.VideoRTPIDRObserved {
+		t.Fatalf("new sender inherited prior session diagnostics: %+v", reset)
+	}
+}
+
+func TestMirrorH264FUAEvidenceRequiresContiguousEnd(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		nalType    byte
+		wantConfig func(worker.AirPlayMirrorSessionSummary) bool
+	}{
+		{name: "sps", nalType: 7, wantConfig: func(summary worker.AirPlayMirrorSessionSummary) bool { return summary.VideoRTPSPSObserved }},
+		{name: "pps", nalType: 8, wantConfig: func(summary worker.AirPlayMirrorSessionSummary) bool { return summary.VideoRTPPPSObserved }},
+		{name: "idr", nalType: 5, wantConfig: func(summary worker.AirPlayMirrorSessionSummary) bool { return summary.VideoRTPIDRObserved }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			start := time.Unix(1_800_000_200, 0)
+			b := &mirrorBridge{}
+			fuIndicator := byte(0x7c)
+			startPayload := []byte{fuIndicator, 0x80 | test.nalType, 0x01}
+			if result := b.observeVideoIngress(start, 81, 10, 500, startPayload, false); !result.accepted {
+				t.Fatal("FU-A start packet was not accepted")
+			}
+			initial := b.sessionSummarySnapshot(start.Add(time.Millisecond))
+			if test.wantConfig(initial) || !initial.VideoRTPFUAOpen {
+				t.Fatalf("incomplete FU-A start was reported as complete evidence: %+v", initial)
+			}
+
+			if result := b.observeVideoIngress(start.Add(10*time.Millisecond), 81, 12, 500, []byte{fuIndicator, 0x40 | test.nalType, 0x02}, true); !result.accepted {
+				t.Fatal("FU-A end packet was not accepted")
+			}
+			completed := b.sessionSummarySnapshot(start.Add(20 * time.Millisecond))
+			if test.wantConfig(completed) || completed.VideoRTPFUAOpen || completed.VideoRTPSequenceGaps != 1 || completed.VideoRTPIncompleteFUs != 1 {
+				t.Fatalf("FU-A with a sequence gap was reported complete: %+v", completed)
+			}
+
+			b = &mirrorBridge{}
+			if result := b.observeVideoIngress(start, 82, 20, 600, startPayload, false); !result.accepted {
+				t.Fatal("second FU-A start packet was not accepted")
+			}
+			if result := b.observeVideoIngress(start.Add(10*time.Millisecond), 82, 21, 600, []byte{fuIndicator, 0x40 | test.nalType, 0x02}, true); !result.accepted {
+				t.Fatal("contiguous FU-A end packet was not accepted")
+			}
+			complete := b.sessionSummarySnapshot(start.Add(20 * time.Millisecond))
+			if !test.wantConfig(complete) || complete.VideoRTPFUAOpen || complete.VideoRTPIncompleteFUs != 0 {
+				t.Fatalf("complete contiguous FU-A did not report its NAL type: %+v", complete)
+			}
+		})
+	}
+}
+
+func TestMirrorForwardCountersAreBoundedAndGenerationFenced(t *testing.T) {
+	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	output, err := net.DialUDP("udp4", nil, receiver.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+
+	start := time.Now()
+	b := &mirrorBridge{}
+	packet := []byte{0x80, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 71, 0x65}
+	first := b.observeVideoIngress(start, 71, 1, 90_000, []byte{0x65}, false)
+	b.forwardMirrorPacket(first.generation, true, output, packet)
+	initial := b.sessionSummarySnapshot(start)
+	if initial.VideoRTPAcceptedPackets != 1 || initial.VideoRTPInactiveDrops != 1 || initial.VideoRTPForwardedPackets != 0 {
+		t.Fatalf("pre-encoder drop was not classified: %+v", initial)
+	}
+
+	b.mu.Lock()
+	b.activeSession = first.generation
+	b.runningSession = first.generation
+	b.runningMode = videoMirror
+	b.encoderRunning = true
+	b.mu.Unlock()
+	b.forwardMirrorPacket(first.generation, true, output, packet)
+	_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
+	buffer := make([]byte, 64)
+	if n, _, err := receiver.ReadFromUDP(buffer); err != nil || n != len(packet) {
+		t.Fatalf("forwarded RTP packet not received: n=%d err=%v", n, err)
+	}
+	b.forwardMirrorPacket(first.generation, true, nil, packet)
+	audio := b.observeAudioIngress(start.Add(10*time.Millisecond), 92)
+	if !audio.accepted || audio.generation != first.generation {
+		t.Fatalf("audio ingress was not attached to active video generation: %+v", audio)
+	}
+	b.forwardMirrorPacket(audio.generation, false, output, packet)
+	if n, _, err := receiver.ReadFromUDP(buffer); err != nil || n != len(packet) {
+		t.Fatalf("forwarded audio RTP packet not received: n=%d err=%v", n, err)
+	}
+	firstSummary := b.sessionSummarySnapshot(start.Add(20 * time.Millisecond))
+	if firstSummary.VideoRTPForwardedPackets != 1 || firstSummary.VideoRTPForwardFailures != 1 || firstSummary.AudioRTPAcceptedPackets != 1 || firstSummary.AudioRTPForwardedPackets != 1 {
+		t.Fatalf("successful and failed forwarding counters are wrong: %+v", firstSummary)
+	}
+
+	second := b.observeVideoIngress(start.Add(time.Second), 72, 1, 180_000, []byte{0x61}, false)
+	if !second.accepted || second.generation != first.generation+1 {
+		t.Fatalf("new session did not advance the fence: first=%+v second=%+v", first, second)
+	}
+	b.forwardMirrorPacket(first.generation, true, output, packet)
+	b.forwardMirrorPacket(second.generation, true, output, packet)
+	reset := b.sessionSummarySnapshot(start.Add(1100 * time.Millisecond))
+	if reset.VideoRTPAcceptedPackets != 1 || reset.VideoRTPInactiveDrops != 1 || reset.VideoRTPForwardedPackets != 0 || reset.VideoRTPForwardFailures != 0 || reset.AudioRTPAcceptedPackets != 0 {
+		t.Fatalf("old session counters leaked across the generation fence: %+v", reset)
+	}
+}
+
+func TestMirrorFFmpegDiagnosticsParseProgressWithoutRetainingText(t *testing.T) {
+	diagnostics := &mirrorFFmpegDiagnostics{}
+	input := "frame= 17\nprogress=continue\n[encoder] Error opening secret=do-not-copy\nprogress=end\n"
+	for start := 0; start < len(input); start += 5 {
+		end := start + 5
+		if end > len(input) {
+			end = len(input)
+		}
+		if written, err := diagnostics.Write([]byte(input[start:end])); err != nil || written != end-start {
+			t.Fatalf("partial FFmpeg diagnostic write: written=%d err=%v", written, err)
+		}
+	}
+	if written, err := diagnostics.Write([]byte(strings.Repeat("x", 128<<10) + "\n")); err != nil || written != (128<<10)+1 {
+		t.Fatalf("bounded long-line drain: written=%d err=%v", written, err)
+	}
+	if _, err := diagnostics.Write([]byte("final error without newline")); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics.finish()
+
+	report := diagnostics.snapshot()
+	if report.reportedFrames != 17 || report.progressRecords != 2 || report.errorLines != 2 {
+		t.Fatalf("FFmpeg progress/error classes were parsed incorrectly: %+v", report)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"do-not-copy", "secret="} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("raw FFmpeg text leaked through the report (%q): %s", forbidden, encoded)
+		}
+	}
+}
+
 func TestMirrorCommandsSelectExactlyOneAudioPolicy(t *testing.T) {
 	dir := t.TempDir()
 	b := &mirrorBridge{hlsDir: dir, videoSDP: "video.sdp", audioVideoSDP: "av.sdp"}
 	video := strings.Join(b.commandArgs(videoMirror), " ")
-	if !strings.Contains(video, "-i video.sdp -map 0:v:0") || strings.Contains(video, "0:a:0") || strings.Contains(video, "-c:a") {
+	if !strings.Contains(video, "-progress pipe:2") || !strings.Contains(video, "-i video.sdp -map 0:v:0") || strings.Contains(video, "0:a:0") || strings.Contains(video, "-c:a") {
 		t.Fatalf("video-only command unexpectedly maps audio: %s", video)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "segment5.ts"), []byte("old"), 0600); err != nil {

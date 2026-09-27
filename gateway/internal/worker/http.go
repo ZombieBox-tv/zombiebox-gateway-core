@@ -68,7 +68,32 @@ type AirPlayMirrorSessionSummary struct {
 	FirstHLSManifestAgeMS    int64  `json:"firstHlsManifestAgeMs,omitempty"`
 	FirstHLSSegmentObserved  bool   `json:"firstHlsSegmentObserved"`
 	FirstHLSSegmentAgeMS     int64  `json:"firstHlsSegmentAgeMs,omitempty"`
-	FailureClass             string `json:"failureClass"`
+	VideoRTPAcceptedPackets  uint64 `json:"videoRtpAcceptedPackets,omitempty"`
+	VideoRTPInactiveDrops    uint64 `json:"videoRtpInactiveDrops,omitempty"`
+	VideoRTPForwardedPackets uint64 `json:"videoRtpForwardedPackets,omitempty"`
+	VideoRTPForwardFailures  uint64 `json:"videoRtpForwardFailures,omitempty"`
+	AudioRTPAcceptedPackets  uint64 `json:"audioRtpAcceptedPackets,omitempty"`
+	AudioRTPInactiveDrops    uint64 `json:"audioRtpInactiveDrops,omitempty"`
+	AudioRTPForwardedPackets uint64 `json:"audioRtpForwardedPackets,omitempty"`
+	AudioRTPForwardFailures  uint64 `json:"audioRtpForwardFailures,omitempty"`
+	VideoRTPMarkerPackets    uint64 `json:"videoRtpMarkerPackets,omitempty"`
+	VideoRTPSingleNALPackets uint64 `json:"videoRtpSingleNalPackets,omitempty"`
+	VideoRTPSTAPAPackets     uint64 `json:"videoRtpStapAPackets,omitempty"`
+	VideoRTPFUAPackets       uint64 `json:"videoRtpFuAPackets,omitempty"`
+	// FU-A NAL-type flags are set only after a contiguous start/end pair; this
+	// packetization evidence does not prove that a decoder accepted the NAL.
+	VideoRTPSPSObserved         bool   `json:"videoRtpSpsObserved"`
+	VideoRTPPPSObserved         bool   `json:"videoRtpPpsObserved"`
+	VideoRTPIDRObserved         bool   `json:"videoRtpIdrObserved"`
+	VideoRTPSequenceGaps        uint64 `json:"videoRtpSequenceGaps,omitempty"`
+	VideoRTPIncompleteFUs       uint64 `json:"videoRtpIncompleteFuCount,omitempty"`
+	VideoRTPUnclassifiedPackets uint64 `json:"videoRtpUnclassifiedPackets,omitempty"`
+	VideoRTPFUAOpen             bool   `json:"videoRtpFuAOpen"`
+	// FFmpeg progress is encoder-reported output, not evidence of TV rendering.
+	FFmpegReportedFrames  uint64 `json:"ffmpegReportedFrames,omitempty"`
+	FFmpegProgressRecords uint64 `json:"ffmpegProgressRecords,omitempty"`
+	FFmpegErrorLines      uint64 `json:"ffmpegErrorLines,omitempty"`
+	FailureClass          string `json:"failureClass"`
 }
 
 // AirPlayMirrorDiagnostics supplies a sanitized snapshot from the process
