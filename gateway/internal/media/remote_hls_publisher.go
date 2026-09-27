@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -343,12 +344,16 @@ func (s *RemoteHLSPublisherSession) Close() {
 }
 
 func (s *RemoteHLSPublisherSession) run(source domain.Source) {
-	err := s.runPublisher(source)
+	stage := "bridge"
+	err := s.runPublisher(source, &stage)
 	if err == nil {
 		err = s.ctx.Err()
 	}
 	if err != nil {
 		stripRemoteHLSEndList(s.playlistPath)
+		if os.Getenv("ZOMBIE_YOUTUBE_HLS_QA_TRACE") == "1" && !errors.Is(err, context.Canceled) {
+			log.Printf("youtube_hls_publisher stage=%s outcome=%s", stage, safePublisherError(err))
+		}
 	}
 	s.mu.Lock()
 	s.resultErr = err
@@ -367,13 +372,14 @@ func (s *RemoteHLSPublisherSession) run(source domain.Source) {
 	}
 }
 
-func (s *RemoteHLSPublisherSession) runPublisher(source domain.Source) error {
+func (s *RemoteHLSPublisherSession) runPublisher(source domain.Source, stage *string) error {
 	bridge, err := s.remote.bridge(s.ctx, source)
 	if err != nil {
 		return err
 	}
 	defer bridge.close()
 
+	*stage = "video_probe"
 	videoMetadata, err := s.remote.tools.probe(s.ctx, bridge.video, true)
 	if err != nil {
 		return bridge.failureOr(err)
@@ -384,6 +390,7 @@ func (s *RemoteHLSPublisherSession) runPublisher(source domain.Source) error {
 	if !hasOnlyExpectedCodec(videoMetadata, "video", "h264") {
 		return errors.New("HLS publisher requires split H.264 video and AAC audio")
 	}
+	*stage = "audio_probe"
 	audioMetadata, err := s.remote.tools.probe(s.ctx, bridge.audio, true)
 	if err != nil {
 		return bridge.failureOr(err)
@@ -395,6 +402,7 @@ func (s *RemoteHLSPublisherSession) runPublisher(source domain.Source) error {
 		return errors.New("HLS publisher requires split H.264 video and AAC audio")
 	}
 
+	*stage = "job_slot"
 	if err := s.remote.tools.acquireJob(s.ctx); err != nil {
 		return err
 	}
@@ -404,6 +412,7 @@ func (s *RemoteHLSPublisherSession) runPublisher(source domain.Source) error {
 	s.mu.Lock()
 	s.state = RemoteHLSPublisherRunning
 	s.mu.Unlock()
+	*stage = "ffmpeg"
 	if err := runRemoteHLSPublisher(s.ctx, s.remote.tools.runner, s.remote.tools.ffmpeg, args, s.directory, s.maxBytes); err != nil {
 		return bridge.failureOr(err)
 	}
@@ -413,6 +422,7 @@ func (s *RemoteHLSPublisherSession) runPublisher(source domain.Source) error {
 	if err := s.ctx.Err(); err != nil {
 		return err
 	}
+	*stage = "validation"
 	if err := validateRemoteHLSPublisherOutput(s.directory, s.expected-s.startPosition, s.maxBytes); err != nil {
 		return err
 	}
@@ -656,7 +666,9 @@ func parseRemoteHLSPublisherPlaylist(data []byte) ([]remoteHLSPublisherPlaylistE
 		entries = append(entries, remoteHLSPublisherPlaylistEntry{sequence: sequence, name: line, duration: *pending})
 		pending = nil
 	}
-	if !sawVersion || !sawTarget || !sawSequence || !sawEvent || pending != nil || (len(entries) > 0 && float64(target) < math.Ceil(float64(longest)/float64(time.Second))) {
+	// RFC 8216 compares TARGETDURATION with each EXTINF rounded to the
+	// nearest integer. FFmpeg may emit 4.08 seconds with TARGETDURATION:4.
+	if !sawVersion || !sawTarget || !sawSequence || !sawEvent || pending != nil || (len(entries) > 0 && float64(target) < math.Round(float64(longest)/float64(time.Second))) {
 		return nil, false, errRemoteHLSPublisherOutput
 	}
 	for index, entry := range entries {

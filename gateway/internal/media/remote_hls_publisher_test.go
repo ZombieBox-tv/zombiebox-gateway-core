@@ -317,6 +317,18 @@ func TestRemoteHLSPublisherRequiresKnownBoundedSplitSourceAndPrivateRoot(t *test
 	}
 }
 
+func TestRemoteHLSPublisherTargetDurationUsesNearestInteger(t *testing.T) {
+	playlist := func(duration string) []byte {
+		return []byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:" + duration + ",\nsegment-00001.ts\n")
+	}
+	if _, _, err := parseRemoteHLSPublisherPlaylist(playlist("4.080000")); err != nil {
+		t.Fatalf("valid rounded segment duration rejected: %v", err)
+	}
+	if _, _, err := parseRemoteHLSPublisherPlaylist(playlist("4.500000")); err == nil {
+		t.Fatal("segment duration exceeding rounded target was accepted")
+	}
+}
+
 func TestRemoteHLSPublisherRealFFmpegPublishesWhileSplitInputIsHeldOpen(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
