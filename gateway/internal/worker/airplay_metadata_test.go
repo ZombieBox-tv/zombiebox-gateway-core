@@ -214,6 +214,57 @@ func TestAirplayArtworkEvidenceTracksRewritesAndConnection(t *testing.T) {
 	}
 }
 
+func TestAirplayArtworkDiagnosticsExposeCandidateAssociationAndHoldAges(t *testing.T) {
+	dir := t.TempDir()
+	connection := "cccccccccccccccc"
+	base := time.Now().Add(-3 * time.Second)
+	connectionPath := filepath.Join(dir, "receiver.dacp")
+	if err := os.WriteFile(connectionPath, []byte(testDACPIdentifier+"\n"+testActiveRemote+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(connectionPath, base.Add(-time.Second), base.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	coverPath := filepath.Join(dir, "coverart")
+	if err := os.WriteFile(coverPath, append([]byte("\x89PNG\r\n\x1a\n"), 1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(coverPath, base, base); err != nil {
+		t.Fatal(err)
+	}
+	evidence := newAirplayArtworkEvidence()
+	evidence.observe(dir, connection, nil, base.Add(100*time.Millisecond))
+	status := evidence.snapshot(base.Add(200 * time.Millisecond))
+	if status.Stage != "candidate_waiting_for_labels" || !status.CandidateObserved || status.LabelsAssociated || status.HoldReleased {
+		t.Fatalf("candidate-before-label stage was not exposed: %+v", status)
+	}
+
+	metadataPath := filepath.Join(dir, "metadata.txt")
+	metadataTime := base.Add(2 * time.Second)
+	if err := os.WriteFile(metadataPath, []byte("Title: Track\nArtist: Artist\nAlbum: Album\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(metadataPath, metadataTime, metadataTime); err != nil {
+		t.Fatal(err)
+	}
+	metadata := airplayMetadata(dir)
+	if revision, _ := evidence.observe(dir, connection, metadata, metadataTime.Add(100*time.Millisecond)); revision != "" {
+		t.Fatal("diagnostic association changed the existing five-second candidate hold")
+	}
+	status = evidence.snapshot(metadataTime.Add(200 * time.Millisecond))
+	if status.Stage != "candidate_held" || !status.CandidateObserved || !status.LabelsAssociated || status.HoldReleased {
+		t.Fatalf("label association stage was not exposed: %+v", status)
+	}
+
+	if revision, _ := evidence.observe(dir, connection, metadata, metadataTime.Add(6*time.Second)); len(revision) != 16 {
+		t.Fatal("artwork was not accepted after the existing candidate hold")
+	}
+	status = evidence.snapshot(metadataTime.Add(6*time.Second + 100*time.Millisecond))
+	if status.Stage != "hold_released" || !status.HoldReleased || status.HoldReleaseAgeMS > 100 {
+		t.Fatalf("hold release timing was not exposed: %+v", status)
+	}
+}
+
 func TestAirplayArtworkEvidenceVersionsSameLabelRefresh(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Now().Add(-50 * time.Second)

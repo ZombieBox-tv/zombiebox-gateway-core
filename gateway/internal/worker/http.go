@@ -102,6 +102,65 @@ type AirPlayMirrorDiagnostics interface {
 	AirPlayMirrorSnapshot(time.Time) AirPlayMirrorStatus
 }
 
+// AirPlayAudioStatus contains bounded audio transport and HLS evidence. It
+// intentionally has no field for packet payloads, sender identifiers, paths,
+// media metadata, or upstream logs.
+type AirPlayAudioStatus struct {
+	RTPListenerAvailable             bool   `json:"rtpListenerAvailable"`
+	RTPPacketCount                   uint64 `json:"rtpPacketCount"`
+	RTPMalformedPacketCount          uint64 `json:"rtpMalformedPacketCount"`
+	RTPSequenceGapCount              uint64 `json:"rtpSequenceGapCount"`
+	RTPRecoveredSequenceGapCount     uint64 `json:"rtpRecoveredSequenceGapCount"`
+	RTPOutstandingSequenceGapCount   uint64 `json:"rtpOutstandingSequenceGapCount"`
+	RTPExpiredSequenceGapCount       uint64 `json:"rtpExpiredSequenceGapCount"`
+	RTPDuplicatePacketCount          uint64 `json:"rtpDuplicatePacketCount"`
+	RTPReorderedPacketCount          uint64 `json:"rtpReorderedPacketCount"`
+	RTPOldPacketCount                uint64 `json:"rtpOldPacketCount"`
+	RTPSequenceResetCount            uint64 `json:"rtpSequenceResetCount"`
+	RTPArrivalGapCount               uint64 `json:"rtpArrivalGapCount"`
+	RTPLongArrivalGapCount           uint64 `json:"rtpLongArrivalGapCount"`
+	RTPLastArrivalGapMS              int64  `json:"rtpLastArrivalGapMs,omitempty"`
+	RTPMaxArrivalGapMS               int64  `json:"rtpMaxArrivalGapMs,omitempty"`
+	RTPLastPacketAgeMS               int64  `json:"rtpLastPacketAgeMs,omitempty"`
+	HLSPlaylistPresent               bool   `json:"hlsPlaylistPresent"`
+	HLSPlaylistValid                 bool   `json:"hlsPlaylistValid"`
+	HLSPlaylistAgeMS                 int64  `json:"hlsPlaylistAgeMs,omitempty"`
+	HLSPlaylistSegmentCount          uint16 `json:"hlsPlaylistSegmentCount"`
+	HLSPlaylistMissingSegmentCount   uint16 `json:"hlsPlaylistMissingSegmentCount"`
+	HLSPlaylistSpanMS                int64  `json:"hlsPlaylistSpanMs,omitempty"`
+	HLSLatestSegmentAgeMS            int64  `json:"hlsLatestSegmentAgeMs,omitempty"`
+	HLSPlaylistRequestCount          uint64 `json:"hlsPlaylistRequestCount"`
+	HLSPlaylistSuccessCount          uint64 `json:"hlsPlaylistSuccessCount"`
+	HLSPlaylistMissCount             uint64 `json:"hlsPlaylistMissCount"`
+	HLSPlaylistOtherErrorCount       uint64 `json:"hlsPlaylistOtherErrorCount"`
+	HLSPlaylistLastStatusCode        int    `json:"hlsPlaylistLastStatusCode,omitempty"`
+	HLSPlaylistLastRequestAgeMS      int64  `json:"hlsPlaylistLastRequestAgeMs,omitempty"`
+	HLSPlaylistLastRequestDurationMS int64  `json:"hlsPlaylistLastRequestDurationMs,omitempty"`
+	HLSSegmentRequestCount           uint64 `json:"hlsSegmentRequestCount"`
+	HLSSegmentSuccessCount           uint64 `json:"hlsSegmentSuccessCount"`
+	HLSSegmentMissCount              uint64 `json:"hlsSegmentMissCount"`
+	HLSSegmentOtherErrorCount        uint64 `json:"hlsSegmentOtherErrorCount"`
+	HLSSegmentLastStatusCode         int    `json:"hlsSegmentLastStatusCode,omitempty"`
+	HLSSegmentLastRequestAgeMS       int64  `json:"hlsSegmentLastRequestAgeMs,omitempty"`
+	HLSSegmentLastRequestDurationMS  int64  `json:"hlsSegmentLastRequestDurationMs,omitempty"`
+}
+
+// AirPlayAudioRequestKind is an allowlisted HLS request category. The worker
+// never passes a URL or file name into audio diagnostics.
+type AirPlayAudioRequestKind uint8
+
+const (
+	AirPlayAudioPlaylistRequest AirPlayAudioRequestKind = iota + 1
+	AirPlayAudioSegmentRequest
+)
+
+// AirPlayAudioDiagnostics supplies sanitized audio-flow snapshots and HLS
+// request timings to the authenticated private worker status route.
+type AirPlayAudioDiagnostics interface {
+	AirPlayAudioSnapshot(time.Time) AirPlayAudioStatus
+	RecordAirPlayHLSRequest(AirPlayAudioRequestKind, int, time.Duration, time.Time)
+}
+
 // The private worker health response exposes only bounded audio-flow evidence.
 // The daemon's account, track URI, title and artwork never enter this payload.
 type spotifyWorkerHealth struct {
@@ -149,7 +208,26 @@ func HandlerWithAirPlayProgress(ctx context.Context, c Config, diagnostics *Spot
 // HandlerWithAirPlayMirrorDiagnostics adds bounded RTP/bridge evidence to the
 // private AirPlay status response without changing the gateway-facing model.
 func HandlerWithAirPlayMirrorDiagnostics(ctx context.Context, c Config, progress *AirPlayProgress, mirror AirPlayMirrorDiagnostics) http.Handler {
-	return handlerWithAirPlayDACPAndMirror(ctx, c, nil, progress, nil, nil, mirror)
+	return handlerWithAirPlayDACPAndDiagnostics(ctx, c, nil, progress, nil, nil, mirror, nil)
+}
+
+// HandlerWithAirPlayDACPDiagnostics adds the opt-in DACP observer to the
+// authenticated private status response. The observer remains read-only and
+// cannot affect playback state.
+func HandlerWithAirPlayDACPDiagnostics(ctx context.Context, c Config, progress *AirPlayProgress, mirror AirPlayMirrorDiagnostics, dacpDiagnostics AirPlayDACPDiagnostics) http.Handler {
+	return handlerWithAirPlayDACPAndDiagnostics(ctx, c, nil, progress, nil, nil, mirror, dacpDiagnostics)
+}
+
+// HandlerWithAirPlayAudioDiagnostics adds bounded audio RTP and HLS evidence
+// to the private status route.
+func HandlerWithAirPlayAudioDiagnostics(ctx context.Context, c Config, progress *AirPlayProgress, mirror AirPlayMirrorDiagnostics, audioDiagnostics AirPlayAudioDiagnostics) http.Handler {
+	return HandlerWithAirPlayDACPAndAudioDiagnostics(ctx, c, progress, mirror, nil, audioDiagnostics)
+}
+
+// HandlerWithAirPlayDACPAndAudioDiagnostics combines the optional DACP and
+// audio observers while preserving their separate sanitized status fields.
+func HandlerWithAirPlayDACPAndAudioDiagnostics(ctx context.Context, c Config, progress *AirPlayProgress, mirror AirPlayMirrorDiagnostics, dacpDiagnostics AirPlayDACPDiagnostics, audioDiagnostics AirPlayAudioDiagnostics) http.Handler {
+	return handlerWithAirPlayDACPAndFullDiagnostics(ctx, c, nil, progress, nil, nil, mirror, dacpDiagnostics, audioDiagnostics)
 }
 
 // handlerWithAirPlayDACP exposes testable DACP dependencies while keeping the
@@ -159,6 +237,14 @@ func handlerWithAirPlayDACP(ctx context.Context, c Config, diagnostics *SpotifyD
 }
 
 func handlerWithAirPlayDACPAndMirror(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress, resolver DACPResolver, dacpHTTP *http.Client, mirror AirPlayMirrorDiagnostics) http.Handler {
+	return handlerWithAirPlayDACPAndDiagnostics(ctx, c, diagnostics, progress, resolver, dacpHTTP, mirror, nil)
+}
+
+func handlerWithAirPlayDACPAndDiagnostics(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress, resolver DACPResolver, dacpHTTP *http.Client, mirror AirPlayMirrorDiagnostics, dacpDiagnostics AirPlayDACPDiagnostics) http.Handler {
+	return handlerWithAirPlayDACPAndFullDiagnostics(ctx, c, diagnostics, progress, resolver, dacpHTTP, mirror, dacpDiagnostics, nil)
+}
+
+func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress, resolver DACPResolver, dacpHTTP *http.Client, mirror AirPlayMirrorDiagnostics, dacpDiagnostics AirPlayDACPDiagnostics, audioDiagnostics AirPlayAudioDiagnostics) http.Handler {
 	if progress == nil {
 		progress = NewAirPlayProgress()
 	}
@@ -382,12 +468,19 @@ func handlerWithAirPlayDACPAndMirror(ctx context.Context, c Config, diagnostics 
 			if mirror != nil {
 				status["mirrorDiagnostics"] = mirror.AirPlayMirrorSnapshot(now)
 			}
+			if dacpDiagnostics != nil {
+				status["dacpDiagnostics"] = dacpDiagnostics.AirPlayDACPDiagnosticSnapshot(now)
+			}
+			if audioDiagnostics != nil {
+				status["audioDiagnostics"] = audioDiagnostics.AirPlayAudioSnapshot(now)
+			}
 			if connected && connectionRevision != "" {
 				status["connectionRevision"] = connectionRevision
 			}
 			metadata := airplayMetadataForConnection(c.StateDir, connected)
 			artworkRevision, _ := artworkEvidence.observe(c.StateDir, connectionRevision, metadata, now)
 			status["artworkRevision"] = artworkRevision
+			status["artworkDiagnostics"] = artworkEvidence.snapshot(now)
 			trackRevision := ""
 			if connected && metadata["title"] != "" {
 				trackRevision = airPlayProgressTrackRevision(metadata, connectionRevision)
@@ -471,7 +564,23 @@ func handlerWithAirPlayDACPAndMirror(ctx context.Context, c Config, diagnostics 
 			} else {
 				w.Header().Set("Content-Type", "video/mp2t")
 			}
-			http.ServeFile(w, r, filepath.Join(c.StateDir, "hls", name))
+			kind := AirPlayAudioRequestKind(0)
+			if name == "audio.m3u8" {
+				kind = AirPlayAudioPlaylistRequest
+			} else if strings.HasPrefix(name, "audio") {
+				kind = AirPlayAudioSegmentRequest
+			}
+			if audioDiagnostics == nil || kind == 0 {
+				http.ServeFile(w, r, filepath.Join(c.StateDir, "hls", name))
+				return
+			}
+			startedAt := time.Now()
+			recorder := &airplayStatusResponseWriter{ResponseWriter: w}
+			http.ServeFile(recorder, r, filepath.Join(c.StateDir, "hls", name))
+			if recorder.statusCode == 0 {
+				recorder.statusCode = http.StatusOK
+			}
+			audioDiagnostics.RecordAirPlayHLSRequest(kind, recorder.statusCode, time.Since(startedAt), time.Now())
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -483,6 +592,26 @@ func handlerWithAirPlayDACPAndMirror(ctx context.Context, c Config, diagnostics 
 		}
 		mux.ServeHTTP(w, r)
 	})
+}
+
+type airplayStatusResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *airplayStatusResponseWriter) WriteHeader(statusCode int) {
+	if w.statusCode != 0 {
+		return
+	}
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *airplayStatusResponseWriter) Write(data []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(data)
 }
 
 func airplayStreamActivity(stateDir string) (video, audio bool) {

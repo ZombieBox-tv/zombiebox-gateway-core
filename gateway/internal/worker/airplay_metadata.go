@@ -181,33 +181,54 @@ func airplayArtworkRevision(metadata map[string]string) string {
 // Same-album reuse requires matching artist/album labels and an exact previously
 // accepted image; other ambiguous transitions without a fresh write stay blank.
 type airplayArtworkEvidence struct {
-	mu                    sync.Mutex
-	connection            string
-	track                 string
-	artist                string
-	album                 string
-	previousArtist        string
-	previousAlbum         string
-	previousMetadataWrite time.Time
-	firstMetadataWrite    time.Time
-	latestMetadataWrite   time.Time
-	hadPriorTrack         bool
-	previousAcceptedCover [32]byte
-	previousCoverKnown    bool
-	previousObservedCover [32]byte
-	previousObservedKnown bool
-	replacedCover         [32]byte
-	replacedCoverKnown    bool
-	replacedCoverTrack    string
-	lastAcceptedCover     [32]byte
-	lastAcceptedKnown     bool
-	pendingWithinTrack    bool
-	cover                 [32]byte
-	coverKnown            bool
-	coverFirstSeen        time.Time
-	coverLastWrite        time.Time
-	postMetadataWrites    int
-	acceptedRevision      string
+	mu                      sync.Mutex
+	connection              string
+	track                   string
+	artist                  string
+	album                   string
+	previousArtist          string
+	previousAlbum           string
+	previousMetadataWrite   time.Time
+	firstMetadataWrite      time.Time
+	latestMetadataWrite     time.Time
+	hadPriorTrack           bool
+	previousAcceptedCover   [32]byte
+	previousCoverKnown      bool
+	previousObservedCover   [32]byte
+	previousObservedKnown   bool
+	replacedCover           [32]byte
+	replacedCoverKnown      bool
+	replacedCoverTrack      string
+	lastAcceptedCover       [32]byte
+	lastAcceptedKnown       bool
+	pendingWithinTrack      bool
+	cover                   [32]byte
+	coverKnown              bool
+	coverFirstSeen          time.Time
+	coverLastWrite          time.Time
+	postMetadataWrites      int
+	acceptedRevision        string
+	diagnosticConnection    string
+	diagnosticTrack         string
+	diagnosticCandidate     [32]byte
+	diagnosticCandidateOK   bool
+	diagnosticCandidateInfo os.FileInfo
+	diagnosticCandidateAt   time.Time
+	diagnosticLabelsAt      time.Time
+	diagnosticHoldAt        time.Time
+}
+
+// AirPlayArtworkDiagnosticStatus reports only the current artwork association
+// stage and bounded relative ages. It contains no labels, revision, URL, or
+// artwork bytes.
+type AirPlayArtworkDiagnosticStatus struct {
+	Stage                 string `json:"stage"`
+	CandidateObserved     bool   `json:"candidateObserved"`
+	CandidateAgeMS        int64  `json:"candidateAgeMs,omitempty"`
+	LabelsAssociated      bool   `json:"labelsAssociated"`
+	LabelAssociationAgeMS int64  `json:"labelAssociationAgeMs,omitempty"`
+	HoldReleased          bool   `json:"holdReleased"`
+	HoldReleaseAgeMS      int64  `json:"holdReleaseAgeMs,omitempty"`
 }
 
 func newAirplayArtworkEvidence() *airplayArtworkEvidence { return &airplayArtworkEvidence{} }
@@ -218,6 +239,14 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 	track := airplayArtworkRevision(metadata)
 	_, connectionErr := hex.DecodeString(connection)
 	if len(connection) != 16 || connectionErr != nil || track == "" {
+		if len(connection) == 16 && connectionErr == nil {
+			e.observeUnlabeledCandidate(dir, connection, now)
+			e.diagnosticTrack = ""
+			e.diagnosticLabelsAt = time.Time{}
+			e.diagnosticHoldAt = time.Time{}
+		} else {
+			e.resetDiagnostics()
+		}
 		e.connection = ""
 		e.track = ""
 		e.artist = ""
@@ -251,6 +280,14 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 		return "", nil
 	}
 	if e.connection != connection || e.track != track {
+		if e.diagnosticConnection != connection {
+			e.resetDiagnostics()
+			e.diagnosticConnection = connection
+		} else if e.diagnosticTrack != track {
+			e.diagnosticLabelsAt = time.Time{}
+			e.diagnosticHoldAt = time.Time{}
+		}
+		e.diagnosticTrack = track
 		if e.connection != connection {
 			e.cover = [32]byte{}
 			e.coverKnown = false
@@ -332,6 +369,7 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 		return "", nil
 	}
 	hash := sha256.Sum256(data)
+	e.observeDiagnosticCandidate(hash, now, after)
 	if !e.coverKnown || hash != e.cover {
 		if e.coverKnown && (e.acceptedRevision != "" || e.coverLastWrite.After(e.firstMetadataWrite)) {
 			e.replacedCover = e.cover
@@ -357,8 +395,12 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 	}
 	if e.pendingWithinTrack && e.postMetadataWrites >= 2 && now.Sub(e.coverFirstSeen) >= airplayArtworkSameTrackRefreshWait {
 		e.pendingWithinTrack = false
+		e.diagnosticHoldAt = now
 	}
 	if e.pendingWithinTrack {
+		if e.diagnosticLabelsAt.IsZero() {
+			e.diagnosticLabelsAt = now
+		}
 		return "", nil
 	}
 	postMetadataCover := e.coverLastWrite.After(e.firstMetadataWrite) && e.postMetadataWrites > 0
@@ -390,6 +432,9 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 	if !postMetadataCover && !earlyCover && !sameAlbumReuse {
 		return "", nil
 	}
+	if e.diagnosticLabelsAt.IsZero() {
+		e.diagnosticLabelsAt = now
+	}
 	if e.acceptedRevision == "" {
 		changedFromPrevious := e.previousCoverKnown && e.cover != e.previousAcceptedCover
 		if !changedFromPrevious && e.previousObservedKnown {
@@ -402,6 +447,7 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 		if now.Sub(readyAt) < airplayArtworkCandidateHold {
 			return "", nil
 		}
+		e.diagnosticHoldAt = now
 		// A new song on the same album can legitimately reuse the previous
 		// accepted cover or repeat its bytes in a fresh post-metadata write.
 		sameAlbumRewrite := e.album != "" && e.artist != "" &&
@@ -415,6 +461,89 @@ func (e *airplayArtworkEvidence) observe(dir, connection string, metadata map[st
 		e.lastAcceptedCover, e.lastAcceptedKnown = hash, true
 	}
 	return e.acceptedRevision, data
+}
+
+func (e *airplayArtworkEvidence) observeUnlabeledCandidate(dir, connection string, now time.Time) {
+	if e.diagnosticConnection != connection {
+		e.resetDiagnostics()
+		e.diagnosticConnection = connection
+	}
+	hash, info, ok := airplayArtworkCandidateHash(dir, e.diagnosticCandidateInfo)
+	if ok {
+		e.observeDiagnosticCandidate(hash, now, info)
+	}
+}
+
+func airplayArtworkCandidateHash(dir string, cachedInfo os.FileInfo) ([32]byte, os.FileInfo, bool) {
+	var empty [32]byte
+	path := filepath.Join(dir, "coverart")
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() || before.Size() == 95 || before.Size() > 2<<20 || time.Since(before.ModTime()) > 15*time.Minute {
+		return empty, nil, false
+	}
+	if cachedInfo != nil && os.SameFile(before, cachedInfo) && before.Size() == cachedInfo.Size() && before.ModTime().Equal(cachedInfo.ModTime()) {
+		return empty, cachedInfo, false
+	}
+	data, err := receiverFile(dir, "coverart", 2<<20)
+	if err != nil || len(data) == 95 {
+		return empty, nil, false
+	}
+	mime := http.DetectContentType(data)
+	if mime != "image/jpeg" && mime != "image/png" {
+		return empty, nil, false
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return empty, nil, false
+	}
+	return sha256.Sum256(data), after, true
+}
+
+func (e *airplayArtworkEvidence) observeDiagnosticCandidate(hash [32]byte, now time.Time, info os.FileInfo) {
+	if !e.diagnosticCandidateOK || hash != e.diagnosticCandidate {
+		e.diagnosticCandidate = hash
+		e.diagnosticCandidateOK = true
+		e.diagnosticCandidateAt = now
+		e.diagnosticLabelsAt = time.Time{}
+		e.diagnosticHoldAt = time.Time{}
+	}
+	e.diagnosticCandidateInfo = info
+}
+
+func (e *airplayArtworkEvidence) resetDiagnostics() {
+	e.diagnosticConnection = ""
+	e.diagnosticTrack = ""
+	e.diagnosticCandidate = [32]byte{}
+	e.diagnosticCandidateOK = false
+	e.diagnosticCandidateInfo = nil
+	e.diagnosticCandidateAt = time.Time{}
+	e.diagnosticLabelsAt = time.Time{}
+	e.diagnosticHoldAt = time.Time{}
+}
+
+func (e *airplayArtworkEvidence) snapshot(now time.Time) AirPlayArtworkDiagnosticStatus {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	status := AirPlayArtworkDiagnosticStatus{Stage: "waiting_for_candidate"}
+	if e.diagnosticConnection == "" {
+		status.Stage = "idle"
+	}
+	if e.diagnosticCandidateOK {
+		status.CandidateObserved = true
+		status.CandidateAgeMS = boundedDiagnosticAgeMS(now.Sub(e.diagnosticCandidateAt))
+		status.Stage = "candidate_waiting_for_labels"
+	}
+	if !e.diagnosticLabelsAt.IsZero() {
+		status.LabelsAssociated = true
+		status.LabelAssociationAgeMS = boundedDiagnosticAgeMS(now.Sub(e.diagnosticLabelsAt))
+		status.Stage = "candidate_held"
+	}
+	if !e.diagnosticHoldAt.IsZero() {
+		status.HoldReleased = true
+		status.HoldReleaseAgeMS = boundedDiagnosticAgeMS(now.Sub(e.diagnosticHoldAt))
+		status.Stage = "hold_released"
+	}
+	return status
 }
 
 func airplayArtwork(dir string, w http.ResponseWriter, r *http.Request) {

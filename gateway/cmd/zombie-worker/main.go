@@ -55,6 +55,8 @@ func run(path string) error {
 	var commands []*exec.Cmd
 	var spotifyDiagnostics *worker.SpotifyDaemonDiagnostics
 	var airplayProgress *worker.AirPlayProgress
+	var airplayDACPDiagnostics *worker.AirPlayDACPObserver
+	var airplayAudioDiagnostics *airplayAudioDiagnostics
 	var mirror *mirrorBridge
 	if c.Mode == "spotify" {
 		spotifyDiagnostics = worker.NewSpotifyDaemonDiagnostics()
@@ -69,15 +71,36 @@ func run(path string) error {
 		}
 		commands = append(commands, exec.CommandContext(ctx, "go-librespot", "--config_dir", c.StateDir))
 	} else {
+		audioTuning, tuningErr := airplayAudioHLSTuningFromEnv()
+		if tuningErr != nil {
+			return tuningErr
+		}
+		rtpDiagnosticEnabled, diagnosticFlagErr := airplayAudioRTPDiagnosticEnabledFromEnv()
+		if diagnosticFlagErr != nil {
+			return diagnosticFlagErr
+		}
 		hls := filepath.Join(c.StateDir, "hls")
 		if err = os.MkdirAll(hls, 0700); err != nil {
 			return err
+		}
+		rtpDiagnosticAvailable := false
+		if rtpDiagnosticEnabled {
+			airplayAudioDiagnostics = newAirplayAudioDiagnostics(c.StateDir)
+			if startErr := airplayAudioDiagnostics.StartRTPListener(ctx, fmt.Sprintf("127.0.0.1:%d", airplayAudioRTPPort)); startErr != nil {
+				log.Print("AirPlay audio RTP diagnostics unavailable")
+			} else {
+				rtpDiagnosticAvailable = true
+				defer airplayAudioDiagnostics.Close()
+			}
 		}
 		// UxPlay removes this file when the last client disconnects. Clear a
 		// leftover from an unclean prior exit before treating it as evidence.
 		dacpPath := filepath.Join(c.StateDir, "receiver.dacp")
 		if err = os.Remove(dacpPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("clear stale receiver state: %w", err)
+		}
+		if os.Getenv("ZOMBIE_AIRPLAY_DACP_STATUS_DIAGNOSTIC") == "1" {
+			airplayDACPDiagnostics = worker.NewAirPlayDACPObserver(worker.NewDACPController(dacpPath))
 		}
 		audioSDP := filepath.Join(c.StateDir, "audio.sdp")
 		if err = os.WriteFile(audioSDP, []byte("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Zombie AirPlay Audio\nc=IN IP4 127.0.0.1\nt=0 0\nm=audio 35014 RTP/AVP 97\na=rtpmap:97 L16/44100/2\n"), 0600); err != nil {
@@ -86,7 +109,7 @@ func run(path string) error {
 		// RTP timestamps may restart when an AirPlay sender changes tracks. Build
 		// output timestamps from decoded samples so HLS segment durations remain
 		// monotonic. Packet loss/reconnect recovery still needs physical evidence.
-		commands = append(commands, exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,udp,rtp", "-localaddr", "127.0.0.1", "-listen_timeout", "-1", "-threads", "1", "-i", audioSDP, "-af", "asetpts=N/SR/TB", "-c:a", "aac", "-threads", "1", "-b:a", "128k", "-f", "hls", "-hls_time", "0.6", "-hls_list_size", "4", "-hls_flags", "delete_segments+omit_endlist+temp_file", "-hls_segment_filename", filepath.Join(hls, "audio%d.ts"), filepath.Join(hls, "audio.m3u8")))
+		commands = append(commands, exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file,udp,rtp", "-localaddr", "127.0.0.1", "-listen_timeout", "-1", "-threads", "1", "-i", audioSDP, "-af", "asetpts=N/SR/TB", "-c:a", "aac", "-threads", "1", "-b:a", "128k", "-f", "hls", "-hls_time", audioTuning.segmentDuration, "-hls_list_size", audioTuning.listSize, "-hls_flags", "delete_segments+omit_endlist+temp_file", "-hls_segment_filename", filepath.Join(hls, "audio%d.ts"), filepath.Join(hls, "audio.m3u8")))
 		// The mirror bridge selects video-only or audio+video from observed RTP.
 		// Its loopback listeners remain bound while FFmpeg changes modes.
 		mirror, err = newMirrorBridge(hls, c.StateDir, "ffmpeg", airplayMirrorPorts)
@@ -95,9 +118,13 @@ func run(path string) error {
 		}
 		defer mirror.closeSockets()
 		airplayProgress = worker.NewAirPlayProgress()
-		uxplay := exec.CommandContext(ctx, "uxplay", "-md", filepath.Join(c.StateDir, "metadata.txt"), "-ca", filepath.Join(c.StateDir, "coverart"), "-dacp", dacpPath, "-n", "Zombie Box AirPlay", "-p", "35000", "-pin", c.Pin, "-s", "1280x720", "-fps", "30", "-vrtp", "pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=35010", "-artp", "pt=97 ! multiudpsink clients=127.0.0.1:35012,127.0.0.1:35014")
-		// Retain only the parsed progress sample and a saturating count of
-		// UxPlay's fixed direct-video warning. Raw upstream output is discarded.
+		audioRTPTargets := airplayAudioRTPTargets(rtpDiagnosticAvailable)
+		uxplay := exec.CommandContext(ctx, "uxplay", "-md", filepath.Join(c.StateDir, "metadata.txt"), "-ca", filepath.Join(c.StateDir, "coverart"), "-dacp", dacpPath, "-n", "Zombie Box AirPlay", "-p", "35000", "-pin", c.Pin, "-s", "1280x720", "-fps", "30", "-vrtp", "pt=96 config-interval=1 ! udpsink host=127.0.0.1 port=35010", "-artp", "pt=97 ! multiudpsink clients="+audioRTPTargets)
+		// Retain only the parsed progress sample, fixed UxPlay service-stage
+		// events, and a process-level saturating direct-route rejection count.
+		// These events are separate from generation-fenced video/audio RTP
+		// evidence and do not attribute a request to Photos or another app. Raw
+		// upstream output is discarded.
 		uxplay.Stdout = io.MultiWriter(airplayProgress, mirror.uxplayLogs)
 		commands = append(commands, uxplay)
 	}
@@ -134,7 +161,19 @@ func run(path string) error {
 	}
 	handler := worker.HandlerWithAirPlayProgress(ctx, c, spotifyDiagnostics, airplayProgress)
 	if c.Mode == "airplay" {
-		handler = worker.HandlerWithAirPlayMirrorDiagnostics(ctx, c, airplayProgress, mirror)
+		if airplayAudioDiagnostics != nil {
+			if airplayDACPDiagnostics != nil {
+				go airplayDACPDiagnostics.Run(ctx)
+				handler = worker.HandlerWithAirPlayDACPAndAudioDiagnostics(ctx, c, airplayProgress, mirror, airplayDACPDiagnostics, airplayAudioDiagnostics)
+			} else {
+				handler = worker.HandlerWithAirPlayAudioDiagnostics(ctx, c, airplayProgress, mirror, airplayAudioDiagnostics)
+			}
+		} else if airplayDACPDiagnostics != nil {
+			go airplayDACPDiagnostics.Run(ctx)
+			handler = worker.HandlerWithAirPlayDACPDiagnostics(ctx, c, airplayProgress, mirror, airplayDACPDiagnostics)
+		} else {
+			handler = worker.HandlerWithAirPlayMirrorDiagnostics(ctx, c, airplayProgress, mirror)
+		}
 	}
 	httpServer := &http.Server{Addr: c.Listen, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() { errors <- httpServer.ListenAndServe() }()

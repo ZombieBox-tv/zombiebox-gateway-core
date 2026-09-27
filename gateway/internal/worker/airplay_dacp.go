@@ -179,6 +179,79 @@ func (c *DACPController) Send(ctx context.Context, command DACPCommand) error {
 	return nil
 }
 
+// ObserveStatus makes one read-only request to the fixed DACP status endpoint.
+// The response is drained within a strict size limit and discarded; its body
+// never becomes playback state or externally visible metadata.
+func (c *DACPController) ObserveStatus(ctx context.Context) (time.Time, error) {
+	if c == nil || c.resolver == nil || c.client == nil || c.credentialPath == "" {
+		return time.Time{}, errDACPUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	initialSnapshot, err := readDACPCredentialSnapshot(c.credentialPath)
+	if err != nil {
+		return time.Time{}, errInvalidDACPFile
+	}
+
+	instance := "iTunes_Ctrl_" + initialSnapshot.credentials.id
+	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, dacpDiscoveryTimeout)
+	services, err := c.resolver.Lookup(discoveryCtx, instance)
+	cancelDiscovery()
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return time.Time{}, ctxErr
+		}
+		return time.Time{}, errDACPUnavailable
+	}
+	address, port, ok := matchingDACPAddress(services, instance)
+	if !ok {
+		return time.Time{}, errDACPUnavailable
+	}
+	currentSnapshot, err := readDACPCredentialSnapshot(c.credentialPath)
+	if err != nil || subtle.ConstantTimeCompare(initialSnapshot.fingerprint[:], currentSnapshot.fingerprint[:]) != 1 {
+		return time.Time{}, errDACPChanged
+	}
+
+	requestCtx, cancelRequest := context.WithTimeout(ctx, dacpRequestTimeout)
+	defer cancelRequest()
+	endpoint := url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(address.String(), strconv.Itoa(port)),
+		Path:   "/ctrl-int/1/playstatusupdate",
+	}
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return time.Time{}, errDACPRequest
+	}
+	request.Header.Set("Active-Remote", currentSnapshot.credentials.activeRemote)
+
+	response, err := c.client.Do(request)
+	if err != nil {
+		if requestCtx.Err() != nil {
+			return time.Time{}, requestCtx.Err()
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return time.Time{}, ctxErr
+		}
+		return time.Time{}, errDACPRequest
+	}
+	defer response.Body.Close()
+	bytesRead, err := io.Copy(io.Discard, io.LimitReader(response.Body, dacpResponseLimit+1))
+	if err != nil || bytesRead > dacpResponseLimit {
+		return time.Time{}, errDACPResponse
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return time.Time{}, errDACPResponse
+	}
+	receivedAt := time.Now()
+	finalSnapshot, err := readDACPCredentialSnapshot(c.credentialPath)
+	if err != nil || subtle.ConstantTimeCompare(initialSnapshot.fingerprint[:], finalSnapshot.fingerprint[:]) != 1 {
+		return time.Time{}, errDACPChanged
+	}
+	return receivedAt, nil
+}
+
 var dacpCommandPaths = map[DACPCommand]string{
 	DACPPlayPause:    "playpause",
 	DACPNextItem:     "nextitem",

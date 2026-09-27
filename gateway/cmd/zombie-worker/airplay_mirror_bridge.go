@@ -35,11 +35,14 @@ const (
 )
 
 const (
-	mirrorPacketLimit = 4096
-	mirrorProbeDelay  = 500 * time.Millisecond
-	mirrorAudioTTL    = 3 * time.Second
-	mirrorVideoTTL    = 12 * time.Second
-	mirrorSummaryTTL  = 30 * time.Second
+	mirrorPacketLimit    = 4096
+	mirrorProbeDelay     = 500 * time.Millisecond
+	mirrorAudioTTL       = 3 * time.Second
+	mirrorVideoTTL       = 12 * time.Second
+	mirrorSummaryTTL     = 30 * time.Second
+	mirrorStartupLimit   = 4 * time.Second
+	mirrorStartupPackets = 512
+	mirrorStartupBytes   = 2 << 20
 )
 
 const (
@@ -143,6 +146,17 @@ type mirrorBridge struct {
 	videoFUType       byte
 	ffmpegDiagnostics *mirrorFFmpegDiagnostics
 	ffmpegDiagSession uint64
+	startupPackets    [][]byte
+	startupBytes      int
+	restartPackets    [][]byte
+	restartBytes      int
+	startupStarted    time.Time
+	startupEpoch      uint64
+	startupForwarding bool
+	startupFailed     bool
+	startupSPS        bool
+	startupPPS        bool
+	startupIDR        bool
 }
 
 func newMirrorBridge(hlsDir, stateDir, ffmpegPath string, ports mirrorPorts) (*mirrorBridge, error) {
@@ -400,6 +414,16 @@ func (b *mirrorBridge) beginMirrorSessionLocked(generation uint64, now time.Time
 	b.videoFUType = 0
 	b.ffmpegDiagnostics = &mirrorFFmpegDiagnostics{}
 	b.ffmpegDiagSession = generation
+	b.startupPackets = nil
+	b.startupBytes = 0
+	b.restartPackets = nil
+	b.restartBytes = 0
+	b.startupStarted = now
+	b.startupForwarding = false
+	b.startupFailed = false
+	b.startupSPS = false
+	b.startupPPS = false
+	b.startupIDR = false
 }
 
 func (b *mirrorBridge) sessionSummarySnapshot(now time.Time) worker.AirPlayMirrorSessionSummary {
@@ -460,6 +484,8 @@ func (b *mirrorBridge) markMirrorSessionEnded(generation uint64, now time.Time) 
 		}
 		b.sessionSummary.status.VideoRTPFUAOpen = false
 		b.sessionSummary.sessionEnded = now
+		b.restartPackets = nil
+		b.restartBytes = 0
 	}
 }
 
@@ -515,6 +541,8 @@ func (b *mirrorBridge) recordMirrorHLSReadiness(now time.Time, manifestReady, se
 	if !summary.status.Available ||
 		!summary.sessionEnded.IsZero() ||
 		!b.encoderRunning ||
+		!b.startupForwarding ||
+		b.startupFailed ||
 		b.runningSession != summary.status.Generation {
 		return
 	}
@@ -530,7 +558,7 @@ func (b *mirrorBridge) recordMirrorHLSReadiness(now time.Time, manifestReady, se
 
 func mirrorFailureClass(stage string) string {
 	switch stage {
-	case "rtp_listener", "ffmpeg_start", "ffmpeg_exit", "ffmpeg_stop", "hls_cleanup":
+	case "rtp_listener", "ffmpeg_start", "ffmpeg_exit", "ffmpeg_stop", "hls_cleanup", "video_startup":
 		return stage
 	case "":
 		return mirrorFailureNone
@@ -649,10 +677,15 @@ func (b *mirrorBridge) recordVideoNALHeaderLocked(nalType byte) {
 	switch nalType {
 	case 7:
 		status.VideoRTPSPSObserved = true
+		b.startupSPS = true
 	case 8:
 		status.VideoRTPPPSObserved = true
+		b.startupPPS = true
 	case 5:
 		status.VideoRTPIDRObserved = true
+		if b.startupSPS && b.startupPPS {
+			b.startupIDR = true
+		}
 	}
 }
 
@@ -775,6 +808,16 @@ func (b *mirrorBridge) forwardMirrorPacket(generation uint64, video bool, output
 		forwarded = &status.AudioRTPForwardedPackets
 		failures = &status.AudioRTPForwardFailures
 	}
+	if video && generation == b.session && !b.startupForwarding {
+		if b.startupFailed || len(b.startupPackets) >= mirrorStartupPackets || b.startupBytes+len(packet) > mirrorStartupBytes || time.Since(b.startupStarted) > mirrorStartupLimit {
+			b.failMirrorStartupLocked("startup_buffer_limit")
+			incrementMirrorCounter(inactiveDrops)
+			return
+		}
+		b.startupPackets = append(b.startupPackets, append([]byte(nil), packet...))
+		b.startupBytes += len(packet)
+		return
+	}
 	if generation != b.session || generation != b.activeSession || generation != b.runningSession || !b.encoderRunning || b.runningMode == noMirror {
 		incrementMirrorCounter(inactiveDrops)
 		return
@@ -791,6 +834,145 @@ func (b *mirrorBridge) forwardMirrorPacket(generation uint64, video bool, output
 	incrementMirrorCounter(forwarded)
 }
 
+func (b *mirrorBridge) failMirrorStartupLocked(stage string) {
+	b.startupFailed = true
+	b.startupForwarding = false
+	b.startupPackets = nil
+	b.startupBytes = 0
+	b.restartPackets = nil
+	b.restartBytes = 0
+	b.activeSession = 0
+	b.bridgeStage = stage
+	b.failureStage = "video_startup"
+	if b.sessionSummary.status.Available && b.sessionSummary.status.FailureClass == mirrorFailureNone {
+		b.sessionSummary.status.FailureClass = mirrorFailureClass("video_startup")
+	}
+}
+
+func (b *mirrorBridge) mirrorStartupConfiguredLocked(session uint64) bool {
+	if b.session != session || b.sessionSummary.status.Generation != session {
+		return false
+	}
+	return b.startupSPS && b.startupPPS && b.startupIDR
+}
+
+// prepareMirrorEncoderRestartLocked starts a fresh bounded pre-roll for an
+// FFmpeg mode change. Decoder evidence flags alone are insufficient after a
+// process restart, so replay the bounded opening SPS/PPS/IDR RTP pre-roll into
+// each replacement process.
+func (b *mirrorBridge) prepareMirrorEncoderRestartLocked(now time.Time) {
+	b.startupEpoch++
+	if b.startupForwarding {
+		b.startupStarted = now
+	}
+	if len(b.restartPackets) > 0 {
+		b.startupPackets = append(b.startupPackets[:0], b.restartPackets...)
+		b.startupBytes = b.restartBytes
+	}
+	b.startupForwarding = false
+}
+
+func (b *mirrorBridge) retainMirrorRestartPacketsLocked() {
+	if len(b.restartPackets) > 0 || len(b.startupPackets) == 0 || len(b.startupPackets) > mirrorStartupPackets || b.startupBytes > mirrorStartupBytes {
+		return
+	}
+	// The packet payload slices are immutable copies captured by the startup
+	// queue. Retaining a shallow slice copy keeps packet bytes within the same
+	// existing packet and byte bounds without another multi-megabyte copy.
+	b.restartPackets = append([][]byte(nil), b.startupPackets...)
+	b.restartBytes = b.startupBytes
+}
+
+// FFmpeg opens its SDP UDP socket after Cmd.Start returns. Empty UDP datagrams
+// let the connected sender observe an unbound-port error without forwarding
+// private RTP before the reader is ready. Some kernels do not report that error,
+// so also allow a bounded warm-up before delivering the saved opening packets.
+func waitMirrorUDPReader(ctx context.Context, output *net.UDPConn) bool {
+	if output == nil {
+		return false
+	}
+	started := time.Now()
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	refused := false
+	consecutive := 0
+	for {
+		_, err := output.Write(nil)
+		if err != nil {
+			refused = true
+			consecutive = 0
+		} else {
+			consecutive++
+		}
+		if consecutive >= 3 && ((refused && time.Since(started) >= 150*time.Millisecond) || time.Since(started) >= time.Second) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-tick.C:
+		}
+	}
+}
+
+// A short ordered pre-roll contains the sender's first SPS/PPS/IDR while the
+// bridge selects video or audio+video and FFmpeg binds its input. No packet is
+// retained after this generation starts, fails, or ends.
+func (b *mirrorBridge) drainMirrorStartup(ctx context.Context, session, epoch uint64, output *net.UDPConn) {
+	if !waitMirrorUDPReader(ctx, output) {
+		b.mu.Lock()
+		if b.session == session && b.runningSession == session && b.startupEpoch == epoch && !b.startupFailed {
+			b.failMirrorStartupLocked("ffmpeg_input_unready")
+		}
+		b.mu.Unlock()
+		return
+	}
+	for ctx.Err() == nil {
+		b.mu.Lock()
+		if b.session != session || b.runningSession != session || b.startupEpoch != epoch || !b.encoderRunning || b.startupFailed {
+			b.mu.Unlock()
+			return
+		}
+		if time.Since(b.startupStarted) > mirrorStartupLimit {
+			b.failMirrorStartupLocked("video_startup_timeout")
+			b.mu.Unlock()
+			return
+		}
+		if !b.mirrorStartupConfiguredLocked(session) {
+			b.bridgeStage = "awaiting_video_config"
+			b.mu.Unlock()
+		} else if len(b.startupPackets) == 0 {
+			b.startupForwarding = true
+			b.bridgeStage = "awaiting_hls"
+			b.mu.Unlock()
+			return
+		} else {
+			b.retainMirrorRestartPacketsLocked()
+			packet := b.startupPackets[0]
+			written, err := output.Write(packet)
+			if err == nil && written == len(packet) {
+				b.startupPackets[0] = nil
+				b.startupPackets = b.startupPackets[1:]
+				b.startupBytes -= len(packet)
+				incrementMirrorCounter(&b.sessionSummary.status.VideoRTPForwardedPackets)
+			} else {
+				incrementMirrorCounter(&b.sessionSummary.status.VideoRTPForwardFailures)
+				b.bridgeStage = "ffmpeg_input_unready"
+			}
+			b.mu.Unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+}
+
 // AirPlayMirrorSnapshot exposes only fixed state and counters. It reads a
 // bounded local manifest and never returns its contents or any RTP/log data.
 func (b *mirrorBridge) AirPlayMirrorSnapshot(now time.Time) worker.AirPlayMirrorStatus {
@@ -801,6 +983,8 @@ func (b *mirrorBridge) AirPlayMirrorSnapshot(now time.Time) worker.AirPlayMirror
 	stage := b.bridgeStage
 	failureStage := b.failureStage
 	encoderRunning := b.encoderRunning
+	startupForwarding := b.startupForwarding
+	startupFailed := b.startupFailed
 	logs := b.uxplayLogs
 	ffmpegDiagnostics := b.ffmpegDiagnostics
 	ffmpegDiagSession := b.ffmpegDiagSession
@@ -825,12 +1009,22 @@ func (b *mirrorBridge) AirPlayMirrorSnapshot(now time.Time) worker.AirPlayMirror
 		}
 	}
 	status.HLSManifestReady, status.HLSSegmentReady, status.HLSSegmentAgeMS = mirrorHLSReadiness(b.hlsDir, now)
+	if !startupForwarding || startupFailed {
+		status.HLSManifestReady = false
+		status.HLSSegmentReady = false
+		status.HLSSegmentAgeMS = 0
+	}
 	b.recordMirrorHLSReadiness(now, status.HLSManifestReady, status.HLSSegmentReady)
 	status.SessionSummary = b.sessionSummarySnapshot(now)
-	if encoderRunning && status.HLSManifestReady && status.HLSSegmentReady {
+	if encoderRunning && startupForwarding && !startupFailed && status.HLSManifestReady && status.HLSSegmentReady {
 		status.BridgeStage = "hls_ready"
 	} else if status.BridgeStage == "" {
 		status.BridgeStage = "waiting_for_video_rtp"
+	}
+	if status.BridgeStage == "waiting_for_video_rtp" && logs != nil {
+		if upstreamStage := logs.RecentStage(now); upstreamStage != "" {
+			status.BridgeStage = upstreamStage
+		}
 	}
 	if logs != nil {
 		status.DirectVideoRequestCount = logs.DirectVideoRequestCount()
@@ -927,24 +1121,56 @@ func mirrorFileFresh(modTime time.Time, now time.Time) bool {
 }
 
 const directAirPlayVideoRequestPhrase = "ignoring AirPlay video streaming request (use option -hls to activate HLS support)"
+const airPlayAudioServiceStartPhrase = "raop_rtp starting audio"
+const airPlayMirrorServiceStartPhrase = "raop_rtp_mirror starting mirroring"
 
-// airPlayLogDiagnostics counts one fixed, non-mirroring video-route message
-// from UxPlay. It retains only a matcher offset and a saturating counter; app
-// identity cannot be inferred from this message.
+type airPlayLogEvent uint8
+
+const (
+	airPlayLogEventNone airPlayLogEvent = iota
+	airPlayLogEventDirectVideoRequest
+	airPlayLogEventAudioServiceStart
+	airPlayLogEventMirrorServiceStart
+	airPlayLogEventCount
+)
+
+var airPlayLogEventPhrases = [airPlayLogEventCount]string{
+	airPlayLogEventNone:               "",
+	airPlayLogEventDirectVideoRequest: directAirPlayVideoRequestPhrase,
+	airPlayLogEventAudioServiceStart:  airPlayAudioServiceStartPhrase,
+	airPlayLogEventMirrorServiceStart: airPlayMirrorServiceStartPhrase,
+}
+
+// airPlayLogDiagnostics counts UxPlay's fixed direct-route rejection message.
+// In the pinned UxPlay source, raop.c emits it for a request without CSeq that
+// is not a BLE beacon response when HLS support is disabled, before the handler
+// reads the session ID or Host header. The event cannot identify Photos or any
+// other sending app. The audio and mirror service messages identify UxPlay
+// stages only; RTP counters remain the evidence that packets reached the bridge.
+// It retains only matcher offsets, event enums, times, and saturating counts.
 type airPlayLogDiagnostics struct {
 	mu          sync.Mutex
-	matched     int
+	matched     [airPlayLogEventCount]int
+	matching    [airPlayLogEventCount]bool
+	lineStarted bool
 	discardLine bool
-	count       uint8
+	counts      [airPlayLogEventCount]uint8
+	lastEvent   airPlayLogEvent
+	lastEventAt time.Time
 }
 
 func newAirPlayLogDiagnostics() *airPlayLogDiagnostics {
 	return &airPlayLogDiagnostics{}
 }
 
-// Write implements io.Writer for UxPlay stdout. It recognizes only a complete
-// fixed route-warning line. No line, URL, address, pairing value or payload is kept.
+// Write implements io.Writer for UxPlay stdout. The pinned UxPlay logger emits
+// INFO messages verbatim and appends a newline, so only complete exact event
+// lines are counted. No line, URL, address, pairing value or payload is kept.
 func (d *airPlayLogDiagnostics) Write(data []byte) (int, error) {
+	return d.writeAt(data, time.Now())
+}
+
+func (d *airPlayLogDiagnostics) writeAt(data []byte, now time.Time) (int, error) {
 	if d == nil {
 		return len(data), nil
 	}
@@ -952,21 +1178,54 @@ func (d *airPlayLogDiagnostics) Write(data []byte) (int, error) {
 	defer d.mu.Unlock()
 	for _, value := range data {
 		if value == '\n' || value == '\r' {
-			if d.matched == len(directAirPlayVideoRequestPhrase) && d.count < ^uint8(0) {
-				d.count++
+			if !d.discardLine {
+				for event := airPlayLogEventDirectVideoRequest; event < airPlayLogEventCount; event++ {
+					if d.matching[event] && d.matched[event] == len(airPlayLogEventPhrases[event]) {
+						if d.counts[event] < ^uint8(0) {
+							d.counts[event]++
+						}
+						d.lastEvent = event
+						d.lastEventAt = now
+						break
+					}
+				}
 			}
-			d.matched = 0
+			clear(d.matched[:])
+			clear(d.matching[:])
+			d.lineStarted = false
 			d.discardLine = false
 			continue
 		}
 		if d.discardLine {
 			continue
 		}
-		if d.matched < len(directAirPlayVideoRequestPhrase) && value == directAirPlayVideoRequestPhrase[d.matched] {
-			d.matched++
+		if !d.lineStarted {
+			d.lineStarted = true
+			for event := airPlayLogEventDirectVideoRequest; event < airPlayLogEventCount; event++ {
+				phrase := airPlayLogEventPhrases[event]
+				if value == phrase[0] {
+					d.matching[event] = true
+					d.matched[event] = 1
+				}
+			}
 		} else {
-			d.matched = 0
-			d.discardLine = true
+			matchedEvent := false
+			for event := airPlayLogEventDirectVideoRequest; event < airPlayLogEventCount; event++ {
+				if !d.matching[event] {
+					continue
+				}
+				phrase := airPlayLogEventPhrases[event]
+				if d.matched[event] < len(phrase) && value == phrase[d.matched[event]] {
+					d.matched[event]++
+					matchedEvent = true
+				} else {
+					d.matching[event] = false
+					d.matched[event] = 0
+				}
+			}
+			if !matchedEvent {
+				d.discardLine = true
+			}
 		}
 	}
 	return len(data), nil
@@ -978,7 +1237,49 @@ func (d *airPlayLogDiagnostics) DirectVideoRequestCount() uint8 {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.count
+	return d.counts[airPlayLogEventDirectVideoRequest]
+}
+
+func (d *airPlayLogDiagnostics) AudioServiceStartCount() uint8 {
+	return d.eventCount(airPlayLogEventAudioServiceStart)
+}
+
+func (d *airPlayLogDiagnostics) MirrorServiceStartCount() uint8 {
+	return d.eventCount(airPlayLogEventMirrorServiceStart)
+}
+
+func (d *airPlayLogDiagnostics) eventCount(event airPlayLogEvent) uint8 {
+	if d == nil || event >= airPlayLogEventCount {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.counts[event]
+}
+
+func (d *airPlayLogDiagnostics) RecentStage(now time.Time) string {
+	if d == nil {
+		return ""
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.lastEvent == airPlayLogEventNone {
+		return ""
+	}
+	age := now.Sub(d.lastEventAt)
+	if age < 0 || age > mirrorSummaryTTL {
+		return ""
+	}
+	switch d.lastEvent {
+	case airPlayLogEventDirectVideoRequest:
+		return "uxplay_direct_video_route_rejected"
+	case airPlayLogEventAudioServiceStart:
+		return "uxplay_audio_service_started"
+	case airPlayLogEventMirrorServiceStart:
+		return "uxplay_mirror_service_started"
+	default:
+		return ""
+	}
 }
 
 func (b *mirrorBridge) observeAudio(now time.Time, ssrc uint32) bool {
@@ -1129,6 +1430,8 @@ func (b *mirrorBridge) transition(ctx context.Context, mode mirrorMode, session 
 	previousSession := b.runningSession
 	b.mu.Lock()
 	b.activeSession = 0
+	b.prepareMirrorEncoderRestartLocked(time.Now())
+	startupEpoch := b.startupEpoch
 	b.mu.Unlock()
 	if err := b.stopProcess(); err != nil {
 		b.setBridgeStage("ffmpeg_stop_failed", "ffmpeg_stop")
@@ -1143,6 +1446,15 @@ func (b *mirrorBridge) transition(ctx context.Context, mode mirrorMode, session 
 	b.runningMode = noMirror
 	b.mu.Unlock()
 	if mode == noMirror {
+		b.mu.Lock()
+		// The first noMirror transition occurs during the 500 ms mode probe.
+		// Those opening packets carry the sender's only SPS/PPS/IDR and must
+		// survive until the encoder has been selected.
+		if b.session != session || time.Since(b.firstVideo) >= mirrorProbeDelay {
+			b.startupPackets = nil
+			b.startupBytes = 0
+		}
+		b.mu.Unlock()
 		b.setBridgeStage("waiting_for_video_rtp", "")
 		now := time.Now()
 		if b.mirrorSessionExpired(session, now) {
@@ -1189,6 +1501,7 @@ func (b *mirrorBridge) transition(ctx context.Context, mode mirrorMode, session 
 		b.activeSession = session
 	}
 	b.mu.Unlock()
+	go b.drainMirrorStartup(ctx, session, startupEpoch, b.videoOutput)
 	return nil
 }
 

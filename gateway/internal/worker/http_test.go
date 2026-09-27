@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -406,6 +407,97 @@ func TestAirPlayStatusIncludesOnlyTypedMirrorDiagnostics(t *testing.T) {
 	}
 }
 
+type recordedAirPlayAudioRequest struct {
+	kind       AirPlayAudioRequestKind
+	statusCode int
+	duration   time.Duration
+}
+
+type fixedAirPlayAudioDiagnostics struct {
+	mu       sync.Mutex
+	requests []recordedAirPlayAudioRequest
+}
+
+func (d *fixedAirPlayAudioDiagnostics) AirPlayAudioSnapshot(time.Time) AirPlayAudioStatus {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return AirPlayAudioStatus{
+		RTPListenerAvailable:    true,
+		RTPPacketCount:          17,
+		HLSPlaylistRequestCount: uint64(len(d.requests)),
+		HLSSegmentMissCount:     1,
+	}
+}
+
+func (d *fixedAirPlayAudioDiagnostics) RecordAirPlayHLSRequest(kind AirPlayAudioRequestKind, statusCode int, duration time.Duration, _ time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.requests = append(d.requests, recordedAirPlayAudioRequest{kind: kind, statusCode: statusCode, duration: duration})
+}
+
+func TestAirPlayAudioDiagnosticsRecordOnlyAllowlistedHLSRequests(t *testing.T) {
+	dir := t.TempDir()
+	hlsDir := filepath.Join(dir, "hls")
+	if err := os.MkdirAll(hlsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hlsDir, "audio.m3u8"), []byte("#EXTM3U\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := Config{Mode: "airplay", Token: strings.Repeat("t", 32), StateDir: dir, Pin: "0427"}
+	diagnostics := &fixedAirPlayAudioDiagnostics{}
+	handler := HandlerWithAirPlayAudioDiagnostics(context.Background(), config, NewAirPlayProgress(), nil, diagnostics)
+	request := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+config.Token)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if response := request("/stream/audio.m3u8"); response.Code != http.StatusOK {
+		t.Fatalf("playlist response status = %d: %s", response.Code, response.Body.String())
+	}
+	if response := request("/stream/audio42.ts"); response.Code != http.StatusNotFound {
+		t.Fatalf("missing audio segment response status = %d", response.Code)
+	}
+	if response := request("/stream/segment42.ts"); response.Code != http.StatusNotFound {
+		t.Fatalf("missing video segment response status = %d", response.Code)
+	}
+	statusResponse := request("/status")
+	if statusResponse.Code != http.StatusOK {
+		t.Fatalf("status response = %d: %s", statusResponse.Code, statusResponse.Body.String())
+	}
+	var status map[string]json.RawMessage
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	var audioStatus AirPlayAudioStatus
+	if err := json.Unmarshal(status["audioDiagnostics"], &audioStatus); err != nil {
+		t.Fatalf("audio diagnostics missing or invalid: %v (%s)", err, statusResponse.Body.String())
+	}
+	if !audioStatus.RTPListenerAvailable || audioStatus.RTPPacketCount != 17 {
+		t.Fatalf("sanitized audio snapshot missing from status: %+v", audioStatus)
+	}
+
+	diagnostics.mu.Lock()
+	requests := append([]recordedAirPlayAudioRequest(nil), diagnostics.requests...)
+	diagnostics.mu.Unlock()
+	if len(requests) != 2 || requests[0].kind != AirPlayAudioPlaylistRequest || requests[0].statusCode != http.StatusOK || requests[1].kind != AirPlayAudioSegmentRequest || requests[1].statusCode != http.StatusNotFound {
+		t.Fatalf("unexpected audio HLS request records: %+v", requests)
+	}
+	for _, recorded := range requests {
+		if recorded.duration < 0 || recorded.duration > 30*time.Second {
+			t.Fatalf("request timing was not bounded: %+v", recorded)
+		}
+	}
+	for _, private := range []string{"audio42.ts", "segment42.ts", "Authorization", "never-store-this", "payload", "ssrc", "sender"} {
+		if strings.Contains(statusResponse.Body.String(), private) {
+			t.Fatalf("private request or RTP detail %q appeared in /status: %s", private, statusResponse.Body.String())
+		}
+	}
+}
+
 func TestAirplayStatusAndArtworkClearWhenStreamBecomesIdle(t *testing.T) {
 	dir := t.TempDir()
 	hlsDir := filepath.Join(dir, "hls")
@@ -516,8 +608,12 @@ func TestAirplayStatusReturnsOnlyOpaqueConnectionEvidence(t *testing.T) {
 	if err := json.Unmarshal(status["connectionRevision"], &revision); err != nil || len(revision) != 16 {
 		t.Fatalf("opaque revision missing or unbounded: %s", w.Body.Bytes())
 	}
-	if len(status) != 7 {
+	if len(status) != 8 {
 		t.Fatalf("unexpected private status fields: %s", w.Body.Bytes())
+	}
+	var artworkDiagnostics AirPlayArtworkDiagnosticStatus
+	if err := json.Unmarshal(status["artworkDiagnostics"], &artworkDiagnostics); err != nil || artworkDiagnostics.Stage != "waiting_for_candidate" {
+		t.Fatalf("bounded artwork stage missing: %+v (%v)", artworkDiagnostics, err)
 	}
 	var artworkRevision string
 	if err := json.Unmarshal(status["artworkRevision"], &artworkRevision); err != nil || artworkRevision != "" {

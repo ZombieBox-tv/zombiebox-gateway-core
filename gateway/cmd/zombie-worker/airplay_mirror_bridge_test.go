@@ -127,6 +127,7 @@ func TestMirrorSessionSummaryRetainsOnlyARecentSanitizedGeneration(t *testing.T)
 	b.mu.Lock()
 	b.runningSession = 1
 	b.encoderRunning = true
+	b.startupForwarding = true
 	b.mu.Unlock()
 	b.recordMirrorMode(1, audioVideoMirror)
 	b.recordMirrorFFmpegStart(1, mirrorFFmpegStartStarted)
@@ -235,6 +236,7 @@ func TestMirrorDiagnosticsReportHLSReadinessWithoutContents(t *testing.T) {
 	b.mu.Lock()
 	b.runningSession = 1
 	b.encoderRunning = true
+	b.startupForwarding = true
 	b.mu.Unlock()
 	status := b.AirPlayMirrorSnapshot(start)
 	if !status.HLSManifestReady || !status.HLSSegmentReady || status.HLSSegmentAgeMS < 0 || status.BridgeStage != "hls_ready" {
@@ -285,7 +287,7 @@ func TestMirrorDiagnosticsRecordSanitizedEncoderFailureStage(t *testing.T) {
 	}
 }
 
-func TestAirPlayLogDiagnosticsMatchOnlyFixedDirectVideoWarning(t *testing.T) {
+func TestAirPlayLogDiagnosticsMatchOnlyFixedDirectRouteLine(t *testing.T) {
 	diagnostics := newAirPlayLogDiagnostics()
 	secret := "Authorization: Bearer never-store-this\n"
 	phrase := []byte(directAirPlayVideoRequestPhrase)
@@ -298,8 +300,13 @@ func TestAirPlayLogDiagnosticsMatchOnlyFixedDirectVideoWarning(t *testing.T) {
 	if got := diagnostics.DirectVideoRequestCount(); got != 1 {
 		t.Fatalf("direct-video count = %d, want 1", got)
 	}
-	if diagnostics.matched != 0 || diagnostics.discardLine {
-		t.Fatal("log parser retained source text instead of bounded matcher state")
+	if diagnostics.lineStarted || diagnostics.discardLine {
+		t.Fatal("log parser retained an incomplete line instead of bounded matcher state")
+	}
+	for event := airPlayLogEventDirectVideoRequest; event < airPlayLogEventCount; event++ {
+		if diagnostics.matched[event] != 0 || diagnostics.matching[event] {
+			t.Fatal("log parser retained source text instead of bounded matcher state")
+		}
 	}
 	_, _ = diagnostics.Write(append([]byte("prefix "), append(phrase, '\n')...))
 	_, _ = diagnostics.Write(append([]byte("*** WARNING: "), append(phrase, '\n')...))
@@ -311,6 +318,91 @@ func TestAirPlayLogDiagnosticsMatchOnlyFixedDirectVideoWarning(t *testing.T) {
 	}
 	if got := diagnostics.DirectVideoRequestCount(); got != ^uint8(0) {
 		t.Fatalf("counter did not saturate: %d", got)
+	}
+}
+
+func TestAirPlayLogDiagnosticsCountExactServiceStagesAndExpireStage(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	diagnostics := newAirPlayLogDiagnostics()
+	if _, err := diagnostics.writeAt([]byte(airPlayAudioServiceStartPhrase+"\n"), start); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics.AudioServiceStartCount() != 1 || diagnostics.MirrorServiceStartCount() != 0 ||
+		diagnostics.RecentStage(start) != "uxplay_audio_service_started" {
+		t.Fatal("fixed RAOP audio service event was not counted as a sanitized stage")
+	}
+	_, _ = diagnostics.writeAt([]byte("prefix "+airPlayMirrorServiceStartPhrase+"\n"), start.Add(time.Second))
+	if diagnostics.MirrorServiceStartCount() != 0 {
+		t.Fatal("prefixed text was counted as an exact UxPlay event")
+	}
+	_, _ = diagnostics.writeAt([]byte(airPlayMirrorServiceStartPhrase+"\n"), start.Add(2*time.Second))
+	if diagnostics.MirrorServiceStartCount() != 1 || diagnostics.RecentStage(start.Add(2*time.Second)) != "uxplay_mirror_service_started" {
+		t.Fatal("fixed RAOP mirror service event was not counted as a sanitized stage")
+	}
+	if got := diagnostics.RecentStage(start.Add(2*time.Second + mirrorSummaryTTL + time.Millisecond)); got != "" {
+		t.Fatalf("expired UxPlay stage remained current: %q", got)
+	}
+}
+
+func TestDirectRouteEventStaysSeparateFromGenerationFencedRTP(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	b := &mirrorBridge{hlsDir: t.TempDir(), uxplayLogs: newAirPlayLogDiagnostics()}
+	_, _ = b.uxplayLogs.writeAt([]byte(directAirPlayVideoRequestPhrase+"\n"), start.Add(50*time.Millisecond))
+
+	// A direct-route request can be observed without any mirrored RTP or an
+	// active mirror session. Audio RTP by itself cannot create a mirror session.
+	if result := b.observeAudioIngress(start.Add(100*time.Millisecond), 33); result.accepted {
+		t.Fatal("audio without a video session was accepted as mirrored media")
+	}
+	directOnly := b.AirPlayMirrorSnapshot(start.Add(200 * time.Millisecond))
+	if directOnly.DirectVideoRequestCount != 1 || directOnly.VideoRTPPacketCount != 0 ||
+		directOnly.Mode != "idle" || directOnly.BridgeStage != "uxplay_direct_video_route_rejected" ||
+		directOnly.PhotoAppAttributionAvailable || directOnly.SessionSummary.Available {
+		t.Fatalf("direct-route evidence was conflated with RTP or app attribution: %+v", directOnly)
+	}
+	_, _ = b.uxplayLogs.writeAt([]byte(airPlayAudioServiceStartPhrase+"\n"), start.Add(250*time.Millisecond))
+	audioOnlyCandidate := b.AirPlayMirrorSnapshot(start.Add(275 * time.Millisecond))
+	if audioOnlyCandidate.Mode != "idle" || audioOnlyCandidate.VideoRTPPacketCount != 0 ||
+		audioOnlyCandidate.BridgeStage != "uxplay_audio_service_started" || audioOnlyCandidate.SessionSummary.Available {
+		t.Fatalf("audio service without mirror RTP was not separately represented: %+v", audioOnlyCandidate)
+	}
+	_, _ = b.uxplayLogs.writeAt([]byte(airPlayMirrorServiceStartPhrase+"\n"), start.Add(280*time.Millisecond))
+	mirrorService := b.AirPlayMirrorSnapshot(start.Add(290 * time.Millisecond))
+	if mirrorService.BridgeStage != "uxplay_mirror_service_started" || mirrorService.VideoRTPPacketCount != 0 {
+		t.Fatalf("mirror service start was conflated with delivered video RTP: %+v", mirrorService)
+	}
+
+	firstVideoAt := start.Add(300 * time.Millisecond)
+	b.observeVideoIngress(firstVideoAt, 71, 10, 90_000, []byte{0x65, 0x01}, true)
+	if status := b.AirPlayMirrorSnapshot(firstVideoAt); status.BridgeStage != "probing_video_input" || status.VideoRTPPacketCount != 1 {
+		t.Fatalf("actual video RTP did not supersede the upstream service stage: %+v", status)
+	}
+	if mode, generation := b.desired(firstVideoAt.Add(mirrorProbeDelay)); mode != videoMirror || generation != 1 {
+		t.Fatalf("video-only RTP did not select its own mode: mode=%v generation=%d", mode, generation)
+	}
+	if result := b.observeAudioIngress(firstVideoAt.Add(time.Second), 41); !result.accepted || result.generation != 1 {
+		t.Fatalf("audio RTP did not attach to current video generation: %+v", result)
+	}
+	if mode, generation := b.desired(firstVideoAt.Add(time.Second)); mode != audioVideoMirror || generation != 1 {
+		t.Fatalf("accepted audio was not distinguishable from video-only RTP: mode=%v generation=%d", mode, generation)
+	}
+	firstSummary := b.sessionSummarySnapshot(firstVideoAt.Add(time.Second))
+	if firstSummary.Generation != 1 || firstSummary.VideoRTPAcceptedPackets != 1 || firstSummary.AudioRTPAcceptedPackets != 1 {
+		t.Fatalf("first generation did not retain separate video/audio evidence: %+v", firstSummary)
+	}
+
+	// A new video sender creates a new evidence generation. The process-level
+	// direct-route count persists, while the new session starts with fresh RTP
+	// counters and cannot inherit the previous generation's audio.
+	secondVideoAt := firstVideoAt.Add(2 * time.Second)
+	b.observeVideoIngress(secondVideoAt, 72, 1, 90_000, []byte{0x65, 0x01}, true)
+	secondSummary := b.sessionSummarySnapshot(secondVideoAt)
+	status := b.AirPlayMirrorSnapshot(secondVideoAt)
+	if secondSummary.Generation != 2 || secondSummary.VideoRTPAcceptedPackets != 1 || secondSummary.AudioRTPAcceptedPackets != 0 {
+		t.Fatalf("RTP evidence crossed the generation fence: %+v", secondSummary)
+	}
+	if status.DirectVideoRequestCount != 1 || status.PhotoAppAttributionAvailable {
+		t.Fatalf("process-level route evidence reset or implied app identity: %+v", status)
 	}
 }
 
@@ -505,8 +597,8 @@ func TestMirrorForwardCountersAreBoundedAndGenerationFenced(t *testing.T) {
 	first := b.observeVideoIngress(start, 71, 1, 90_000, []byte{0x65}, false)
 	b.forwardMirrorPacket(first.generation, true, output, packet)
 	initial := b.sessionSummarySnapshot(start)
-	if initial.VideoRTPAcceptedPackets != 1 || initial.VideoRTPInactiveDrops != 1 || initial.VideoRTPForwardedPackets != 0 {
-		t.Fatalf("pre-encoder drop was not classified: %+v", initial)
+	if initial.VideoRTPAcceptedPackets != 1 || initial.VideoRTPInactiveDrops != 0 || initial.VideoRTPForwardedPackets != 0 || len(b.startupPackets) != 1 {
+		t.Fatalf("pre-encoder packet was not buffered: %+v", initial)
 	}
 
 	b.mu.Lock()
@@ -514,6 +606,9 @@ func TestMirrorForwardCountersAreBoundedAndGenerationFenced(t *testing.T) {
 	b.runningSession = first.generation
 	b.runningMode = videoMirror
 	b.encoderRunning = true
+	b.startupPackets = nil
+	b.startupBytes = 0
+	b.startupForwarding = true
 	b.mu.Unlock()
 	b.forwardMirrorPacket(first.generation, true, output, packet)
 	_ = receiver.SetReadDeadline(time.Now().Add(time.Second))
@@ -542,8 +637,205 @@ func TestMirrorForwardCountersAreBoundedAndGenerationFenced(t *testing.T) {
 	b.forwardMirrorPacket(first.generation, true, output, packet)
 	b.forwardMirrorPacket(second.generation, true, output, packet)
 	reset := b.sessionSummarySnapshot(start.Add(1100 * time.Millisecond))
-	if reset.VideoRTPAcceptedPackets != 1 || reset.VideoRTPInactiveDrops != 1 || reset.VideoRTPForwardedPackets != 0 || reset.VideoRTPForwardFailures != 0 || reset.AudioRTPAcceptedPackets != 0 {
+	if reset.VideoRTPAcceptedPackets != 1 || reset.VideoRTPInactiveDrops != 0 || reset.VideoRTPForwardedPackets != 0 || reset.VideoRTPForwardFailures != 0 || reset.AudioRTPAcceptedPackets != 0 || len(b.startupPackets) != 1 {
 		t.Fatalf("old session counters leaked across the generation fence: %+v", reset)
+	}
+}
+
+func TestMirrorWaitsForDelayedUDPReader(t *testing.T) {
+	port := freeMirrorUDPPort(t)
+	output, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	b := &mirrorBridge{runningSession: 1, runningMode: videoMirror, encoderRunning: true, startupStarted: time.Now()}
+	packets := make([][]byte, 3)
+	for i, nal := range []byte{0x67, 0x68, 0x65} {
+		packet := []byte{0x80, 0x80 | 96, 0, byte(i + 1), 0, 0, 0, byte(i + 1), 0, 0, 0, 71, nal}
+		packets[i] = packet
+		observed := b.observeVideoIngress(time.Now(), 71, uint16(i+1), uint32((i+1)*3000), packet[12:], true)
+		b.forwardMirrorPacket(observed.generation, true, output, packet)
+	}
+	if !b.mirrorStartupConfiguredLocked(1) || len(b.startupPackets) != len(packets) {
+		t.Fatal("complete one-shot SPS/PPS/IDR was not retained before FFmpeg start")
+	}
+	readerReady := make(chan *net.UDPConn, 1)
+	go func() {
+		time.Sleep(450 * time.Millisecond)
+		reader, bindErr := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		if bindErr != nil {
+			readerReady <- nil
+			return
+		}
+		readerReady <- reader
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	started := time.Now()
+	finished := make(chan struct{})
+	go func() {
+		b.drainMirrorStartup(ctx, 1, b.startupEpoch, output)
+		close(finished)
+	}()
+	reader := <-readerReady
+	if reader == nil {
+		t.Fatal("delayed UDP reader failed to bind")
+	}
+	defer reader.Close()
+	for _, wanted := range packets {
+		buffer := make([]byte, 64)
+		for {
+			_ = reader.SetReadDeadline(time.Now().Add(time.Second))
+			n, _, readErr := reader.ReadFromUDP(buffer)
+			if readErr != nil {
+				t.Fatalf("delayed reader missed ordered RTP pre-roll: %v", readErr)
+			}
+			if n == 0 {
+				continue // Readiness probes carry no RTP or media.
+			}
+			if string(buffer[:n]) != string(wanted) {
+				t.Fatal("RTP pre-roll changed payload or packet order")
+			}
+			break
+		}
+	}
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		t.Fatal("startup drain did not finish")
+	}
+	if time.Since(started) < 450*time.Millisecond || !b.startupForwarding || len(b.startupPackets) != 0 || b.sessionSummary.status.VideoRTPForwardedPackets != 3 {
+		t.Fatal("startup packets were not forwarded after delayed reader bind")
+	}
+}
+
+func TestMirrorModeRestartReplaysCachedDecoderBootstrap(t *testing.T) {
+	b := &mirrorBridge{}
+	var generation uint64
+	opening := make([][]byte, 3)
+	for index, nal := range []byte{0x67, 0x68, 0x65} {
+		packet := []byte{0x80, 96, 0, byte(index + 1), 0, 0, byte(index + 1), byte(index + 1), 0, 0, 0, 71, nal, 0x01}
+		opening[index] = packet
+		result := b.observeVideoIngress(time.Now(), 71, uint16(index+1), uint32(90_000+index*3_000), packet[12:], true)
+		generation = result.generation
+		b.forwardMirrorPacket(generation, true, nil, packet)
+	}
+	if !b.mirrorStartupConfiguredLocked(generation) {
+		t.Fatal("initial source generation did not record SPS/PPS/IDR")
+	}
+	if len(b.startupPackets) != len(opening) {
+		t.Fatal("opening decoder bootstrap was not buffered")
+	}
+
+	b.mu.Lock()
+	b.runningSession = generation
+	b.runningMode = videoMirror
+	b.encoderRunning = true
+	b.retainMirrorRestartPacketsLocked()
+	if len(b.restartPackets) != len(opening) {
+		b.mu.Unlock()
+		t.Fatal("opening decoder bootstrap was not retained for same-generation restarts")
+	}
+	b.startupPackets = nil
+	b.startupBytes = 0
+	b.startupForwarding = true
+	restartAt := time.Now()
+	b.startupStarted = restartAt.Add(-mirrorStartupLimit - time.Second)
+	b.prepareMirrorEncoderRestartLocked(restartAt)
+	epoch := b.startupEpoch
+	b.mu.Unlock()
+	if !b.mirrorStartupConfiguredLocked(generation) {
+		t.Fatal("same-generation FFmpeg restart discarded observed SPS/PPS/IDR")
+	}
+	if !b.startupStarted.Equal(restartAt) {
+		t.Fatal("same-generation FFmpeg restart did not reset the bounded pre-roll timer")
+	}
+	if len(b.startupPackets) != len(opening) {
+		t.Fatalf("restart pre-roll has %d packets, want %d cached SPS/PPS/IDR packets", len(b.startupPackets), len(opening))
+	}
+
+	receiver, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	output, err := net.DialUDP("udp4", nil, receiver.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+
+	packet := []byte{0x80, 0x60, 0, 4, 0, 0, 0, 4, 0, 0, 0, 71, 0x41, 0x01}
+	result := b.observeVideoIngress(time.Now(), 71, 4, 99_000, packet[12:], true)
+	b.forwardMirrorPacket(result.generation, true, output, packet)
+	if len(b.startupPackets) != len(opening)+1 || b.startupFailed {
+		t.Fatal("same-generation mode restart did not retain bounded pre-roll")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	drained := make(chan struct{})
+	go func() {
+		b.drainMirrorStartup(ctx, generation, epoch, output)
+		close(drained)
+	}()
+	_ = receiver.SetReadDeadline(time.Now().Add(2500 * time.Millisecond))
+	wantedPackets := append(append([][]byte(nil), opening...), packet)
+	for _, wanted := range wantedPackets {
+		buffer := make([]byte, len(wanted)+8)
+		for {
+			n, _, readErr := receiver.ReadFromUDP(buffer)
+			if readErr != nil {
+				t.Fatalf("mode restart did not replay the cached decoder bootstrap in order: %v", readErr)
+			}
+			if n == 0 {
+				continue // UDP reader readiness probes carry no media.
+			}
+			if string(buffer[:n]) != string(wanted) {
+				t.Fatal("mode restart changed or reordered the RTP decoder bootstrap")
+			}
+			break
+		}
+	}
+	select {
+	case <-drained:
+	case <-ctx.Done():
+		t.Fatal("same-generation startup drain did not finish")
+	}
+	if !b.startupForwarding || b.startupFailed || len(b.startupPackets) != 0 || b.sessionSummary.status.VideoRTPForwardedPackets != uint64(len(wantedPackets)) {
+		t.Fatal("mode restart did not resume forwarding after replaying the cached decoder bootstrap")
+	}
+}
+
+func TestMirrorStartupFailsWithoutCompleteIDR(t *testing.T) {
+	dir := t.TempDir()
+	manifest := "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nsegment7.ts\n"
+	if err := os.WriteFile(filepath.Join(dir, "index.m3u8"), []byte(manifest), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "segment7.ts"), make([]byte, 4096), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b := &mirrorBridge{hlsDir: dir}
+	packet := []byte{0x80, 96, 0, 1, 0, 0, 0, 1, 0, 0, 0, 71, 0x67}
+	observed := b.observeVideoIngress(time.Now(), 71, 1, 90_000, packet[12:], true)
+	b.runningSession = observed.generation
+	b.runningMode = videoMirror
+	b.encoderRunning = true
+	b.forwardMirrorPacket(observed.generation, true, nil, packet)
+	if b.mirrorStartupConfiguredLocked(observed.generation) {
+		t.Fatal("SPS alone is not a complete decoder startup")
+	}
+	b.startupStarted = time.Now().Add(-mirrorStartupLimit - time.Millisecond)
+	b.forwardMirrorPacket(observed.generation, true, nil, packet)
+	status := b.sessionSummarySnapshot(time.Now())
+	if !b.startupFailed || b.startupForwarding || len(b.startupPackets) != 0 || b.bridgeStage != "startup_buffer_limit" || status.FailureClass != "video_startup" {
+		t.Fatalf("incomplete startup did not fail safely: %+v", status)
+	}
+	ready := b.AirPlayMirrorSnapshot(time.Now())
+	if ready.HLSManifestReady || ready.HLSSegmentReady || ready.BridgeStage == "hls_ready" {
+		t.Fatalf("failed startup exposed stale HLS as ready: %+v", ready)
 	}
 }
 
@@ -612,12 +904,16 @@ func TestMirrorBridgeSyntheticRTP(t *testing.T) {
 	if err != nil {
 		t.Skip("ffprobe unavailable")
 	}
-	for _, withAudio := range []bool{false, true} {
-		name := "video_only"
-		if withAudio {
-			name = "video_and_audio"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, trial := range []struct {
+		name       string
+		withAudio  bool
+		oneShotIDR bool
+	}{
+		{name: "video_only"},
+		{name: "video_and_audio", withAudio: true},
+		{name: "one_shot_idr", oneShotIDR: true},
+	} {
+		t.Run(trial.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 16*time.Second)
 			defer cancel()
 			stateDir := t.TempDir()
@@ -632,12 +928,16 @@ func TestMirrorBridgeSyntheticRTP(t *testing.T) {
 			}
 			bridgeDone := make(chan error, 1)
 			go func() { bridgeDone <- b.run(ctx) }()
-			videoSender := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=15", "-t", "9", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "15", "-payload_type", "96", "-f", "rtp", "rtp://127.0.0.1:"+strconv.Itoa(ports.videoIn))
+			keyframeInterval := "15"
+			if trial.oneShotIDR {
+				keyframeInterval = "300"
+			}
+			videoSender := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=15", "-t", "9", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", keyframeInterval, "-keyint_min", keyframeInterval, "-sc_threshold", "0", "-payload_type", "96", "-f", "rtp", "rtp://127.0.0.1:"+strconv.Itoa(ports.videoIn))
 			if err := videoSender.Start(); err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = videoSender.Process.Kill(); _ = videoSender.Wait() }()
-			if withAudio {
+			if trial.withAudio {
 				audioSender := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "9", "-ac", "2", "-c:a", "pcm_s16be", "-payload_type", "97", "-f", "rtp", "rtp://127.0.0.1:"+strconv.Itoa(ports.audioIn))
 				if err := audioSender.Start(); err != nil {
 					t.Fatal(err)
@@ -645,7 +945,7 @@ func TestMirrorBridgeSyntheticRTP(t *testing.T) {
 				defer func() { _ = audioSender.Process.Kill(); _ = audioSender.Wait() }()
 			}
 			wanted := "video"
-			if withAudio {
+			if trial.withAudio {
 				wanted = "audio"
 			}
 			deadline := time.After(12 * time.Second)
@@ -654,7 +954,7 @@ func TestMirrorBridgeSyntheticRTP(t *testing.T) {
 				case err := <-bridgeDone:
 					t.Fatalf("bridge stopped before HLS output: %v", err)
 				case <-deadline:
-					t.Fatal("no playable HLS segment from synthetic RTP")
+					t.Fatalf("no playable HLS segment from synthetic RTP: %+v", b.AirPlayMirrorSnapshot(time.Now()))
 				case <-time.After(250 * time.Millisecond):
 				}
 				manifest, err := os.ReadFile(filepath.Join(hlsDir, "index.m3u8"))
@@ -707,33 +1007,36 @@ func TestMirrorBridgeSyntheticAudioTransition(t *testing.T) {
 	}
 	bridgeDone := make(chan error, 1)
 	go func() { bridgeDone <- b.run(ctx) }()
-	videoSender := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=15", "-t", "19", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "15", "-payload_type", "96", "-f", "rtp", "rtp://127.0.0.1:"+strconv.Itoa(ports.videoIn))
+	// The sender emits only the initial IDR during this 19-second fixture.
+	// This makes both FFmpeg mode changes depend on the bridge replaying real
+	// decoder setup, rather than on the sender's next periodic keyframe.
+	videoSender := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=15", "-t", "19", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "300", "-keyint_min", "300", "-sc_threshold", "0", "-payload_type", "96", "-f", "rtp", "rtp://127.0.0.1:"+strconv.Itoa(ports.videoIn))
 	if err := videoSender.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = videoSender.Process.Kill(); _ = videoSender.Wait() }()
-	waitMirrorSegment(t, ctx, bridgeDone, hlsDir, ffprobe, false, "")
+	waitMirrorSegment(t, ctx, bridgeDone, b, hlsDir, ffprobe, false, "")
 	audioSender := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "3", "-ac", "2", "-c:a", "pcm_s16be", "-payload_type", "97", "-f", "rtp", "rtp://127.0.0.1:"+strconv.Itoa(ports.audioIn))
 	if err := audioSender.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = audioSender.Process.Kill(); _ = audioSender.Wait() }()
-	avSegment := waitMirrorSegment(t, ctx, bridgeDone, hlsDir, ffprobe, true, "")
-	waitMirrorSegment(t, ctx, bridgeDone, hlsDir, ffprobe, false, avSegment)
+	avSegment := waitMirrorSegment(t, ctx, bridgeDone, b, hlsDir, ffprobe, true, "")
+	waitMirrorSegment(t, ctx, bridgeDone, b, hlsDir, ffprobe, false, avSegment)
 	cancel()
 	if err := <-bridgeDone; err != nil {
 		t.Fatal(err)
 	}
 }
 
-func waitMirrorSegment(t *testing.T, ctx context.Context, bridgeDone <-chan error, hlsDir, ffprobe string, wantAudio bool, afterSegment string) string {
+func waitMirrorSegment(t *testing.T, ctx context.Context, bridgeDone <-chan error, bridge *mirrorBridge, hlsDir, ffprobe string, wantAudio bool, afterSegment string) string {
 	t.Helper()
 	for {
 		select {
 		case err := <-bridgeDone:
 			t.Fatalf("bridge stopped during transition: %v", err)
 		case <-ctx.Done():
-			t.Fatalf("timed out waiting for audio=%v after %s", wantAudio, afterSegment)
+			t.Fatalf("timed out waiting for audio=%v after %s: %+v", wantAudio, afterSegment, bridge.AirPlayMirrorSnapshot(time.Now()))
 		case <-time.After(200 * time.Millisecond):
 		}
 		manifest, err := os.ReadFile(filepath.Join(hlsDir, "index.m3u8"))
