@@ -1,6 +1,7 @@
 package playback
 
 import (
+	"strings"
 	"time"
 
 	"zombiebox.local/gateway/internal/devices"
@@ -24,6 +25,38 @@ var standardTiers = []QualityTier{
 	{ID: "360p", Label: "360p", Height: 360, Width: 640, Bitrate: 1000000},
 	{ID: "240p", Label: "240p", Height: 240, Width: 426, Bitrate: 400000},
 	{ID: "144p", Label: "144p", Height: 144, Width: 256, Bitrate: 200000},
+}
+
+// classifyDimensionsTier maps raw width/height to the highest standard 16:9 tier
+// they fully reach, using integer/rational comparison (no premature rounding).
+// Real height governs tall/portrait sources; real width recovers the nominal
+// 16:9 height for panoramic/letterboxed sources (e.g. 1920x804 -> 1080p).
+func classifyDimensionsTier(width, height int) string {
+	if height <= 0 {
+		return ""
+	}
+	heightX16 := height * 16
+	widthX9 := width * 9
+	effectiveX16 := heightX16
+	if widthX9 > effectiveX16 {
+		effectiveX16 = widthX9
+	}
+	switch {
+	case effectiveX16 >= 1080*16:
+		return "1080p"
+	case effectiveX16 >= 720*16:
+		return "720p"
+	case effectiveX16 >= 480*16:
+		return "480p"
+	default:
+		return "360p"
+	}
+}
+
+// ClassifyDimensionsTier exposes the nominal standard tier implied by the real
+// width/height so YouTube split-tier checks can compare against the same policy.
+func ClassifyDimensionsTier(width, height int) string {
+	return classifyDimensionsTier(width, height)
 }
 
 func findTier(id string) *QualityTier {
@@ -171,17 +204,7 @@ func isNativeDirectPlayVerified(metadata domain.Metadata, source domain.Source, 
 	}
 
 	if videoStream.Codec == "h264" {
-		tierID := ""
-		switch {
-		case videoStream.Height > 720:
-			tierID = "1080p"
-		case videoStream.Height > 480:
-			tierID = "720p"
-		case videoStream.Height > 360:
-			tierID = "480p"
-		default:
-			tierID = "360p"
-		}
+		tierID := classifyDimensionsTier(videoStream.Width, videoStream.Height)
 		return canDecodeH264Tier(caps, tierID, device, now)
 	}
 
@@ -367,6 +390,41 @@ func HasQuality(inventory domain.QualityInventory, qualityID string) bool {
 	return false
 }
 
+func youtubeKnownLengthRemuxEligible(device domain.Device, source domain.Source, now time.Time) bool {
+	if source.Item.Provider != "youtube" || source.Item.Kind != "video" || source.Live || source.Path != "" || source.URL == "" || source.AudioURL == "" {
+		return false
+	}
+	caps := currentCaps(device)
+	if caps.SuiteVersion != devices.ProbeSuiteVersion || caps.DeviceID != device.ID || caps.CacheKey == "" || caps.CacheKey != devices.ProbeCacheKey(device) {
+		return false
+	}
+	if !isProbePassing(caps, "http-fmp4", now.Unix()) || !isProbePassing(caps, "aac", now.Unix()) {
+		return false
+	}
+	if !isProbePassing(caps, "h264-1080-high", now.Unix()) && !isProbePassing(caps, "h264-2160-high", now.Unix()) {
+		return false
+	}
+	for index := range caps.Probes {
+		probe := &caps.Probes[index]
+		if probe.ID != "http-fmp4-chunked" {
+			continue
+		}
+		if probe.TestedAt <= 0 || probe.TestedAt <= now.Unix()-7*24*60*60 || probe.TestedAt > now.Unix()+300 {
+			continue
+		}
+		if probe.Status == "PASS" || probe.Stalled {
+			return false
+		}
+		if probe.Status == "FAIL" {
+			return true
+		}
+		if probe.Status == "UNKNOWN" && strings.Contains(strings.ToLower(probe.Detail), "@prepare") && strings.Contains(strings.ToLower(probe.Detail), "what=0") {
+			return true
+		}
+	}
+	return false
+}
+
 func RequiresTranscodeForQuality(metadata domain.Metadata, qualityID string) bool {
 	if qualityID == "" || qualityID == "auto" {
 		return false
@@ -404,16 +462,7 @@ func SelectedQualityMode(metadata domain.Metadata, source domain.Source, device 
 			tierID := ""
 			videoStream := findVideoStream(metadata.Streams)
 			if videoStream != nil {
-				switch {
-				case videoStream.Height > 720:
-					tierID = "1080p"
-				case videoStream.Height > 480:
-					tierID = "720p"
-				case videoStream.Height > 360:
-					tierID = "480p"
-				default:
-					tierID = "360p"
-				}
+				tierID = classifyDimensionsTier(videoStream.Width, videoStream.Height)
 			}
 			if tierID != "" && canDecodeH264Tier(caps, tierID, device, time.Now().Unix()) && isProbePassing(caps, "http-fmp4", time.Now().Unix()) {
 				return "REMUX", ""
@@ -451,13 +500,19 @@ func SelectedQualityMode(metadata domain.Metadata, source domain.Source, device 
 	}
 
 	// For separate audio and video streams (e.g. YouTube adaptive):
-	// DIRECT_PLAY -> REMUX -> TRANSCODE
+	// DIRECT_PLAY -> REMUX -> TRANSCODE. Preserve the legacy behavior for
+	// ordinary split-tier requests, but allow the known-length REMUX fallback to
+	// be evaluated before a nonzero position forces TRANSCODE. This keeps the
+	// default 720p semantics unchanged while still enabling the narrow 804p/known-
+	// length recovery path.
 	if source.AudioURL != "" {
+		if tier != nil && canDecodeH264Tier(caps, tier.ID, device, time.Now().Unix()) && isProbePassing(caps, "http-fmp4", time.Now().Unix()) {
+			if positionMS == 0 || (source.Item.Provider == "youtube" && youtubeKnownLengthRemuxEligible(device, source, time.Now())) {
+				return "REMUX", norm
+			}
+		}
 		if positionMS > 0 {
 			return "TRANSCODE", norm
-		}
-		if tier != nil && canDecodeH264Tier(caps, tier.ID, device, time.Now().Unix()) && isProbePassing(caps, "http-fmp4", time.Now().Unix()) {
-			return "REMUX", norm
 		}
 	}
 

@@ -841,3 +841,46 @@ class ResolverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DimensionAwareManualQualityTests(ResolverTests):
+    """Manual actual-quality validation must agree with format_tier's nominal class."""
+
+    def panoramic_1080_format(self, itag=137):
+        fmt = self.combined_format(804, itag)
+        fmt["width"] = 1920
+        return fmt
+
+    def test_manual_1080p_accepts_panoramic_804_height(self):
+        def default_extractor(video_id, timeout_seconds):
+            return {"formats": [self.panoramic_1080_format()]}
+
+        result = resolve_video(
+            "dQw4w9WgXcQ",
+            "1080p",
+            self.config,
+            self.cooldown_tracker,
+            extractor_func=lambda *a, **k: self.fail("PO should not be needed"),
+            range_fetch_func=self.valid_range_fetch,
+            default_extractor_func=default_extractor,
+        )
+
+        self.assertEqual(result["actualHeight"], 804)
+        self.assertEqual(result["actualQuality"], "1080p")
+
+    def test_manual_720p_rejects_panoramic_1080_class_source(self):
+        def default_extractor(video_id, timeout_seconds):
+            return {"formats": [self.panoramic_1080_format()]}
+
+        with self.assertRaises(QualityUnavailableError):
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "720p",
+                self.config,
+                self.cooldown_tracker,
+                extractor_func=lambda *a, **k: (_ for _ in ()).throw(
+                    QualityUnavailableError()
+                ),
+                range_fetch_func=self.valid_range_fetch,
+                default_extractor_func=default_extractor,
+            )

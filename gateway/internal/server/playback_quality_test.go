@@ -851,7 +851,7 @@ func TestYouTubeHDQualitySelectionAndSwitching(t *testing.T) {
 	s.deps.Resolver = mockRes
 
 	token := pair(t, s, "yt-device")
-	setDevicePassingProbes(t, s, "yt-device", append(standardCapableProbes(), "http-progressive")...)
+	setDevicePassingProbes(t, s, "yt-device", append(standardCapableProbes(), "http-progressive", "http-fmp4-seek")...)
 	setDeviceSource("yt-device", ytSource)
 
 	// 1. Valid HD: Initial playback starts in Auto (360p progressive stream)
@@ -1182,7 +1182,7 @@ func TestYouTubeFailedHDResolveOnInitialAndInPlaceSessions(t *testing.T) {
 	}
 
 	token := pair(t, s, "fail-hd-device")
-	setDevicePassingProbes(t, s, "fail-hd-device", append(standardCapableProbes(), "http-progressive")...)
+	setDevicePassingProbes(t, s, "fail-hd-device", append(standardCapableProbes(), "http-progressive", "http-fmp4-seek")...)
 	setDeviceSource("fail-hd-device", ytSource)
 
 	// Resolver that fails on 720p/1080p, but succeeds on Auto (360p)

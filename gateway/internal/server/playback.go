@@ -160,6 +160,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		} else {
 			youtubeDiagnostic.streamProbe("passed")
 		}
+		youtubeDiagnostic.videoDimensions(decision.metadata)
 	}
 	if req.Quality != "" && req.Quality != "auto" {
 		var meta domain.Metadata
@@ -181,6 +182,21 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			mode, req.Quality = "TRANSCODE", quality
 		}
 	}
+	// Read stored progress and requested position once, before transport
+	// selection, so the HLS/REMUX choice can use it without a second DB read.
+	var p domain.Progress
+	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
+	resume := p.PositionMS
+	if p.State == "ENDED" {
+		resume = 0
+	}
+	if req.PositionMS != nil {
+		resume = *req.PositionMS
+	}
+	if resolved.Live {
+		resume = 0
+	}
+	now := time.Now()
 	if (req.Mode == "" || req.Mode == "AUTO") && (req.Quality == "" || req.Quality == "auto") {
 		provider := resolved.Item.Provider
 		kind := resolved.Item.Kind
@@ -196,34 +212,46 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 				originalMode := mode
 
 				resolvedHD := false
-				if resolved.Item.Provider == "youtube" && (len(resolved.Variants) > 0 || resolved.ResolveURL != "") {
-					targetSource, probedMeta, ok := s.resolveAndProbeYouTubeSource(r.Context(), resolved, preferred)
-					if ok {
+				if resolved.Item.Provider == "youtube" {
+					// Review guard: only reuse the already-probed split tier when
+					// the initial native decision is REMUX. If the source requires
+					// transcoding at its current probed state, always re-resolve
+					// fresh metadata for the stored preference.
+					if mode == "REMUX" && isExactProbedYouTubeSplitTier(resolved, decision.metadata, preferred) {
 						if youtubeDiagnostic != nil {
 							youtubeDiagnostic.qualityResolution("passed")
 						}
-						resolved = targetSource
-						decision.metadata = &probedMeta
+						resolved.ResolveQuality = preferred
 						resolvedHD = true
-					} else {
-						if youtubeDiagnostic != nil {
-							youtubeDiagnostic.qualityResolution("unavailable")
+					} else if len(resolved.Variants) > 0 || resolved.ResolveURL != "" {
+						targetSource, probedMeta, ok := s.resolveAndProbeYouTubeSource(r.Context(), resolved, preferred)
+						if ok {
+							if youtubeDiagnostic != nil {
+								youtubeDiagnostic.qualityResolution("passed")
+							}
+							resolved = targetSource
+							decision.metadata = &probedMeta
+							resolvedHD = true
+						} else {
+							if youtubeDiagnostic != nil {
+								youtubeDiagnostic.qualityResolution("unavailable")
+							}
+							_ = s.revertQualityPreference(r.Context(), d.ID, provider, kind)
+							resolved = originalResolved
+							decision.metadata = originalMetadata
 						}
-						_ = s.revertQualityPreference(r.Context(), d.ID, provider, kind)
-						resolved = originalResolved
-						decision.metadata = originalMetadata
 					}
 				}
 				if resolvedHD || (resolved.Item.Provider != "youtube" && playback.HasQuality(inv, preferred)) {
 					newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, preferred, 0, originalMode)
-					canPublishHLS, hlsReason := s.youtubeHLSIneligibility(d, resolved, decision.metadata, preferred)
+					tc := s.chooseYouTubeStreamTransport(d, resolved, decision.metadata, preferred, resume, newMode, now)
 					if youtubeDiagnostic != nil {
-						youtubeDiagnostic.hlsGate(canPublishHLS, hlsReason)
+						youtubeDiagnostic.hlsGate(tc.HLSEligible, tc.HLSReason)
 					}
-					if canPublishHLS {
+					if tc.Mode == youtubeHLSSessionMode {
 						mode, req.Quality = youtubeHLSSessionMode, preferred
 					} else if newMode != "EXTERNAL_PLAYER" {
-						mode, req.Quality = newMode, newQuality
+						mode, req.Quality = tc.Mode, newQuality
 					} else {
 						resolved = originalResolved
 						decision.metadata = originalMetadata
@@ -231,6 +259,23 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 					}
 				}
 			}
+		}
+
+		if (req.Quality == "" || req.Quality == "auto") &&
+			resolved.Item.Provider == "youtube" && resolved.Item.Kind == "video" && !resolved.Live &&
+			resolved.URL != "" && resolved.AudioURL != "" && resolved.Path == "" {
+			tc := s.chooseYouTubeStreamTransport(d, resolved, decision.metadata, req.Quality, resume, mode, now)
+			if youtubeDiagnostic != nil {
+				youtubeDiagnostic.hlsGate(tc.HLSEligible, tc.HLSReason)
+			}
+			if tc.Mode == youtubeHLSSessionMode && decision.metadata != nil {
+				candidateMode, _ := playback.SelectedQualityMode(*decision.metadata, resolved, d, req.Quality, 0, mode)
+				if candidateMode == "REMUX" {
+					mode = youtubeHLSSessionMode
+				}
+			}
+			// When chunked streaming is preferred, we keep mode as-is; the
+			// existing REMUX path handles it without a publisher.
 		}
 	} else if (req.Mode == "" || req.Mode == "AUTO") && req.Quality != "" && req.Quality != "LOW" && req.Quality != "STANDARD" {
 		if decision.metadata != nil {
@@ -259,17 +304,17 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			}
 			if resolvedQuality || resolved.Item.Provider != "youtube" {
 				newMode, newQuality := playback.SelectedQualityMode(*decision.metadata, resolved, d, req.Quality, 0, originalMode)
-				canPublishHLS, hlsReason := s.youtubeHLSIneligibility(d, resolved, decision.metadata, req.Quality)
+				tc := s.chooseYouTubeStreamTransport(d, resolved, decision.metadata, req.Quality, resume, newMode, now)
 				if youtubeDiagnostic != nil {
-					youtubeDiagnostic.hlsGate(canPublishHLS, hlsReason)
+					youtubeDiagnostic.hlsGate(tc.HLSEligible, tc.HLSReason)
 				}
-				if canPublishHLS {
+				if tc.Mode == youtubeHLSSessionMode {
 					mode = youtubeHLSSessionMode
 					if newQuality != "" {
 						req.Quality = newQuality
 					}
 				} else if newMode != "EXTERNAL_PLAYER" {
-					mode, req.Quality = newMode, newQuality
+					mode, req.Quality = tc.Mode, newQuality
 				} else {
 					req.Quality = ""
 					resolved = originalResolved
@@ -309,23 +354,11 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		}
 		s.retireReceivers(r.Context(), d.ID, "youtube")
 	}
-	var p domain.Progress
-	_ = s.db.Get(r.Context(), "progress:"+d.ID, resolved.Item.ID, &p)
-	resume := p.PositionMS
-	if p.State == "ENDED" {
-		resume = 0
-	}
-	if req.PositionMS != nil {
-		resume = *req.PositionMS
-	}
-	if resolved.Live {
-		resume = 0
-	}
 	qualityRequiresTranscode := req.Quality == "LOW" || (decision.metadata != nil && playback.RequiresTranscodeForQuality(*decision.metadata, req.Quality))
-	knownLengthResume := mode == "REMUX" && resume > 0 && !qualityRequiresTranscode && supportsKnownLengthYouTubeSeek(d, resolved, decision.metadata, mode, time.Now())
+	knownLengthResume := mode == "REMUX" && resume > 0 && !qualityRequiresTranscode && supportsKnownLengthYouTubeSeek(d, resolved, decision.metadata, mode, now)
 	if mode == "REMUX" && resume > 0 && !knownLengthResume && !qualityRequiresTranscode &&
 		isNativeYouTubeSplitQuality(resolved, decision.metadata, req.Quality) &&
-		requiresKnownLengthYouTubeRemux(d, resolved, decision.metadata, mode, time.Now()) {
+		requiresKnownLengthYouTubeRemux(d, resolved, decision.metadata, mode, now) {
 		// The receiver can play this exact native YouTube rendition from a
 		// known-length spool, but cannot seek within it. Start at zero instead
 		// of silently replacing the selected rendition with chunked TRANSCODE.
@@ -1056,6 +1089,11 @@ func isAudioOnly(source domain.Source, metadata *domain.Metadata) bool {
 // requiresKnownLengthYouTubeRemux selects the bounded file-backed REMUX path
 // only when this device has current suite-2 evidence that fMP4 playback works
 // with a known length but not with chunked transfer encoding.
+func isFreshProbePassing(caps domain.Capabilities, probeID string, now time.Time) bool {
+	status, fresh := freshProbeOutcome(caps, probeID, now)
+	return fresh && status == "PASS"
+}
+
 func requiresKnownLengthYouTubeRemux(device domain.Device, source domain.Source, metadata *domain.Metadata, mode string, now time.Time) bool {
 	if mode != "REMUX" || source.Live || source.Path != "" || source.Item.Provider != "youtube" || source.Item.Kind != "video" || source.URL == "" || source.AudioURL == "" {
 		return false
@@ -1078,6 +1116,12 @@ func requiresKnownLengthYouTubeRemux(device domain.Device, source domain.Source,
 
 	caps := devices.CurrentCapabilities(device)
 	if caps.SuiteVersion != devices.ProbeSuiteVersion || caps.DeviceID != device.ID || caps.CacheKey == "" || caps.CacheKey != devices.ProbeCacheKey(device) {
+		return false
+	}
+	if !isFreshProbePassing(caps, "http-fmp4", now) || !isFreshProbePassing(caps, "aac", now) {
+		return false
+	}
+	if !isFreshProbePassing(caps, "h264-1080-high", now) && !isFreshProbePassing(caps, "h264-2160-high", now) {
 		return false
 	}
 

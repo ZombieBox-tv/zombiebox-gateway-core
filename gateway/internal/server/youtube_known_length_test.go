@@ -541,14 +541,14 @@ func TestYouTubeManualQualityRestartsAtZeroWithoutFreshSeekEvidence(t *testing.T
 			if err := json.Unmarshal(selected.Body.Bytes(), &selectedPlan); err != nil {
 				t.Fatal(err)
 			}
-			if selectedPlan.Mode != "REMUX" || selectedPlan.Seekable || selectedPlan.ResumeMS != 0 || selectedPlan.TimelineOffsetMS != 0 {
-				t.Fatalf("manual native quality did not restart from zero without seek evidence: %+v", selectedPlan)
+			if selectedPlan.Mode != "TRANSCODE" || selectedPlan.Seekable || selectedPlan.ResumeMS != 0 || selectedPlan.TimelineOffsetMS != 0 {
+				t.Fatalf("manual native quality did not restart from zero without seek evidence while staying TRANSCODE: %+v", selectedPlan)
 			}
 			s.mu.Lock()
 			selectedSession := s.sessions[selectedPlan.SessionID]
 			s.mu.Unlock()
-			if selectedSession == nil || !selectedSession.knownLengthRemux || selectedSession.selection.PositionMS != 0 {
-				t.Fatalf("known-length REMUX fallback has incorrect seek state: %+v", selectedSession)
+			if selectedSession == nil || selectedSession.knownLengthRemux || selectedSession.selection.PositionMS != 0 {
+				t.Fatalf("manual non-seekable quality reset kept the wrong transport or seek state: %+v", selectedSession)
 			}
 			if preference := s.getQualityPreference(t.Context(), deviceID, "youtube", "video"); preference != "720p" {
 				t.Fatalf("accepted manual selection did not persist its quality preference: %q", preference)

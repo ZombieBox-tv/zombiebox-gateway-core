@@ -43,6 +43,9 @@ func TestYouTubePlaybackDiagnosticIsCategoricalAndRedacted(t *testing.T) {
 	if safeYouTubeChosenQuality("https://private.invalid/?signature=secret") != "unknown" || safeYouTubeDeliveryRoute("https://private.invalid/route") != "unknown" {
 		t.Fatal("quality or delivery route mapping accepted raw input")
 	}
+	if safeYouTubeHLSGateReason("native_decoder_incompatible") != "native_decoder_incompatible" {
+		t.Fatal("native decoder incompatibility reason was not allowlisted")
+	}
 	if event.Resolver != "busy" || event.StreamProbe != "unknown" || event.QualityResolution != "unavailable" || event.HLSGate != "ineligible" || event.HLSGateReason != "fresh_event_probe" || event.Publisher != "first_segment_timeout" {
 		t.Fatalf("unexpected stage summary: %+v", event)
 	}

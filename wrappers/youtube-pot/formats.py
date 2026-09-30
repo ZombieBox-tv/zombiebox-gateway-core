@@ -27,6 +27,7 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from media_ranges import validate_media_ranges
+from quality_tiers import nominal_tier_for_dimensions, nominal_tier_for_height
 
 MAX_SAFE_FPS = 30
 ALLOWED_TIERS = ("1080p", "720p", "480p", "360p")
@@ -80,20 +81,20 @@ def is_direct_media_format(
 
 
 def format_tier(format_dict: Dict[str, Any]) -> Optional[str]:
-    """Map a video format to a standard resolution tier without relabeling 2K/4K as 1080p."""
+    """Map a video format to a standard nominal 16:9 tier without relabeling 2K/4K as 1080p.
+
+    Uses real width and height when both are known so panoramic/cinemascope
+    rasters (e.g. 1920x804) share the same tier the manual resolver assigns.
+    """
+    width = format_dict.get("width")
     height = format_dict.get("height")
     if isinstance(height, int) and height > 0:
-        if height > 1440:
-            return "2160p"
-        if height > 1080:
-            return "1440p"
-        if height > 720:
-            return "1080p"
-        if height > 480:
-            return "720p"
-        if height > 360:
-            return "480p"
-        return "360p"
+        if isinstance(width, int) and width > 0:
+            tier = nominal_tier_for_dimensions(width, height)
+        else:
+            tier = nominal_tier_for_height(height)
+        if tier:
+            return tier
 
     label = str(
         format_dict.get("quality_label") or format_dict.get("format_note") or ""

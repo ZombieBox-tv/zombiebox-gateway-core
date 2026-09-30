@@ -18,6 +18,7 @@ import (
 	"zombiebox.local/gateway/internal/devices"
 	"zombiebox.local/gateway/internal/domain"
 	"zombiebox.local/gateway/internal/media"
+	"zombiebox.local/gateway/internal/playback"
 	"zombiebox.local/gateway/internal/providers"
 )
 
@@ -81,7 +82,11 @@ type youtubeHLSQualityMedia struct {
 
 func (m *youtubeHLSQualityMedia) ProbeRemote(_ context.Context, source domain.Source) (domain.Metadata, error) {
 	height, width, profile := 720, 1280, "Main"
-	if strings.Contains(source.URL, "video-1080") {
+	if strings.Contains(source.URL, "video-480") {
+		height, width, profile = 480, 854, "Main"
+	} else if strings.Contains(source.URL, "video-804") {
+		height, width, profile = 804, 1920, "High"
+	} else if strings.Contains(source.URL, "video-1080") {
 		height, width, profile = 1080, 1920, "High"
 	}
 	metadata := domain.Metadata{
@@ -265,6 +270,9 @@ func TestYouTubeHLSPublishesTicketedRelativeSegmentsWhilePublisherRuns(t *testin
 	if sourceUsed.URL == "" || !strings.Contains(sourceUsed.URL, "googlevideo.com") {
 		t.Fatalf("expected resolved upstream source at publisher boundary, got %+v", sourceUsed)
 	}
+	if sourceUsed.AudioURL == "" {
+		t.Fatal("720p publisher source lost its separate audio URL")
+	}
 	defer publication.Close()
 
 	wrongURL, err := url.Parse(plan.URL)
@@ -405,6 +413,12 @@ func TestYouTubeHLSQualitySwitchRetiresOldPublisherAndKeepsPosition(t *testing.T
 	if newSession == nil || newSession.youtubeHLSPublisher == nil || newSession.selection.Quality != "1080p" || newSession.selection.PositionMS != positionMS {
 		t.Fatalf("replacement session lost quality or position: %+v", newSession)
 	}
+	publisher.mu.Lock()
+	usedSource := publisher.lastSource
+	publisher.mu.Unlock()
+	if usedSource.AudioURL == "" {
+		t.Fatal("1080p publisher source lost its separate audio URL")
+	}
 	if got := s.getQualityPreference(t.Context(), "youtube-hls-device", "youtube", "video"); got != "1080p" {
 		t.Fatalf("quality preference = %q, want 1080p", got)
 	}
@@ -493,6 +507,61 @@ func TestYouTubeHLSRequiresFreshCompletedEventEvidence(t *testing.T) {
 	}
 }
 
+func TestYouTubeHLSManualTierUsesNominalDimensionClassForPanoramicSources(t *testing.T) {
+	publisher := &fakeRemoteHLSPublisher{}
+	s, _, source := setupYouTubeHLSServer(t, publisher, false)
+	var device domain.Device
+	if err := s.db.Get(t.Context(), "devices", "youtube-hls-device", &device); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		width    int
+		height   int
+		quality  string
+		wantPass bool
+		wantCode string
+	}{
+		{name: "panoramic 804 matches 1080p class", width: 1920, height: 804, quality: "1080p", wantPass: true, wantCode: "eligible"},
+		{name: "panoramic 804 rejects 720p class", width: 1920, height: 804, quality: "720p", wantPass: false, wantCode: "video_height"},
+		{name: "panoramic 536 matches 720p class", width: 1280, height: 536, quality: "720p", wantPass: true, wantCode: "eligible"},
+		{name: "480p standard stays exact", width: 854, height: 480, quality: "480p", wantPass: true, wantCode: "eligible"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metadata := &domain.Metadata{Streams: []domain.Stream{
+				{Index: 0, Type: "video", Codec: "h264", Profile: "High", Width: test.width, Height: test.height},
+				{Index: 1, Type: "audio", Codec: "aac"},
+			}}
+			eligible, reason := s.youtubeHLSIneligibility(device, source, metadata, test.quality)
+			if eligible != test.wantPass || reason != test.wantCode {
+				t.Fatalf("eligibility = %t, reason = %q; want %t, %q", eligible, reason, test.wantPass, test.wantCode)
+			}
+		})
+	}
+
+	metadata := &domain.Metadata{Streams: []domain.Stream{
+		{Index: 0, Type: "video", Codec: "h264", Profile: "High", Width: 1920, Height: 804},
+		{Index: 1, Type: "audio", Codec: "aac"},
+	}}
+	if !isExactProbedYouTubeSplitTier(source, metadata, "1080p") {
+		t.Fatal("exact probed split tier should accept nominal 1080p panorama")
+	}
+	if isExactProbedYouTubeSplitTier(source, metadata, "720p") {
+		t.Fatal("exact probed split tier should reject nominal 720p class for 804-height panorama")
+	}
+
+	for index := range device.Capabilities.Probes {
+		if device.Capabilities.Probes[index].ID == "h264-1080-high" {
+			device.Capabilities.Probes[index].Status = "FAIL"
+		}
+	}
+	eligible, reason := s.youtubeHLSIneligibility(device, source, metadata, "1080p")
+	if eligible || reason != "native_decoder_incompatible" {
+		t.Fatalf("failed 1080p decoder probe should reject nominal 1080p class: (%t, %q)", eligible, reason)
+	}
+}
+
 func TestYouTubeHLSIneligibilityReportsCategoricalSourceAndStreamReasons(t *testing.T) {
 	publisher := &fakeRemoteHLSPublisher{}
 	s, _, source := setupYouTubeHLSServer(t, publisher, false)
@@ -501,7 +570,7 @@ func TestYouTubeHLSIneligibilityReportsCategoricalSourceAndStreamReasons(t *test
 		t.Fatal(err)
 	}
 	metadata := &domain.Metadata{Streams: []domain.Stream{
-		{Index: 0, Type: "video", Codec: "h264", Height: 720},
+		{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720},
 		{Index: 1, Type: "audio", Codec: "aac"},
 	}}
 	for _, test := range []struct {
@@ -555,6 +624,76 @@ func TestYouTubeHLSIneligibilityReportsCategoricalSourceAndStreamReasons(t *test
 			}
 			if safeYouTubeHLSGateReason(reason) != test.wantCode {
 				t.Fatalf("diagnostic reason = %q, want categorical code %q", safeYouTubeHLSGateReason(reason), test.wantCode)
+			}
+		})
+	}
+}
+
+func TestYouTubeHLSIneligibilityRequiresDecoderCompatibleNativeTier(t *testing.T) {
+	publisher := &fakeRemoteHLSPublisher{}
+	s, _, source := setupYouTubeHLSServer(t, publisher, false)
+	var device domain.Device
+	if err := s.db.Get(t.Context(), "devices", "youtube-hls-device", &device); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name             string
+		quality          string
+		profile          string
+		width, height    int
+		failProbe        string
+		wantLocalMode    string
+		wantSelectedMode string
+	}{
+		{
+			name:             "missing decoder evidence",
+			quality:          "1080p",
+			profile:          "High",
+			width:            1920,
+			height:           1080,
+			failProbe:        "h264-1080-high",
+			wantLocalMode:    "TRANSCODE",
+			wantSelectedMode: "TRANSCODE",
+		},
+		{
+			name:             "unsupported video profile despite passing tier probe",
+			quality:          "720p",
+			profile:          "UnknownUnsupportedProfile",
+			width:            1280,
+			height:           720,
+			wantLocalMode:    "TRANSCODE",
+			wantSelectedMode: "REMUX",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidateDevice := device
+			candidateDevice.Capabilities.Probes = append([]domain.Probe(nil), device.Capabilities.Probes...)
+			for index := range candidateDevice.Capabilities.Probes {
+				if candidateDevice.Capabilities.Probes[index].ID == test.failProbe {
+					candidateDevice.Capabilities.Probes[index].Status = "FAIL"
+				}
+			}
+			candidateSource := source
+			metadata := domain.Metadata{Streams: []domain.Stream{
+				{Index: 0, Type: "video", Codec: "h264", Profile: test.profile, Width: test.width, Height: test.height},
+				{Index: 1, Type: "audio", Codec: "aac"},
+			}}
+			metadata.Format.Name = "mp4"
+
+			caps := devices.CurrentCapabilities(candidateDevice)
+			if got := playback.LocalMode(metadata, candidateSource.MIME, caps, ""); got != test.wantLocalMode {
+				t.Fatalf("LocalMode = %q, want %q", got, test.wantLocalMode)
+			}
+			if got, _ := playback.SelectedQualityMode(metadata, candidateSource, candidateDevice, test.quality, 0, "REMUX"); got != test.wantSelectedMode {
+				t.Fatalf("SelectedQualityMode = %q, want %q", got, test.wantSelectedMode)
+			}
+			eligible, reason := s.youtubeHLSIneligibility(candidateDevice, candidateSource, &metadata, test.quality)
+			if eligible || reason != "native_decoder_incompatible" {
+				t.Fatalf("gate = (%t, %q), want (false, native_decoder_incompatible)", eligible, reason)
+			}
+			if safeYouTubeHLSGateReason(reason) != "native_decoder_incompatible" {
+				t.Fatalf("diagnostic reason = %q, want native_decoder_incompatible", safeYouTubeHLSGateReason(reason))
 			}
 		})
 	}

@@ -40,8 +40,9 @@ func youtubeHLSPublisherFailureDiagnostic(err error) (string, string) {
 	}
 }
 
-// canPublishYouTubeHLS gates split HD publishing on both the current receiver's
-// completed EVENT probe and the exact codecs/resolution selected upstream.
+// canPublishYouTubeHLS gates split-stream publishing on the current receiver's
+// completed EVENT probe, native decoder policy and the requested quality's
+// exact or Auto-compatible source dimensions.
 func (s *Server) canPublishYouTubeHLS(device domain.Device, source domain.Source, metadata *domain.Metadata, quality string) bool {
 	eligible, _ := s.youtubeHLSIneligibility(device, source, metadata, quality)
 	return eligible
@@ -81,18 +82,18 @@ func (s *Server) youtubeHLSIneligibility(device domain.Device, source domain.Sou
 	if metadata == nil {
 		return false, "metadata_missing"
 	}
-	if !playback.HasFreshLiveVideoHLSEvidence(devices.CurrentCapabilities(device)) {
+	caps := devices.CurrentCapabilities(device)
+	if !playback.HasFreshLiveVideoHLSEvidence(caps) {
 		return false, "fresh_event_probe"
 	}
 
-	wantHeight := 0
-	switch quality {
-	case "720p":
-		wantHeight = 720
-	case "1080p":
-		wantHeight = 1080
-	default:
-		return false, "quality_height_ineligible"
+	autoQuality := quality == "" || quality == "auto"
+	if !autoQuality {
+		switch quality {
+		case "480p", "720p", "1080p":
+		default:
+			return false, "quality_height_ineligible"
+		}
 	}
 
 	videoCount, audioCount := 0, 0
@@ -102,7 +103,10 @@ func (s *Server) youtubeHLSIneligibility(device domain.Device, source domain.Sou
 			if stream.Codec != "h264" {
 				return false, "video_codec"
 			}
-			if stream.Height != wantHeight {
+			if stream.Width <= 0 || stream.Height <= 0 || stream.Width > 1920 || stream.Height > 1080 {
+				return false, "video_dimensions_ineligible"
+			}
+			if !autoQuality && playback.ClassifyDimensionsTier(stream.Width, stream.Height) != quality {
 				return false, "video_height"
 			}
 			videoCount++
@@ -116,7 +120,50 @@ func (s *Server) youtubeHLSIneligibility(device domain.Device, source domain.Sou
 	if videoCount != 1 || audioCount != 1 {
 		return false, "stream_count"
 	}
+	localMode := playback.LocalMode(*metadata, source.MIME, caps, "")
+	if localMode != "DIRECT_PLAY" && localMode != "REMUX" {
+		return false, "native_decoder_incompatible"
+	}
+	selectedMode, _ := playback.SelectedQualityMode(*metadata, source, device, quality, 0, "REMUX")
+	if selectedMode != "REMUX" {
+		return false, "native_decoder_incompatible"
+	}
 	return true, "eligible"
+}
+
+// isExactProbedYouTubeSplitTier reports whether the already-probed source is a
+// non-live YouTube split H.264/AAC source whose video stream matches the exact
+// requested tier height.
+func isExactProbedYouTubeSplitTier(source domain.Source, metadata *domain.Metadata, quality string) bool {
+	if source.Item.Provider != "youtube" || source.Item.Kind != "video" || source.Live || source.Path != "" || source.URL == "" || source.AudioURL == "" || metadata == nil {
+		return false
+	}
+	if media.ManifestKind(source) != "" || !media.RemoteCandidate(source) {
+		return false
+	}
+	if !playback.ValidQuality(quality) || quality == "" || quality == "auto" || quality == "STANDARD" || quality == "LOW" {
+		return false
+	}
+	wantTier := quality
+	if !strings.HasSuffix(quality, "p") {
+		return false
+	}
+	videoCount, audioCount := 0, 0
+	for _, stream := range metadata.Streams {
+		switch stream.Type {
+		case "video":
+			if stream.Codec != "h264" || playback.ClassifyDimensionsTier(stream.Width, stream.Height) != wantTier {
+				return false
+			}
+			videoCount++
+		case "audio":
+			if stream.Codec != "aac" {
+				return false
+			}
+			audioCount++
+		}
+	}
+	return videoCount == 1 && audioCount == 1
 }
 
 // startYouTubeHLSPublication reserves the one gateway-owned output slot and
@@ -321,4 +368,98 @@ func rewriteYouTubeHLSEventPlaylist(sessionID, ticket string, snapshot RemoteHLS
 		return nil, errYouTubeHLSPublisherUnavailable
 	}
 	return []byte(strings.Join(lines, "\n")), nil
+}
+
+// youtubeStreamTransportChoice describes how chooseYouTubeStreamTransport
+// selected a transport for a split YouTube source.
+type youtubeStreamTransportChoice struct {
+	// Mode is the selected playback mode (one of youtubeHLSSessionMode,
+	// "REMUX", or the original legacyMode passed in).
+	Mode string
+	// HLSEligible reports whether the HLS gate returned true. Callers may
+	// record this in diagnostic logs without calling youtubeHLSIneligibility a
+	// second time.
+	HLSEligible bool
+	// HLSReason is the gate reason string (always set when source is YouTube).
+	HLSReason string
+	// PreferredStreaming reports whether fresh chunked evidence made REMUX the
+	// first choice (native_streaming_preferred).
+	PreferredStreaming bool
+}
+
+// chooseYouTubeStreamTransport selects the best transport for a split YouTube
+// source (separate video+audio URLs) given the device capabilities and a
+// quality tier.  It is called for both playback creation and quality changes.
+//
+// Rules (intentionally conservative – never manufacture evidence):
+//
+//  1. If the source is not a YouTube split stream, return the legacyMode
+//     unchanged; the caller handles non-YouTube and combined sources.
+//  2. At positionMS == 0: when the device has a fresh, current-suite-bound
+//     http-fmp4-chunked PASS with advancement, prefer the existing streaming
+//     REMUX path ("native_streaming_preferred"). The HLS gate is still
+//     evaluated and recorded but REMUX wins.
+//  3. At positionMS == 0 without verified chunked PASS, and at any nonzero
+//     positionMS: if the HLS gate passes, use youtubeHLSSessionMode so the
+//     native tier is preserved without a forced full-file REMUX or transcode.
+//  4. Otherwise return legacyMode unchanged.
+//
+// The caller is responsible for applying the result, persisting quality
+// preferences, and recording diagnostic stages.
+func (s *Server) chooseYouTubeStreamTransport(
+	device domain.Device,
+	source domain.Source,
+	metadata *domain.Metadata,
+	quality string,
+	positionMS int64,
+	legacyMode string,
+	now time.Time,
+) youtubeStreamTransportChoice {
+	// Only applies to split YouTube streams with separate audio.
+	if source.Item.Provider != "youtube" || source.AudioURL == "" || source.Path != "" {
+		return youtubeStreamTransportChoice{Mode: legacyMode}
+	}
+
+	// Evaluate HLS eligibility once (used in multiple branches).
+	hlsEligible, hlsReason := s.youtubeHLSIneligibility(device, source, metadata, quality)
+
+	if positionMS == 0 {
+		// Check for fresh chunked streaming evidence on the current probe suite.
+		caps := devices.CurrentCapabilities(device)
+		if caps.SuiteVersion == devices.ProbeSuiteVersion &&
+			caps.DeviceID == device.ID &&
+			caps.CacheKey != "" && caps.CacheKey == devices.ProbeCacheKey(device) {
+			chunkedStatus, chunkedFresh := freshProbeOutcome(caps, "http-fmp4-chunked", now)
+			if chunkedFresh && chunkedStatus == "PASS" {
+				// Fresh chunked PASS: prefer streaming REMUX. HLS gate
+				// information is still surfaced for diagnostics.
+				return youtubeStreamTransportChoice{
+					Mode:               legacyMode, // keep REMUX/TRANSCODE decision to caller
+					HLSEligible:        hlsEligible,
+					HLSReason:          "native_streaming_preferred",
+					PreferredStreaming: true,
+				}
+			}
+		}
+		// No verified chunked path: if HLS is eligible, use it.
+		if hlsEligible {
+			return youtubeStreamTransportChoice{
+				Mode:        youtubeHLSSessionMode,
+				HLSEligible: true,
+				HLSReason:   hlsReason,
+			}
+		}
+		return youtubeStreamTransportChoice{Mode: legacyMode, HLSEligible: false, HLSReason: hlsReason}
+	}
+
+	// nonzero positionMS: prefer HLS to preserve native tier without forced
+	// transcode or a known-length-only full-file spool.
+	if hlsEligible {
+		return youtubeStreamTransportChoice{
+			Mode:        youtubeHLSSessionMode,
+			HLSEligible: true,
+			HLSReason:   hlsReason,
+		}
+	}
+	return youtubeStreamTransportChoice{Mode: legacyMode, HLSEligible: false, HLSReason: hlsReason}
 }

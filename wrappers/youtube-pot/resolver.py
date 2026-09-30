@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from cooldown import CooldownTracker
 from formats import FormatSelector
+from quality_tiers import nominal_tier_for_dimensions, nominal_tier_for_height
 from media_ranges import (
     _NO_REDIRECT_OPENER,
     RANGE_SAMPLE_BYTES,
@@ -42,18 +43,8 @@ class QualityUnavailableError(RuntimeError):
 
 
 def _quality_for_height(height: int) -> Optional[str]:
-    """Map numeric pixel height to the highest standard tier it fully reaches."""
-    for tier, minimum_height in (
-        ("2160p", 2160),
-        ("1440p", 1440),
-        ("1080p", 1080),
-        ("720p", 720),
-        ("480p", 480),
-        ("360p", 360),
-    ):
-        if height >= minimum_height:
-            return tier
-    return None
+    """Map numeric pixel height to the same nominal tier `formats.format_tier` uses."""
+    return nominal_tier_for_height(height)
 
 
 class _ProcessOutputLimitError(RuntimeError):
@@ -384,18 +375,24 @@ def resolve_video(
             return None, saw_403
 
         actual_quality = None
-        matching_heights = {
-            candidate.get("height")
+        matching_candidates = [
+            candidate
             for candidate in formats
             if isinstance(candidate, dict) and candidate.get("url") == resolved["url"]
-        }
+        ]
+        matching_heights = {c.get("height") for c in matching_candidates}
+        matching_widths = {c.get("width") for c in matching_candidates}
         if len(matching_heights) == 1:
             height = next(iter(matching_heights))
             if type(height) is int and height > 0:
                 # Report resolution only from numeric metadata. A quality label alone
                 # is not proof of the actual selected rendition.
                 resolved["actualHeight"] = height
-                actual_quality = _quality_for_height(height)
+                width = next(iter(matching_widths)) if len(matching_widths) == 1 else None
+                if type(width) is int and width > 0:
+                    actual_quality = nominal_tier_for_dimensions(width, height)
+                else:
+                    actual_quality = nominal_tier_for_height(height)
                 if actual_quality:
                     resolved["actualQuality"] = actual_quality
 

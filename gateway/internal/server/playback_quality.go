@@ -132,15 +132,13 @@ func isNativeYouTubeSplitQuality(source domain.Source, metadata *domain.Metadata
 	if source.Item.Provider != "youtube" || source.Item.Kind != "video" || source.Live || source.Path != "" || source.URL == "" || source.AudioURL == "" || metadata == nil {
 		return false
 	}
-
-	height, err := strconv.Atoi(strings.TrimSuffix(qualityID, "p"))
-	if err != nil || height <= 0 {
+	if !playback.ValidQuality(qualityID) || qualityID == "" || qualityID == "auto" || qualityID == "LOW" || qualityID == "STANDARD" {
 		return false
 	}
 
 	hasNativeH264, hasAAC := false, false
 	for _, stream := range metadata.Streams {
-		if stream.Type == "video" && stream.Codec == "h264" && stream.Height == height {
+		if stream.Type == "video" && stream.Codec == "h264" && playback.ClassifyDimensionsTier(stream.Width, stream.Height) == qualityID {
 			hasNativeH264 = true
 		}
 		if stream.Type == "audio" && stream.Codec == "aac" {
@@ -328,18 +326,22 @@ func (s *Server) resolveAndProbeYouTubeSource(ctx context.Context, base domain.S
 }
 
 func hasExactYouTubeQuality(metadata domain.Metadata, qualityID string) bool {
-	targetHeight, err := strconv.Atoi(strings.TrimSuffix(qualityID, "p"))
-	if err != nil || targetHeight <= 0 {
+	if qualityID == "" || qualityID == "auto" || qualityID == "LOW" || qualityID == "STANDARD" {
+		return false
+	}
+	if !playback.ValidQuality(qualityID) {
 		return false
 	}
 
-	actualHeight := 0
+	actualTier := ""
 	for _, stream := range metadata.Streams {
-		if stream.Type == "video" && stream.Height > actualHeight {
-			actualHeight = stream.Height
+		if stream.Type == "video" {
+			if actualTier == "" || stream.Height > 0 {
+				actualTier = playback.ClassifyDimensionsTier(stream.Width, stream.Height)
+			}
 		}
 	}
-	return actualHeight == targetHeight
+	return actualTier == qualityID
 }
 
 func hasYouTubeHDQuality(inventory domain.QualityInventory) bool {
@@ -610,24 +612,44 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 	now := time.Now()
 	positionMS := request.PositionMS
 	mode, chosenQuality := playback.SelectedQualityMode(*targetMetadata, targetSource, d, request.QualityID, positionMS, sess.mode)
-	if positionMS > 0 && mode == "TRANSCODE" && request.QualityID != "" && request.QualityID != "auto" {
-		// The Vizio rejects chunked conversion output, but suite-2 evidence can
-		// prove that a native YouTube split-stream rendition can be remuxed
-		// with a known length. Preserve a non-zero position only when a fresh
-		// seek probe passes; otherwise start this manual quality at zero.
-		candidateMode, candidateQuality := playback.SelectedQualityMode(*targetMetadata, targetSource, d, request.QualityID, 0, sess.mode)
-		qualityRequiresTranscode := candidateQuality == "LOW" || (targetMetadata != nil && playback.RequiresTranscodeForQuality(*targetMetadata, candidateQuality))
-		if candidateMode == "REMUX" && !qualityRequiresTranscode && isNativeYouTubeSplitQuality(targetSource, targetMetadata, candidateQuality) && requiresKnownLengthYouTubeRemux(d, targetSource, targetMetadata, candidateMode, now) {
-			mode, chosenQuality = candidateMode, candidateQuality
-			if !supportsKnownLengthYouTubeSeek(d, targetSource, targetMetadata, candidateMode, now) {
-				positionMS = 0
-			}
-		}
-	}
-	useYouTubeHLS := s.canPublishYouTubeHLS(d, targetSource, targetMetadata, request.QualityID)
+	// Evaluate transport choice before the legacy known-length REMUX fallback
+	// can reset positionMS. HLS selection at nonzero position preserves the
+	// native tier and the timeline offset without a full-file spool.
+	// Keep Auto as Auto when selecting transport. The HLS gate applies its
+	// native compatibility checks to the probed source dimensions and decoder
+	// policy rather than manufacturing a quality tier from pixel height.
+	tc := s.chooseYouTubeStreamTransport(d, targetSource, targetMetadata, request.QualityID, positionMS, mode, now)
+	useYouTubeHLS := tc.Mode == youtubeHLSSessionMode
 	if useYouTubeHLS {
 		mode = youtubeHLSSessionMode
-		chosenQuality = request.QualityID
+		// Keep chosenQuality as "" for Auto to preserve the Auto preference.
+		if request.QualityID != "" && request.QualityID != "auto" {
+			chosenQuality = request.QualityID
+		}
+	} else if positionMS > 0 && request.QualityID != "" && request.QualityID != "auto" {
+		manualNativeSplitQuality := targetSource.AudioURL != "" && isNativeYouTubeSplitQuality(targetSource, targetMetadata, request.QualityID)
+		freshSeekPass := false
+		if manualNativeSplitQuality {
+			status, fresh := freshProbeOutcome(d.Capabilities, "http-fmp4-seek", now)
+			freshSeekPass = fresh && status == "PASS"
+		}
+		// Missing, failing or stale fresh http-fmp4-seek evidence must restart the
+		// manual native timeline at zero. A fresh passing seek is sufficient to keep
+		// the requested position in a TRANSCODE fallback even when the chunked
+		// known-length REMUX gate is absent.
+		if manualNativeSplitQuality && !freshSeekPass {
+			positionMS = 0
+		}
+		if mode == "TRANSCODE" && manualNativeSplitQuality {
+			candidateMode, candidateQuality := playback.SelectedQualityMode(*targetMetadata, targetSource, d, request.QualityID, 0, sess.mode)
+			qualityRequiresTranscode := candidateQuality == "LOW" || (targetMetadata != nil && playback.RequiresTranscodeForQuality(*targetMetadata, candidateQuality))
+			if candidateMode == "REMUX" && !qualityRequiresTranscode && isNativeYouTubeSplitQuality(targetSource, targetMetadata, candidateQuality) && requiresKnownLengthYouTubeRemux(d, targetSource, targetMetadata, candidateMode, now) {
+				mode, chosenQuality = candidateMode, candidateQuality
+				if !supportsKnownLengthYouTubeSeek(d, targetSource, targetMetadata, candidateMode, now) {
+					positionMS = 0
+				}
+			}
+		}
 	}
 	if mode == "EXTERNAL_PLAYER" {
 		fail(w, 409, "quality_unavailable")
@@ -636,7 +658,7 @@ func (s *Server) selectQuality(w http.ResponseWriter, r *http.Request, d domain.
 	knownLengthRemux := requiresKnownLengthYouTubeRemux(d, targetSource, targetMetadata, mode, now)
 	qualityRequiresTranscode := chosenQuality == "LOW" || (targetMetadata != nil && playback.RequiresTranscodeForQuality(*targetMetadata, chosenQuality))
 	knownLengthResume := mode == "REMUX" && positionMS > 0 && !qualityRequiresTranscode && supportsKnownLengthYouTubeSeek(d, targetSource, targetMetadata, mode, now)
-	if (mode == "REMUX" || mode == "HYBRID") && (positionMS > 0 || qualityRequiresTranscode) && !knownLengthResume {
+	if !useYouTubeHLS && (mode == "REMUX" || mode == "HYBRID") && (positionMS > 0 || qualityRequiresTranscode) && !knownLengthResume {
 		mode = "TRANSCODE"
 	}
 

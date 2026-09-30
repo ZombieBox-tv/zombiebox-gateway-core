@@ -484,3 +484,20 @@ class FormatsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DimensionAwareTierTests(unittest.TestCase):
+    """Nominal 16:9 dimension-based classification parity for panoramic rasters."""
+
+    def test_panoramic_widths_map_to_nominal_class(self):
+        self.assertEqual(format_tier({"width": 1920, "height": 804}), "1080p")
+        self.assertEqual(format_tier({"width": 1280, "height": 536}), "720p")
+
+    def test_standard_dimensions_still_map_to_own_tier(self):
+        self.assertEqual(format_tier({"width": 1920, "height": 1080}), "1080p")
+        self.assertEqual(format_tier({"width": 1280, "height": 720}), "720p")
+        self.assertEqual(format_tier({"width": 640, "height": 480}), "480p")
+
+    def test_dimension_boundary_below_threshold_falls_to_lower_tier(self):
+        # Slightly under the 1080p-equivalent boundary should not round up.
+        self.assertEqual(format_tier({"width": 1918, "height": 803}), "720p")
