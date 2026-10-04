@@ -279,6 +279,19 @@ func videoCandidate(stream domain.Stream, status func(string) string) bool {
 	}
 }
 
+// HasFreshH264DecoderEvidence reports whether recent, advancing probe evidence
+// matches this H.264 video stream's profile and dimensions. Keep this policy
+// aligned with direct playback decisions by reusing videoCandidate.
+func HasFreshH264DecoderEvidence(stream domain.Stream, capabilities domain.Capabilities, now time.Time) bool {
+	if stream.Type != "video" || stream.Codec != "h264" {
+		return false
+	}
+	status := func(id string) string {
+		return probeStatus(capabilities, id, now.Unix())
+	}
+	return videoCandidate(stream, status)
+}
+
 // videoRemuxCandidate determines if a video stream can be copied without transcoding.
 // Higher resolutions (1080p) require positive decode proof to protect legacy receivers.
 // Moderate resolutions (720p, 480p, 360p) allow remuxing unless known to have failed or stalled.

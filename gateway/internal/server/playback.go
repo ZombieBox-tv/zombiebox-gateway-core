@@ -1087,8 +1087,8 @@ func isAudioOnly(source domain.Source, metadata *domain.Metadata) bool {
 }
 
 // requiresKnownLengthYouTubeRemux selects the bounded file-backed REMUX path
-// only when this device has current suite-2 evidence that fMP4 playback works
-// with a known length but not with chunked transfer encoding.
+// only when this device has current suite-2 H.264/AAC and fMP4 evidence, with
+// known-length delivery passing while chunked transfer encoding does not.
 func isFreshProbePassing(caps domain.Capabilities, probeID string, now time.Time) bool {
 	status, fresh := freshProbeOutcome(caps, probeID, now)
 	return fresh && status == "PASS"
@@ -1102,8 +1102,12 @@ func requiresKnownLengthYouTubeRemux(device domain.Device, source domain.Source,
 		return false
 	}
 	hasH264Video, hasAACAudio := false, false
+	caps := devices.CurrentCapabilities(device)
 	for _, stream := range metadata.Streams {
-		if stream.Type == "video" && stream.Codec == "h264" {
+		if stream.Type == "video" {
+			if !playback.HasFreshH264DecoderEvidence(stream, caps, now) {
+				return false
+			}
 			hasH264Video = true
 		}
 		if stream.Type == "audio" && stream.Codec == "aac" {
@@ -1114,17 +1118,12 @@ func requiresKnownLengthYouTubeRemux(device domain.Device, source domain.Source,
 		return false
 	}
 
-	caps := devices.CurrentCapabilities(device)
 	if caps.SuiteVersion != devices.ProbeSuiteVersion || caps.DeviceID != device.ID || caps.CacheKey == "" || caps.CacheKey != devices.ProbeCacheKey(device) {
 		return false
 	}
 	if !isFreshProbePassing(caps, "http-fmp4", now) || !isFreshProbePassing(caps, "aac", now) {
 		return false
 	}
-	if !isFreshProbePassing(caps, "h264-1080-high", now) && !isFreshProbePassing(caps, "h264-2160-high", now) {
-		return false
-	}
-
 	knownLengthStatus, knownLengthFresh := freshProbeOutcome(caps, "http-fmp4", now)
 	chunkedProbe := freshProbe(caps, "http-fmp4-chunked", now)
 	if !knownLengthFresh || chunkedProbe == nil || knownLengthStatus != "PASS" {

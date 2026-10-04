@@ -61,6 +61,100 @@ func TestProfileEvidenceDoesNotRejectOtherProfiles(t *testing.T) {
 	}
 }
 
+func TestHasFreshH264DecoderEvidenceMatchesStreamProfileAndDimensions(t *testing.T) {
+	now := time.Now()
+	probe := func(id string, status string, testedAt int64, position int, completed bool) domain.Probe {
+		return domain.Probe{ID: id, Status: status, TestedAt: testedAt, PositionMS: position, Completed: completed}
+	}
+	pass := func(id string) domain.Capabilities {
+		return domain.Capabilities{Probes: []domain.Probe{probe(id, "PASS", now.Unix(), 1000, false)}}
+	}
+	tests := []struct {
+		name   string
+		stream domain.Stream
+		caps   domain.Capabilities
+		want   bool
+	}{
+		{
+			name:   "360 baseline",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Constrained Baseline", Width: 640, Height: 360},
+			caps:   pass("h264-baseline-360"),
+			want:   true,
+		},
+		{
+			name:   "720 Main",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+			caps:   pass("h264-720-main"),
+			want:   true,
+		},
+		{
+			name:   "720 High",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "High", Width: 1280, Height: 720},
+			caps:   pass("h264-720-high"),
+			want:   true,
+		},
+		{
+			name:   "1080 High",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "High", Width: 1920, Height: 1080},
+			caps:   pass("h264-1080-high"),
+			want:   true,
+		},
+		{
+			name:   "nominal 1080 High with 804 lines",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "High", Width: 1920, Height: 804},
+			caps:   pass("h264-1080-high"),
+			want:   true,
+		},
+		{
+			name:   "wrong profile evidence",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+			caps:   pass("h264-1080-high"),
+		},
+		{
+			name:   "unknown profile",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Extended", Width: 1280, Height: 720},
+			caps:   pass("h264-720-main"),
+		},
+		{
+			name:   "missing evidence",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+		},
+		{
+			name:   "stale evidence",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+			caps:   domain.Capabilities{Probes: []domain.Probe{probe("h264-720-main", "PASS", now.Add(-8*24*time.Hour).Unix(), 1000, false)}},
+		},
+		{
+			name:   "failed evidence",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+			caps:   domain.Capabilities{Probes: []domain.Probe{probe("h264-720-main", "FAIL", now.Unix(), 0, false)}},
+		},
+		{
+			name:   "non-advancing evidence",
+			stream: domain.Stream{Type: "video", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+			caps:   domain.Capabilities{Probes: []domain.Probe{probe("h264-720-main", "PASS", now.Unix(), 0, false)}},
+		},
+		{
+			name:   "wrong codec",
+			stream: domain.Stream{Type: "video", Codec: "hevc", Profile: "Main", Width: 1280, Height: 720},
+			caps:   pass("h264-720-main"),
+		},
+		{
+			name:   "wrong stream type",
+			stream: domain.Stream{Type: "audio", Codec: "h264", Profile: "Main", Width: 1280, Height: 720},
+			caps:   pass("h264-720-main"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := HasFreshH264DecoderEvidence(test.stream, test.caps, now); got != test.want {
+				t.Fatalf("HasFreshH264DecoderEvidence() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDetectedContainerOverridesProviderMime(t *testing.T) {
 	metadata := domain.Metadata{Streams: []domain.Stream{{Type: "video", Codec: "h264", Width: 640, Height: 360}}}
 	metadata.Format.Name = "matroska,webm"

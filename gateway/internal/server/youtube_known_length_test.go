@@ -118,6 +118,13 @@ func knownLengthYouTubeSource() domain.Source {
 	}
 }
 
+func knownLengthYouTubeMetadata(profile string, width, height int) *domain.Metadata {
+	return &domain.Metadata{Streams: []domain.Stream{
+		{Type: "video", Codec: "h264", Profile: profile, Width: width, Height: height},
+		{Type: "audio", Codec: "aac"},
+	}}
+}
+
 func setupKnownLengthYouTubeServer(t *testing.T, deviceID string) (*Server, string, domain.Source, *knownLengthYouTubeRemote) {
 	t.Helper()
 	s := testServer(t, nil, t.TempDir())
@@ -154,10 +161,7 @@ func setupKnownLengthYouTubeServer(t *testing.T, deviceID string) (*Server, stri
 func TestRequiresKnownLengthYouTubeRemuxUsesFreshPairedEvidence(t *testing.T) {
 	now := time.Now()
 	source := knownLengthYouTubeSource()
-	metadata := &domain.Metadata{Streams: []domain.Stream{
-		{Type: "video", Codec: "h264"},
-		{Type: "audio", Codec: "aac"},
-	}}
+	metadata := knownLengthYouTubeMetadata("Main", 1280, 720)
 	base := knownLengthEvidenceDevice("probe-device", now)
 	if !requiresKnownLengthYouTubeRemux(base, source, metadata, "REMUX", now) {
 		t.Fatal("fresh suite-2 PASS plus fresh chunked UNKNOWN did not select known-length REMUX")
@@ -240,12 +244,66 @@ func TestRequiresKnownLengthYouTubeRemuxUsesFreshPairedEvidence(t *testing.T) {
 	}
 }
 
+func TestRequiresKnownLengthYouTubeRemuxMatchesFreshH264EvidenceToStream(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name        string
+		profile     string
+		width       int
+		height      int
+		probeID     string
+		status      string
+		positionMS  int
+		fresh       bool
+		secondVideo *domain.Stream
+		want        bool
+	}{
+		{name: "360 baseline", profile: "Baseline", width: 640, height: 360, probeID: "h264-baseline-360", status: "PASS", positionMS: 1000, fresh: true, want: true},
+		{name: "720 Main", profile: "Main", width: 1280, height: 720, probeID: "h264-720-main", status: "PASS", positionMS: 1000, fresh: true, want: true},
+		{name: "720 High", profile: "High", width: 1280, height: 720, probeID: "h264-720-high", status: "PASS", positionMS: 1000, fresh: true, want: true},
+		{name: "1080 High", profile: "High", width: 1920, height: 1080, probeID: "h264-1080-high", status: "PASS", positionMS: 1000, fresh: true, want: true},
+		{name: "nominal 1080 High with 804 lines", profile: "High", width: 1920, height: 804, probeID: "h264-1080-high", status: "PASS", positionMS: 1000, fresh: true, want: true},
+		{name: "wrong profile probe", profile: "Main", width: 1280, height: 720, probeID: "h264-1080-high", status: "PASS", positionMS: 1000, fresh: true},
+		{name: "missing decoder probe", profile: "Main", width: 1280, height: 720},
+		{name: "stale decoder probe", profile: "Main", width: 1280, height: 720, probeID: "h264-720-main", status: "PASS", positionMS: 1000},
+		{name: "failed decoder probe", profile: "Main", width: 1280, height: 720, probeID: "h264-720-main", status: "FAIL", fresh: true},
+		{name: "non-advancing decoder probe", profile: "Main", width: 1280, height: 720, probeID: "h264-720-main", status: "PASS", fresh: true},
+		{name: "incompatible additional video stream", profile: "Main", width: 1280, height: 720, probeID: "h264-720-main", status: "PASS", positionMS: 1000, fresh: true, secondVideo: &domain.Stream{Type: "video", Codec: "hevc", Width: 1280, Height: 720}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			device := knownLengthEvidenceDevice("probe-device", now)
+			filtered := device.Capabilities.Probes[:0]
+			for _, probe := range device.Capabilities.Probes {
+				if probe.ID != "h264-720-main" {
+					filtered = append(filtered, probe)
+				}
+			}
+			device.Capabilities.Probes = filtered
+			if test.probeID != "" {
+				testedAt := now.Unix()
+				if !test.fresh {
+					testedAt = now.Add(-8 * 24 * time.Hour).Unix()
+				}
+				device.Capabilities.Probes = append(device.Capabilities.Probes, domain.Probe{
+					ID: test.probeID, Status: test.status, PositionMS: test.positionMS, TestedAt: testedAt,
+				})
+			}
+			device.Capabilities.CacheKey = devices.ProbeCacheKey(device)
+			metadata := knownLengthYouTubeMetadata(test.profile, test.width, test.height)
+			if test.secondVideo != nil {
+				metadata.Streams = append(metadata.Streams, *test.secondVideo)
+			}
+			if got := requiresKnownLengthYouTubeRemux(device, knownLengthYouTubeSource(), metadata, "REMUX", now); got != test.want {
+				t.Fatalf("requiresKnownLengthYouTubeRemux() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestKnownLengthYouTubeSeekRequiresFreshPass(t *testing.T) {
 	now := time.Now()
-	metadata := &domain.Metadata{Streams: []domain.Stream{
-		{Type: "video", Codec: "h264"},
-		{Type: "audio", Codec: "aac"},
-	}}
+	metadata := knownLengthYouTubeMetadata("Main", 1280, 720)
 	tests := []struct {
 		name   string
 		change func(*domain.Device)
@@ -505,7 +563,7 @@ func TestYouTubeManualQualityRestartsAtZeroWithoutFreshSeekEvidence(t *testing.T
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			deviceID := "known-length-resume-" + test.name
-			s, owner, _, _ := setupKnownLengthYouTubeServer(t, deviceID)
+			s, owner, _, stub := setupKnownLengthYouTubeServer(t, deviceID)
 			var device domain.Device
 			if err := s.db.Get(t.Context(), "devices", deviceID, &device); err != nil {
 				t.Fatal(err)
@@ -541,17 +599,25 @@ func TestYouTubeManualQualityRestartsAtZeroWithoutFreshSeekEvidence(t *testing.T
 			if err := json.Unmarshal(selected.Body.Bytes(), &selectedPlan); err != nil {
 				t.Fatal(err)
 			}
-			if selectedPlan.Mode != "TRANSCODE" || selectedPlan.Seekable || selectedPlan.ResumeMS != 0 || selectedPlan.TimelineOffsetMS != 0 {
-				t.Fatalf("manual native quality did not restart from zero without seek evidence while staying TRANSCODE: %+v", selectedPlan)
+			if selectedPlan.Mode != "REMUX" || selectedPlan.Seekable || selectedPlan.ResumeMS != 0 || selectedPlan.TimelineOffsetMS != 0 {
+				t.Fatalf("manual native quality did not restart from zero through known-length REMUX without seek evidence: %+v", selectedPlan)
 			}
 			s.mu.Lock()
 			selectedSession := s.sessions[selectedPlan.SessionID]
 			s.mu.Unlock()
-			if selectedSession == nil || selectedSession.knownLengthRemux || selectedSession.selection.PositionMS != 0 {
-				t.Fatalf("manual non-seekable quality reset kept the wrong transport or seek state: %+v", selectedSession)
+			if selectedSession == nil || !selectedSession.knownLengthRemux || selectedSession.mode != "REMUX" || selectedSession.selection.PositionMS != 0 {
+				t.Fatalf("manual non-seekable quality reset lost its known-length REMUX or seek state: %+v", selectedSession)
 			}
 			if preference := s.getQualityPreference(t.Context(), deviceID, "youtube", "video"); preference != "720p" {
 				t.Fatalf("accepted manual selection did not persist its quality preference: %q", preference)
+			}
+			response := httptest.NewRecorder()
+			s.ServeHTTP(response, httptest.NewRequest(http.MethodGet, selectedPlan.URL, nil))
+			if response.Code != http.StatusOK || response.Header().Get("Content-Length") != "14" || response.Header().Get("Transfer-Encoding") == "chunked" {
+				t.Fatalf("manual quality did not use known-length delivery: status=%d length=%q transfer-encoding=%q", response.Code, response.Header().Get("Content-Length"), response.Header().Get("Transfer-Encoding"))
+			}
+			if stub.lastMode() != "REMUX" || stub.lastSelectionPosition() != 0 {
+				t.Fatalf("manual known-length conversion used wrong mode or position: mode=%q position=%d", stub.lastMode(), stub.lastSelectionPosition())
 			}
 		})
 	}
