@@ -2,6 +2,7 @@ import sys
 import unittest
 import urllib.parse
 from pathlib import Path
+from unittest.mock import patch
 
 WRAPPER_DIR = Path(__file__).resolve().parents[1]
 if str(WRAPPER_DIR) not in sys.path:
@@ -13,6 +14,7 @@ from formats import (  # noqa: E402
     is_aac_audio,
     is_h264_video,
     is_safe_fps,
+    supported_format_tier,
 )
 
 
@@ -440,7 +442,7 @@ class FormatsTests(unittest.TestCase):
             fetch_func=mock_fetch,
             deadline=15.0,
         )
-        with unittest.mock.patch("time.monotonic", side_effect=lambda: now[0]):
+        with patch("time.monotonic", side_effect=lambda: now[0]):
             resolved, variants, _ = selector.determine_variants_and_resolve("720p")
 
         self.assertEqual(fetch_count, 1)
@@ -501,3 +503,183 @@ class DimensionAwareTierTests(unittest.TestCase):
     def test_dimension_boundary_below_threshold_falls_to_lower_tier(self):
         # Slightly under the 1080p-equivalent boundary should not round up.
         self.assertEqual(format_tier({"width": 1918, "height": 803}), "720p")
+
+    def test_supported_format_tier_requires_numeric_tier_evidence(self):
+        self.assertEqual(supported_format_tier({"width": 640, "height": 268}), "360p")
+        self.assertIsNone(
+            supported_format_tier(
+                {"width": 256, "height": 108, "quality_label": "360p"}
+            )
+        )
+        self.assertIsNone(
+            supported_format_tier(
+                {"width": 426, "height": 178, "quality_label": "360p"}
+            )
+        )
+        self.assertIsNone(supported_format_tier({"quality_label": "360p"}))
+
+
+class LowRasterFallbackTests(unittest.TestCase):
+    @staticmethod
+    def video_format(itag, width, height, *, combined=False, label=None):
+        fmt = {
+            "format_id": str(itag),
+            "url": f"https://rr1.googlevideo.com/videoplayback?itag={itag}&clen=50000",
+            "vcodec": "avc1.4d401f",
+            "acodec": "mp4a.40.2" if combined else "none",
+            "fps": 24,
+            "width": width,
+            "height": height,
+            "filesize": 50000,
+        }
+        if label:
+            fmt["quality_label"] = label
+        return fmt
+
+    @staticmethod
+    def audio_format():
+        return {
+            "format_id": "audio",
+            "url": "https://rr1.googlevideo.com/videoplayback?itag=audio&clen=50000",
+            "vcodec": "none",
+            "acodec": "mp4a.40.2",
+            "abr": 128,
+            "filesize": 50000,
+        }
+
+    @staticmethod
+    def range_fetch(failed_itags=(), checked=None):
+        failed_itags = set(failed_itags)
+
+        def fetch(url, headers):
+            itag = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["itag"][0]
+            if checked is not None:
+                checked.add(itag)
+            if itag in failed_itags:
+                return 403, {}, b"Forbidden"
+            start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+            return (
+                206,
+                {"content-range": f"bytes {start}-{end}/50000"},
+                b"x" * (end - start + 1),
+            )
+
+        return fetch
+
+    def test_manual_360_selects_genuine_tier_independent_of_input_order(self):
+        lower_144 = self.video_format(144, 256, 108, label="360p")
+        lower_240 = self.video_format(240, 426, 178, label="360p")
+        genuine_360 = self.video_format(360, 640, 268)
+        audio = self.audio_format()
+
+        for ordered in (
+            [lower_144, lower_240, genuine_360, audio],
+            [genuine_360, lower_240, lower_144, audio],
+        ):
+            with self.subTest(order=[fmt["format_id"] for fmt in ordered]):
+                checked = set()
+                selector = FormatSelector(
+                    ordered, fetch_func=self.range_fetch(checked=checked)
+                )
+                resolved, variants, saw_403 = selector.determine_variants_and_resolve(
+                    "360p"
+                )
+
+                self.assertFalse(saw_403)
+                self.assertIsNotNone(resolved)
+                self.assertIn("itag=360", resolved["url"])
+                self.assertEqual(variants, ["360p"])
+                self.assertNotIn("144", checked)
+                self.assertNotIn("240", checked)
+
+    def test_low_only_manual_fails_while_auto_uses_split_fallback_without_variant(self):
+        formats = [
+            self.video_format(144, 256, 108, label="360p"),
+            self.video_format(240, 426, 178, label="360p"),
+            self.audio_format(),
+        ]
+
+        manual, manual_variants, _ = FormatSelector(
+            formats, fetch_func=self.range_fetch()
+        ).determine_variants_and_resolve("360p")
+        self.assertIsNone(manual)
+        self.assertEqual(manual_variants, [])
+
+        resolved, variants, _ = FormatSelector(
+            formats, fetch_func=self.range_fetch()
+        ).determine_variants_and_resolve("auto")
+        self.assertIsNotNone(resolved)
+        self.assertIn(resolved["url"], {formats[0]["url"], formats[1]["url"]})
+        self.assertIn("itag=audio", resolved["audioUrl"])
+        self.assertEqual(variants, [])
+        self.assertEqual(resolved["variants"], [])
+
+    def test_low_combined_auto_fallback_is_playable_but_not_advertised(self):
+        low_combined = self.video_format(144, 256, 108, combined=True, label="360p")
+
+        resolved, variants, _ = FormatSelector(
+            [low_combined], fetch_func=self.range_fetch()
+        ).determine_variants_and_resolve("auto")
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["url"], low_combined["url"])
+        self.assertNotIn("audioUrl", resolved)
+        self.assertEqual(variants, [])
+        self.assertEqual(resolved["variants"], [])
+
+    def test_low_combined_auto_fallback_precedes_hd_and_keeps_hd_variant(self):
+        low_combined = self.video_format(144, 256, 108, combined=True)
+        hd_video = self.video_format(720, 1280, 536)
+        audio = self.audio_format()
+
+        resolved, variants, _ = FormatSelector(
+            [low_combined, hd_video, audio], fetch_func=self.range_fetch()
+        ).determine_variants_and_resolve("auto")
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["url"], low_combined["url"])
+        self.assertNotIn("audioUrl", resolved)
+        self.assertEqual(variants, ["720p"])
+        self.assertEqual(resolved["variants"], ["720p"])
+
+    def test_invalid_low_combined_auto_fallback_uses_validated_hd(self):
+        low_combined = self.video_format(144, 256, 108, combined=True)
+        hd_video = self.video_format(720, 1280, 536)
+        audio = self.audio_format()
+
+        resolved, variants, saw_403 = FormatSelector(
+            [low_combined, hd_video, audio],
+            fetch_func=self.range_fetch(failed_itags={"144"}),
+        ).determine_variants_and_resolve("auto")
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["url"], hd_video["url"])
+        self.assertEqual(resolved["audioUrl"], audio["url"])
+        self.assertEqual(variants, ["720p"])
+        self.assertEqual(resolved["variants"], ["720p"])
+        self.assertTrue(saw_403)
+
+    def test_failed_genuine_360_does_not_lower_manual_but_auto_keeps_low_fallback(self):
+        lower = self.video_format(144, 256, 108)
+        genuine = self.video_format(360, 640, 268)
+        formats = [lower, genuine, self.audio_format()]
+
+        manual_checked = set()
+        manual, variants, saw_403 = FormatSelector(
+            formats,
+            fetch_func=self.range_fetch(failed_itags={"360"}, checked=manual_checked),
+        ).determine_variants_and_resolve("360p")
+        self.assertIsNone(manual)
+        self.assertEqual(variants, [])
+        self.assertTrue(saw_403)
+        self.assertIn("360", manual_checked)
+        self.assertNotIn("144", manual_checked)
+
+        auto, auto_variants, auto_saw_403 = FormatSelector(
+            formats, fetch_func=self.range_fetch(failed_itags={"360"})
+        ).determine_variants_and_resolve("auto")
+        self.assertIsNotNone(auto)
+        self.assertIn("itag=144", auto["url"])
+        self.assertIn("itag=audio", auto["audioUrl"])
+        self.assertEqual(auto_variants, [])
+        self.assertTrue(auto_saw_403)

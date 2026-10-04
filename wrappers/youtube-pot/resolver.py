@@ -21,7 +21,10 @@ from media_ranges import (
     RANGE_SAMPLE_BYTES,
     SAMPLE_TIMEOUT_SECONDS,
 )
-from quality_tiers import nominal_tier_for_dimensions, nominal_tier_for_height
+from quality_tiers import (
+    supported_tier_for_dimensions,
+    supported_tier_for_height,
+)
 
 YOUTUBE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 DEFAULT_EXTRACTION_TIMEOUT_SECONDS = 12
@@ -40,11 +43,6 @@ class QualityUnavailableError(RuntimeError):
     def __init__(self) -> None:
         # Keep this message independent of extractor output and signed media URLs.
         super().__init__("Requested quality is unavailable")
-
-
-def _quality_for_height(height: int) -> Optional[str]:
-    """Map numeric pixel height to the same nominal tier `formats.format_tier` uses."""
-    return nominal_tier_for_height(height)
 
 
 class _ProcessOutputLimitError(RuntimeError):
@@ -392,9 +390,9 @@ def resolve_video(
                     next(iter(matching_widths)) if len(matching_widths) == 1 else None
                 )
                 if type(width) is int and width > 0:
-                    actual_quality = nominal_tier_for_dimensions(width, height)
+                    actual_quality = supported_tier_for_dimensions(width, height)
                 else:
-                    actual_quality = nominal_tier_for_height(height)
+                    actual_quality = supported_tier_for_height(height)
                 if actual_quality:
                     resolved["actualQuality"] = actual_quality
 

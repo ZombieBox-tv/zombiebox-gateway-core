@@ -27,7 +27,12 @@ import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from media_ranges import validate_media_ranges
-from quality_tiers import nominal_tier_for_dimensions, nominal_tier_for_height
+from quality_tiers import (
+    nominal_tier_for_dimensions,
+    nominal_tier_for_height,
+    supported_tier_for_dimensions,
+    supported_tier_for_height,
+)
 
 MAX_SAFE_FPS = 30
 ALLOWED_TIERS = ("1080p", "720p", "480p", "360p")
@@ -81,10 +86,11 @@ def is_direct_media_format(
 
 
 def format_tier(format_dict: Dict[str, Any]) -> Optional[str]:
-    """Map a video format to a standard nominal 16:9 tier without relabeling 2K/4K as 1080p.
+    """Map a format to a nominal 16:9 tier without relabeling 2K/4K as 1080p.
 
     Uses real width and height when both are known so panoramic/cinemascope
-    rasters (e.g. 1920x804) share the same tier the manual resolver assigns.
+    rasters (e.g. 1920x804) map consistently. Sub-360 rasters floor to 360p for
+    the internal Auto fallback bucket only; `supported_format_tier` is strict.
     """
     width = format_dict.get("width")
     height = format_dict.get("height")
@@ -109,6 +115,21 @@ def format_tier(format_dict: Dict[str, Any]) -> Optional[str]:
             return tier
 
     return None
+
+
+def supported_format_tier(format_dict: Dict[str, Any]) -> Optional[str]:
+    """Return a supported tier proven by numeric raster metadata.
+
+    Labels and nominal fallback buckets may guide Auto playback, but they do not
+    establish that a rendition reaches a manual quality tier.
+    """
+    width = format_dict.get("width")
+    height = format_dict.get("height")
+    if not isinstance(height, int) or height <= 0:
+        return None
+    if isinstance(width, int) and width > 0:
+        return supported_tier_for_dimensions(width, height)
+    return supported_tier_for_height(height)
 
 
 class FormatSelector:
@@ -208,6 +229,8 @@ class FormatSelector:
         # Separate into tiers
         tier_combined: Dict[str, List[Dict[str, Any]]] = {t: [] for t in ALLOWED_TIERS}
         tier_video: Dict[str, List[Dict[str, Any]]] = {t: [] for t in ALLOWED_TIERS}
+        fallback_combined: List[Dict[str, Any]] = []
+        fallback_video: List[Dict[str, Any]] = []
 
         for fmt in self.formats:
             if (
@@ -217,11 +240,20 @@ class FormatSelector:
             ):
                 continue
 
-            tier = format_tier(fmt)
-            if not tier or tier not in ALLOWED_TIERS:
+            acodec = str(fmt.get("acodec") or "none")
+            tier = supported_format_tier(fmt)
+            if tier not in ALLOWED_TIERS:
+                # Keep low or incompletely described formats available to Auto,
+                # but never count them as an advertised/manual supported tier.
+                nominal_tier = format_tier(fmt)
+                if nominal_tier not in ALLOWED_TIERS:
+                    continue
+                if acodec != "none" and is_aac_audio(fmt):
+                    fallback_combined.append(fmt)
+                elif acodec == "none":
+                    fallback_video.append(fmt)
                 continue
 
-            acodec = str(fmt.get("acodec") or "none")
             if acodec != "none" and is_aac_audio(fmt):
                 tier_combined[tier].append(fmt)
             elif acodec == "none":
@@ -266,8 +298,7 @@ class FormatSelector:
 
             return None, [], self.saw_403
 
-        # Auto inventories all compatible tiers so its menu remains truthful. It
-        # prefers the validated combined 360p stream, then the highest validated tier.
+        # Auto inventories supported tiers before choosing so variants stay truthful.
         validated_audio = self.find_validated_audio()
         validated_tier_combined: Dict[str, Dict[str, Any]] = {}
         validated_tier_video: Dict[str, Dict[str, Any]] = {}
@@ -296,17 +327,38 @@ class FormatSelector:
                 "variants": truthful_variants,
             }
         else:
-            for tier in ALLOWED_TIERS:
-                if tier in validated_tier_combined:
+            for candidate in fallback_combined:
+                if self.validate_format(candidate):
                     resolved = {
-                        "url": validated_tier_combined[tier]["url"],
+                        "url": candidate["url"],
                         "mimeType": "video/mp4",
                         "variants": truthful_variants,
                     }
                     break
-                if tier in validated_tier_video and validated_audio:
+
+            if resolved is None:
+                for tier in ALLOWED_TIERS:
+                    if tier in validated_tier_combined:
+                        resolved = {
+                            "url": validated_tier_combined[tier]["url"],
+                            "mimeType": "video/mp4",
+                            "variants": truthful_variants,
+                        }
+                        break
+                    if tier in validated_tier_video and validated_audio:
+                        resolved = {
+                            "url": validated_tier_video[tier]["url"],
+                            "audioUrl": validated_audio["url"],
+                            "mimeType": "video/mp4",
+                            "variants": truthful_variants,
+                        }
+                        break
+
+        if resolved is None and validated_audio:
+            for candidate in fallback_video:
+                if self.validate_format(candidate):
                     resolved = {
-                        "url": validated_tier_video[tier]["url"],
+                        "url": candidate["url"],
                         "audioUrl": validated_audio["url"],
                         "mimeType": "video/mp4",
                         "variants": truthful_variants,

@@ -1,10 +1,11 @@
-"""Shared dimension-aware nominal 16:9 quality-tier classification.
+"""Shared dimension-aware 16:9 quality-tier classification.
 
-Both `formats.py` (advertised variant tiers) and `resolver.py` (manual
-actual-quality validation) must agree on the same tier for the same
-rendition. Panoramic/cinemascope rasters (e.g. 1920x804) keep their real
-width/height; the tier is only a nominal label derived from the frame's
-16:9-equivalent height, computed rationally to avoid premature rounding.
+`formats.py` uses strict tiers for manual selection and variant inventory, while
+keeping a legacy nominal bucket for low-raster Auto fallback. `resolver.py` uses
+strict classification for final actual-quality metadata. Panoramic rasters
+(e.g. 1920x804) keep their real width/height; the nominal tier is derived from
+the frame's 16:9-equivalent height, computed rationally to avoid premature
+rounding.
 """
 
 from __future__ import annotations
@@ -24,20 +25,51 @@ STANDARD_TIER_MIN_HEIGHTS: Tuple[Tuple[str, int], ...] = (
 )
 
 
-def _tier_for_effective_height(effective_height: Fraction) -> str:
+def _tier_for_effective_height(
+    effective_height: Fraction, *, floor_below_minimum: bool
+) -> Optional[str]:
     for tier, minimum_height in STANDARD_TIER_MIN_HEIGHTS:
         if effective_height >= minimum_height:
             return tier
-    # Below every standard minimum still floors to the lowest supported tier,
-    # preserving prior behavior for very small/undersized renditions.
-    return STANDARD_TIER_MIN_HEIGHTS[-1][0]
+    if floor_below_minimum:
+        # Preserve the legacy nominal bucket for internal low-raster fallback.
+        return STANDARD_TIER_MIN_HEIGHTS[-1][0]
+    return None
+
+
+def _tier_for_dimensions(
+    width: int, height: int, *, floor_below_minimum: bool
+) -> Optional[str]:
+    if not isinstance(width, int) or not isinstance(height, int):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    short_side = min(width, height)
+    long_side = max(width, height)
+    effective_height = max(Fraction(short_side), Fraction(long_side * 9, 16))
+    return _tier_for_effective_height(
+        effective_height, floor_below_minimum=floor_below_minimum
+    )
+
+
+def supported_tier_for_height(height: int) -> Optional[str]:
+    """Classify a pixel height only when it reaches a supported tier minimum."""
+    if not isinstance(height, int) or height <= 0:
+        return None
+    return _tier_for_effective_height(Fraction(height), floor_below_minimum=False)
+
+
+def supported_tier_for_dimensions(width: int, height: int) -> Optional[str]:
+    """Classify dimensions only when their rational 16:9-equivalent reaches a tier."""
+    return _tier_for_dimensions(width, height, floor_below_minimum=False)
 
 
 def nominal_tier_for_height(height: int) -> Optional[str]:
-    """Classify a plain pixel height with no known width (assumed 16:9)."""
+    """Classify height with legacy flooring for internal low-raster fallback."""
     if not isinstance(height, int) or height <= 0:
         return None
-    return _tier_for_effective_height(Fraction(height))
+    return _tier_for_effective_height(Fraction(height), floor_below_minimum=True)
 
 
 def nominal_tier_for_dimensions(width: int, height: int) -> Optional[str]:
@@ -47,12 +79,4 @@ def nominal_tier_for_dimensions(width: int, height: int) -> Optional[str]:
     (no float rounding) against standard tier minimums. Examples:
     1920x804 -> 1080p, 1280x536 -> 720p, 640x480 -> 480p.
     """
-    if not isinstance(width, int) or not isinstance(height, int):
-        return None
-    if width <= 0 or height <= 0:
-        return None
-
-    short_side = min(width, height)
-    long_side = max(width, height)
-    effective_height = max(Fraction(short_side), Fraction(long_side * 9, 16))
-    return _tier_for_effective_height(effective_height)
+    return _tier_for_dimensions(width, height, floor_below_minimum=True)

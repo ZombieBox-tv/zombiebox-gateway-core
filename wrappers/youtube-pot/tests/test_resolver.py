@@ -844,7 +844,63 @@ if __name__ == "__main__":
 
 
 class DimensionAwareManualQualityTests(ResolverTests):
-    """Manual actual-quality validation must agree with format_tier's nominal class."""
+    """Manual actual-quality validation requires a supported numeric tier."""
+
+    def test_auto_low_raster_fallback_reports_height_without_claiming_360p(self):
+        low = self.combined_format(108, 160)
+        low["width"] = 256
+        low["quality_label"] = "360p"
+
+        result = resolve_video(
+            "dQw4w9WgXcQ",
+            "auto",
+            self.config,
+            self.cooldown_tracker,
+            range_fetch_func=self.valid_range_fetch,
+            default_extractor_func=lambda *args: {"formats": [low]},
+            extractor_func=lambda *args: self.fail(
+                "default low fallback should resolve"
+            ),
+        )
+
+        self.assertIn("itag=160", result["url"])
+        self.assertEqual(result["actualHeight"], 108)
+        self.assertNotIn("actualQuality", result)
+        self.assertEqual(result["variants"], [])
+
+    def test_manual_360_accepts_panoramic_640_by_268(self):
+        genuine_360 = self.combined_format(268, 360)
+        genuine_360["width"] = 640
+
+        result = resolve_video(
+            "dQw4w9WgXcQ",
+            "360p",
+            self.config,
+            self.cooldown_tracker,
+            range_fetch_func=self.valid_range_fetch,
+            default_extractor_func=lambda *args: {"formats": [genuine_360]},
+            extractor_func=lambda *args: self.fail("default 360p should resolve"),
+        )
+
+        self.assertEqual(result["actualHeight"], 268)
+        self.assertEqual(result["actualQuality"], "360p")
+        self.assertEqual(result["variants"], ["360p"])
+
+    def test_manual_360_rejects_low_raster_even_when_label_says_360p(self):
+        low = self.combined_format(108, 160)
+        low["width"] = 256
+        low["quality_label"] = "360p"
+
+        with self.assertRaises(QualityUnavailableError):
+            resolve_video(
+                "dQw4w9WgXcQ",
+                "360p",
+                self.config,
+                self.cooldown_tracker,
+                range_fetch_func=self.valid_range_fetch,
+                default_extractor_func=lambda *args: {"formats": [low]},
+                extractor_func=lambda *args: {"formats": [low]},
+            )
 
     def panoramic_1080_format(self, itag=137):
         fmt = self.combined_format(804, itag)
