@@ -10,11 +10,11 @@ import (
 // Reception reads fresh activity independently of the slower Home catalog cache.
 func (a *Adapters) Reception(ctx context.Context, provider string, config Config) (*Source, domain.NowPlaying, error) {
 	if provider == "spotify" {
-		state, hasTrack, err := a.spotifyStatus(ctx, config)
-		if err != nil || state.State == "STOPPED" || !hasTrack {
+		state, hasTrack, audio, err := a.spotifyPlaybackStatus(ctx, config)
+		if err != nil || state.State == "STOPPED" || !hasTrack || !audio.available {
 			return nil, state, err
 		}
-		source := spotifySource(config, state)
+		source := spotifySourceForTransport(config, state, audio)
 		return &source, state, nil
 	}
 	if provider == "airplay" {

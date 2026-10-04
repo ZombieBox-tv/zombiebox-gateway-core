@@ -2,17 +2,393 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
 const maxSubscribers = 8
+
+// SoloistLaunchConfig describes the runtime-provided material required to
+// start an officially obtained Soloist binary inside a verified isolation
+// boundary. Nothing here is baked into the image: the binary and the API key
+// are supplied at container runtime only, and the launcher fails closed if
+// any required material or isolation primitive is missing.
+type SoloistLaunchConfig struct {
+	// BinaryPath is a runtime bind-mounted path to a user-provided Soloist
+	// binary. It is never vendored or redistributed by this repository.
+	BinaryPath string
+	// APIKeyFile is a runtime-mounted secret file (e.g. a Docker/Compose
+	// secret) holding the Soloist --api-key value. It is read once, passed
+	// only as argv to the isolated child, and never logged.
+	APIKeyFile string
+	// PipewireDevice selects Soloist's verified official output contract
+	// (--pipewire-device) rather than assuming PulseAudio compatibility.
+	PipewireDevice string
+	// IsolatedUID is the dedicated non-root UID the child must run as. It
+	// must differ from the worker process UID so the child has no shared
+	// identity with the parent.
+	IsolatedUID int
+	// IsolatedGID is the dedicated non-root GID paired with IsolatedUID.
+	IsolatedGID int
+}
+
+// ErrSoloistIsolationUnverifiable is returned instead of launching Soloist
+// whenever the runtime cannot establish the required isolation invariants
+// (dedicated non-root user, private PID/mount namespace, no shared secrets,
+// no logging, restricted capabilities, no sibling visibility). The caller
+// must fail closed rather than fall back to an unverified launch.
+var ErrSoloistIsolationUnverifiable = errors.New("Soloist isolation boundary could not be verified")
+
+// ErrSoloistBinaryMissing indicates no runtime-provided Soloist binary was
+// mounted. Soloist is never baked into or redistributed with this image.
+var ErrSoloistBinaryMissing = errors.New("Soloist runtime binary not provided")
+
+// ErrSoloistReadinessUnverifiable indicates the runtime has no trustworthy
+// readiness signal for the isolated child; the launcher must fail closed rather
+// than report a successful start from a timer alone.
+var ErrSoloistReadinessUnverifiable = errors.New("Soloist readiness signal unavailable")
+
+// soloistIsolationTools are the host primitives required to construct the
+// verified isolation boundary. All must be present; their absence is a
+// fail-closed condition, not a degraded-but-working path.
+var soloistIsolationTools = []string{"unshare", "setpriv"}
+
+var execCommandContext = exec.CommandContext
+
+// verifySoloistIsolationPrereqs checks, without launching anything, that the
+// primitives needed to build a dedicated non-root user plus private PID and
+// mount namespaces are present. It does not itself prove the running child
+// achieved isolation; runtime verification of the started process is done by
+// verifySoloistChildIsolation after start.
+func verifySoloistIsolationPrereqs(cfg SoloistLaunchConfig) error {
+	if strings.TrimSpace(cfg.BinaryPath) == "" {
+		return ErrSoloistBinaryMissing
+	}
+	if info, err := os.Stat(cfg.BinaryPath); err != nil || info.IsDir() || info.Mode()&0111 == 0 {
+		return ErrSoloistBinaryMissing
+	}
+	if strings.TrimSpace(cfg.APIKeyFile) == "" {
+		return ErrSoloistIsolationUnverifiable
+	}
+	if info, err := os.Stat(cfg.APIKeyFile); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return ErrSoloistIsolationUnverifiable
+	}
+	if cfg.IsolatedUID <= 0 || cfg.IsolatedGID <= 0 || cfg.IsolatedUID == os.Getuid() {
+		return ErrSoloistIsolationUnverifiable
+	}
+	for _, tool := range soloistIsolationTools {
+		if _, err := exec.LookPath(tool); err != nil {
+			return ErrSoloistIsolationUnverifiable
+		}
+	}
+	if strings.TrimSpace(cfg.PipewireDevice) == "" {
+		return ErrSoloistIsolationUnverifiable
+	}
+	return nil
+}
+
+// SoloistLauncher supervises one isolated Soloist child process for the
+// lifetime of a single qualified fallback attempt. It never persists the
+// API key to disk, logs, or argv visible outside the isolated namespace: the
+// key is read from APIKeyFile and appended to the child's argv only, inside
+// the unshared PID/mount namespace, immediately before exec.
+type soloistProcessRunner func(context.Context, string, ...string) *exec.Cmd
+
+type soloistIsolationVerifier func(SoloistLaunchConfig, *exec.Cmd) error
+
+type soloistReadinessProbe func(context.Context, *exec.Cmd) error
+
+type SoloistLauncher struct {
+	cfg SoloistLaunchConfig
+	cmd *exec.Cmd
+
+	processRunner     soloistProcessRunner
+	isolationVerifier soloistIsolationVerifier
+	readinessProbe    soloistReadinessProbe
+
+	mu         sync.Mutex
+	started    bool
+	ready      bool
+	helperPath string
+	waitDone   chan struct{}
+}
+
+// NewSoloistLauncher validates the isolation prerequisites and returns a
+// launcher, or a fail-closed error if any invariant cannot be established.
+// It does not start the child; call Start for that.
+func NewSoloistLauncher(cfg SoloistLaunchConfig) (*SoloistLauncher, error) {
+	if err := verifySoloistIsolationPrereqs(cfg); err != nil {
+		return nil, err
+	}
+	return &SoloistLauncher{
+		cfg:           cfg,
+		processRunner: execCommandContext,
+		isolationVerifier: func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error {
+			return verifySoloistChildIsolation(cfg, cmd)
+		},
+		readinessProbe: func(ctx context.Context, cmd *exec.Cmd) error {
+			if cmd == nil || cmd.Process == nil {
+				return errors.New("Soloist child process not started")
+			}
+			return errors.New("Soloist readiness output probe not configured")
+		},
+	}, nil
+}
+
+// Start launches Soloist under unshare (private PID + mount namespaces) and
+// setpriv (dedicated non-root UID/GID, no-new-privs, capability drop). The
+// API key is read from disk once and passed as argv only to that isolated
+// child; it is never written to a log, an env var visible to siblings, or a
+// reusable file. Start fails closed if the child cannot be confirmed running
+// under the intended UID.
+func (l *SoloistLauncher) Start(ctx context.Context) error {
+	l.mu.Lock()
+	if l.started {
+		l.mu.Unlock()
+		return errors.New("Soloist launcher already started")
+	}
+
+	// The parent process must not read or copy the secret before it crosses the
+	// namespace boundary. The runtime-mounted key file stays on disk and is read
+	// only by the child helper script after unshare/setpriv has created the
+	// isolated execution context.
+	helperscript, err := os.CreateTemp("", "soloist-launcher-*.sh")
+	if err != nil {
+		l.mu.Unlock()
+		return ErrSoloistIsolationUnverifiable
+	}
+	if _, err := helperscript.WriteString(`#!/bin/sh
+exec setpriv --reuid "$1" --regid "$2" --clear-groups --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- /bin/sh -c 'exec "$1" --api-key "$(tr -d "\r\n" < "$2")" --pipewire-device "$3"' soloist "$3" "$4" "$5"
+`); err != nil {
+		_ = helperscript.Close()
+		_ = os.Remove(helperscript.Name())
+		l.mu.Unlock()
+		return ErrSoloistIsolationUnverifiable
+	}
+	if err := helperscript.Chmod(0700); err != nil {
+		_ = helperscript.Close()
+		_ = os.Remove(helperscript.Name())
+		l.mu.Unlock()
+		return ErrSoloistIsolationUnverifiable
+	}
+	if err := helperscript.Close(); err != nil {
+		_ = os.Remove(helperscript.Name())
+		l.mu.Unlock()
+		return ErrSoloistIsolationUnverifiable
+	}
+	l.helperPath = helperscript.Name()
+	l.waitDone = make(chan struct{})
+
+	args := []string{
+		"--pid", "--mount", "--mount-proc", "--fork", "--kill-child",
+		"--",
+		helperscript.Name(),
+		strconv.Itoa(l.cfg.IsolatedUID),
+		strconv.Itoa(l.cfg.IsolatedGID),
+		l.cfg.BinaryPath,
+		l.cfg.APIKeyFile,
+		l.cfg.PipewireDevice,
+	}
+	cmd := l.processRunner(ctx, "unshare", args...)
+	if cmd == nil {
+		_ = os.Remove(l.helperPath)
+		l.helperPath = ""
+		l.waitDone = nil
+		l.mu.Unlock()
+		return ErrSoloistIsolationUnverifiable
+	}
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		_ = os.Remove(helperscript.Name())
+		l.helperPath = ""
+		l.waitDone = nil
+		l.mu.Unlock()
+		return err
+	}
+	l.cmd = cmd
+	l.started = true
+	l.mu.Unlock()
+
+	done := l.waitDone
+	go func() {
+		_ = cmd.Wait()
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if l.cmd == cmd {
+			_ = os.Remove(l.helperPath)
+			l.helperPath = ""
+			l.cmd = nil
+			l.started = false
+			l.ready = false
+		}
+		close(done)
+	}()
+	if err := l.verifyReady(ctx, cmd); err != nil {
+		l.Stop()
+		return err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.started || ctx.Err() != nil {
+		return ErrSoloistReadinessUnverifiable
+	}
+	l.ready = true
+	return nil
+}
+
+func (l *SoloistLauncher) verifyReady(ctx context.Context, cmd *exec.Cmd) error {
+	if l.processRunner == nil {
+		l.processRunner = execCommandContext
+	}
+	if l.readinessProbe == nil {
+		l.readinessProbe = func(ctx context.Context, cmd *exec.Cmd) error {
+			return ErrSoloistReadinessUnverifiable
+		}
+	}
+	if l.isolationVerifier == nil {
+		l.isolationVerifier = func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error {
+			return verifySoloistChildIsolation(cfg, cmd)
+		}
+	}
+	if err := l.isolationVerifier(l.cfg, cmd); err != nil {
+		return err
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := l.readinessProbe(readyCtx, cmd); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifySoloistChildIsolation(cfg SoloistLaunchConfig, cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return errors.New("Soloist child process not started")
+	}
+	// unshare --fork is a supervisor in the parent's namespace. Inspect its
+	// descendant, retrying only the bounded fork/setpriv transition.
+	pid := 0
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		children, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", cmd.Process.Pid, cmd.Process.Pid))
+		if err != nil {
+			return ErrSoloistIsolationUnverifiable
+		}
+		for _, child := range strings.Fields(string(children)) {
+			candidate, err := strconv.Atoi(child)
+			if err != nil {
+				continue
+			}
+			status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", candidate))
+			if err != nil {
+				continue
+			}
+			uid, err := soloistChildUIDFromStatus(string(status))
+			if err == nil && uid == cfg.IsolatedUID {
+				pid = candidate
+				break
+			}
+		}
+		if pid > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid <= 0 {
+		return ErrSoloistIsolationUnverifiable
+	}
+	pidNS, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "ns", "pid"))
+	if err != nil {
+		return err
+	}
+	selfPIDNS, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(os.Getpid()), "ns", "pid"))
+	if err != nil {
+		return err
+	}
+	if pidNS == selfPIDNS {
+		return errors.New("Soloist child did not start in a private PID namespace")
+	}
+	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
+	status, err := os.ReadFile(statusPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", statusPath, err)
+	}
+	uid, err := soloistChildUIDFromStatus(string(status))
+	if err != nil {
+		return err
+	}
+	if uid == 0 {
+		return errors.New("Soloist child is still running as root")
+	}
+	if cfg.IsolatedUID > 0 && uid != cfg.IsolatedUID {
+		return fmt.Errorf("Soloist child UID mismatch: expected %d, got %d", cfg.IsolatedUID, uid)
+	}
+	return nil
+}
+
+func soloistChildUIDFromStatus(status string) (int, error) {
+	for _, line := range strings.Split(status, "\n") {
+		if strings.HasPrefix(line, "Uid:") {
+			fields := strings.Fields(line)
+			if len(fields) != 5 {
+				return 0, fmt.Errorf("malformed Uid line: %q", line)
+			}
+			uid, err := strconv.Atoi(fields[1])
+			if err != nil {
+				return 0, fmt.Errorf("invalid child UID %q: %w", fields[1], err)
+			}
+			for _, value := range fields[2:] {
+				other, err := strconv.Atoi(value)
+				if err != nil || other != uid {
+					return 0, ErrSoloistIsolationUnverifiable
+				}
+			}
+			return uid, nil
+		}
+	}
+	return 0, errors.New("Soloist child UID missing from /proc/<pid>/status")
+}
+
+// Stop terminates the isolated Soloist child. Killing the unshare supervisor
+// process tears down its private PID namespace, which in turn reaps the
+// Soloist child; no orphan process or namespace is left behind.
+func (l *SoloistLauncher) Stop() {
+	l.mu.Lock()
+	cmd := l.cmd
+	waitDone := l.waitDone
+	if cmd != nil && cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Process.Kill()
+	}
+	l.mu.Unlock()
+	if waitDone != nil {
+		<-waitDone
+	}
+	l.mu.Lock()
+	l.started = false
+	l.ready = false
+	if l.helperPath != "" {
+		_ = os.Remove(l.helperPath)
+		l.helperPath = ""
+	}
+	l.cmd = nil
+	l.waitDone = nil
+	l.mu.Unlock()
+}
 
 type subscriber struct {
 	ch chan []byte

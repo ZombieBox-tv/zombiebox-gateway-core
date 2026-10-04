@@ -120,6 +120,10 @@ func TestSoloistStateRejectsMalformedAndOversizedEventsWithoutMutation(t *testin
 		`{"type":"position_sync","position":{"position_ms":1,"timestamp_ms":1780000000000,"speed":5.0}}`,
 		`{"type":"track_changed","item":{"uri":"https://private.invalid/track","entity_type":"track","decorations":{}}}`,
 		`{"type":"playback_state","status":"playing","item":{"entity_type":"track","decorations":{"identity":{"name":7}}}}`,
+		`{"type":"device_changed","is_active":"yes"}`,
+		`{"type":"volume_changed","volume":101}`,
+		`{"type":"volume_changed","volume":55.5}`,
+		`{"type":"playback_state","status":"paused","volume":-1}`,
 	}
 	for _, frame := range invalid {
 		err := state.Apply(session, []byte(frame))
@@ -450,6 +454,52 @@ func TestSoloistControllerUsesInjectedTransportAndSessionFence(t *testing.T) {
 	}
 }
 
+func TestSoloistControllerPlayURIUsesOfficialTrackPatternAndRejectsMalformed(t *testing.T) {
+	state := NewSoloistState(nil)
+	session := state.BeginSession()
+	applySoloistFrame(t, state, session, `{"type":"auth_state","logged_in":true,"is_active":true}`)
+	transport := &recordingSoloistTransport{}
+	controller := NewSoloistController(state, session, transport)
+	uri := "spotify:track:2JRo0gjbX4GrCqBYdRohoo"
+	if err := controller.PlayURI(context.Background(), uri); err != nil {
+		t.Fatalf("valid official track URI was rejected: %v", err)
+	}
+	if len(transport.frames) != 1 {
+		t.Fatalf("play URI command count mismatch: %d", len(transport.frames))
+	}
+	var frame struct {
+		Type    string  `json:"type"`
+		Command string  `json:"command"`
+		URI     *string `json:"uri"`
+	}
+	if err := json.Unmarshal(transport.frames[0], &frame); err != nil || frame.Type != "command" || frame.Command != "play" || frame.URI == nil || *frame.URI != uri {
+		t.Fatalf("play URI frame did not include exact Spotify track URI: %+v (%v)", frame, err)
+	}
+	if err := controller.PlayURI(context.Background(), "spotify:track:bad uri"); !errors.Is(err, ErrSoloistInvalidCommand) {
+		t.Fatalf("malformed play URI was accepted: %v", err)
+	}
+	if err := controller.PlayURI(context.Background(), "spotify:artist:artist-private"); !errors.Is(err, ErrSoloistInvalidCommand) {
+		t.Fatalf("artist URI was accepted as a playback target: %v", err)
+	}
+	if len(transport.frames) != 1 {
+		t.Fatalf("malformed play URI wrote to transport: %d", len(transport.frames))
+	}
+	if err := controller.Play(context.Background()); err != nil {
+		t.Fatalf("legacy play command should still be valid: %v", err)
+	}
+	if len(transport.frames) != 2 {
+		t.Fatalf("legacy play without URI emitted an unexpected frame: %d", len(transport.frames))
+	}
+	var legacy struct {
+		Type    string  `json:"type"`
+		Command string  `json:"command"`
+		URI     *string `json:"uri"`
+	}
+	if err := json.Unmarshal(transport.frames[1], &legacy); err != nil || legacy.Type != "command" || legacy.Command != "play" || legacy.URI != nil {
+		t.Fatalf("legacy play unexpectedly included a URI: %+v (%v)", legacy, err)
+	}
+}
+
 func TestSoloistCommandResultIsAnAcknowledgmentOnly(t *testing.T) {
 	state := NewSoloistState(nil)
 	session := state.BeginSession()
@@ -461,6 +511,84 @@ func TestSoloistCommandResultIsAnAcknowledgmentOnly(t *testing.T) {
 	}
 	if err := state.Apply(session, []byte(`{"type":"command_result","command":"unknown"}`)); !errors.Is(err, ErrSoloistMalformedEvent) {
 		t.Fatalf("unknown command acknowledgment was accepted: %v", err)
+	}
+}
+
+func TestSoloistDeviceActivityAndVolumeEventsResetOnUnauthenticatedState(t *testing.T) {
+	state := NewSoloistState(nil)
+	session := state.BeginSession()
+	applySoloistFrame(t, state, session, `{"type":"auth_state","logged_in":true,"is_active":true,"device_name":"Private Device"}`)
+	applySoloistFrame(t, state, session, `{"type":"playback_state","status":"playing","volume":42,"item":{"uri":"spotify:track:activity","entity_type":"track","decorations":{"identity":{"name":"Transfer Track"},"playback":{"duration_ms":30000}}}}`)
+	if snapshot := state.Snapshot(); !snapshot.VolumeKnown || snapshot.Volume != 42 || !snapshot.ActivityKnown || !snapshot.Active {
+		t.Fatalf("playback snapshot did not retain observed activity and volume: %+v", snapshot)
+	}
+	applySoloistFrame(t, state, session, `{"type":"device_changed","is_active":false,"device_name":"Secret Phone"}`)
+	applySoloistFrame(t, state, session, `{"type":"volume_changed","volume":0}`)
+	if snapshot := state.Snapshot(); !snapshot.ActivityKnown || snapshot.Active || !snapshot.VolumeKnown || snapshot.Volume != 0 {
+		t.Fatalf("device transfer or zero volume was not observed: %+v", snapshot)
+	}
+	applySoloistFrame(t, state, session, `{"type":"auth_state","logged_in":false,"is_active":true,"device_name":"Private Device"}`)
+	if snapshot := state.Snapshot(); snapshot.Authenticated || snapshot.ActivityKnown || snapshot.Active || snapshot.VolumeKnown || snapshot.Volume != 0 || snapshot.Track != nil {
+		t.Fatalf("unauthenticated state retained playback evidence: %+v", snapshot)
+	}
+	encoded, err := json.Marshal(state.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"Private Device", "Secret Phone", "spotify:track:activity"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("private Soloist field leaked into snapshot: %s", encoded)
+		}
+	}
+}
+
+func TestSoloistCommandAckWaitMatchesCommandAndDisconnectCancelsWaiter(t *testing.T) {
+	state := NewSoloistState(nil)
+	session := state.BeginSession()
+	applySoloistFrame(t, state, session, `{"type":"auth_state","logged_in":true,"is_active":true}`)
+	wait, err := state.beginCommandAckWait(session, "pause")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applySoloistFrame(t, state, session, `{"type":"command_result","command":"skip_next"}`)
+	select {
+	case result := <-wait.result:
+		t.Fatalf("unrelated acknowledgment resolved pause: %v", result)
+	default:
+	}
+	applySoloistFrame(t, state, session, `{"type":"command_result","command":"pause"}`)
+	if result := <-wait.result; result != nil {
+		t.Fatalf("matching acknowledgment failed: %v", result)
+	}
+
+	wait, err = state.beginCommandAckWait(session, "play")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.BeginSession()
+	if result := <-wait.result; !errors.Is(result, ErrSoloistDisconnected) {
+		t.Fatalf("reconnect did not cancel the old session waiter: %v", result)
+	}
+}
+
+func TestSoloistErrorEventResolvesWaiterWithoutRetainingRawMessage(t *testing.T) {
+	state := NewSoloistState(nil)
+	session := state.BeginSession()
+	applySoloistFrame(t, state, session, `{"type":"auth_state","logged_in":true,"is_active":true}`)
+	wait, err := state.beginCommandAckWait(session, "pause")
+	if err != nil {
+		t.Fatal(err)
+	}
+	applySoloistFrame(t, state, session, `{"type":"error","message":"secret account playback failure"}`)
+	if result := <-wait.result; !errors.Is(result, ErrSoloistCommandRejected) {
+		t.Fatalf("fixed rejection was not delivered: %v", result)
+	}
+	encoded, err := json.Marshal(state.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret account playback failure") {
+		t.Fatalf("raw error event was retained: %s", encoded)
 	}
 }
 

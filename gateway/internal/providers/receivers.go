@@ -73,7 +73,18 @@ func (a *Adapters) SpotifyStatus(ctx context.Context, c Config) (NowPlaying, err
 // Keep track presence separate from the public Now Playing model. The daemon
 // can report an active/buffering player before it has loaded a current track;
 // that state is not yet a playable incoming source.
+type spotifyAudioTransport struct {
+	rawPCM    bool
+	available bool
+}
+
 func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, bool, error) {
+	state, hasTrack, _, err := a.spotifyPlaybackStatus(ctx, c)
+	return state, hasTrack, err
+}
+
+func (a *Adapters) spotifyPlaybackStatus(ctx context.Context, c Config) (NowPlaying, bool, spotifyAudioTransport, error) {
+	audio := spotifyAudioTransport{available: true}
 	out := NowPlaying{
 		Provider: "spotify",
 		State:    "STOPPED",
@@ -88,35 +99,38 @@ func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, boo
 	}
 	headers, err := wrapperHeaders(c)
 	if err != nil {
-		return out, false, err
+		return out, false, audio, err
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(c.URL, "/")+"/status", nil)
 	if err != nil {
-		return out, false, err
+		return out, false, audio, err
 	}
 	req.Header = headers
 	res, err := a.http.Do(req)
 	if err != nil {
-		return out, false, errors.New("provider unavailable")
+		return out, false, audio, errors.New("provider unavailable")
 	}
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNoContent {
-		return out, false, nil
+		return out, false, audio, nil
 	}
 	if res.StatusCode == http.StatusServiceUnavailable {
-		return out, false, errProviderBusy
+		return out, false, audio, errProviderBusy
 	}
 	if res.StatusCode != http.StatusOK {
-		return out, false, fmt.Errorf("provider HTTP %d", res.StatusCode)
+		return out, false, audio, fmt.Errorf("provider HTTP %d", res.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20+1))
 	if err != nil {
-		return out, false, err
+		return out, false, audio, err
 	}
 	if len(body) > 8<<20 {
-		return out, false, errors.New("provider response too large")
+		return out, false, audio, errors.New("provider response too large")
 	}
 	var status struct {
+		Backend                    string `json:"backend"`
+		PCMFormat                  string `json:"pcm_format"`
+		AudioAvailable             *bool  `json:"audio_available"`
 		Stopped, Paused, Buffering bool
 		Volume                     int
 		VolumeSteps                int `json:"volume_steps"`
@@ -135,7 +149,16 @@ func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, boo
 		} `json:"daemon"`
 	}
 	if json.Unmarshal(body, &status) != nil {
-		return out, false, errors.New("invalid player status")
+		return out, false, audio, errors.New("invalid player status")
+	}
+	if status.Backend == "soloist" {
+		if status.PCMFormat != "s16le" || status.AudioAvailable == nil {
+			return out, false, audio, errors.New("unsupported Spotify audio transport")
+		}
+		audio.rawPCM = true
+		audio.available = *status.AudioAvailable
+	} else if status.Backend != "" && status.Backend != "go-librespot" {
+		return out, false, audio, errors.New("unsupported Spotify backend")
 	}
 	if status.VolumeSteps > 0 {
 		out.Volume = max(0, min(100, status.Volume*100/status.VolumeSteps))
@@ -202,7 +225,7 @@ func (a *Adapters) spotifyStatus(ctx context.Context, c Config) (NowPlaying, boo
 	} else if !status.Stopped && !status.Buffering {
 		out.State = "STOPPED"
 	}
-	return out, hasTrack, nil
+	return out, hasTrack, audio, nil
 }
 
 func sanitizeSpotifyCoverURL(raw string) string {
@@ -252,20 +275,31 @@ func truncate(s string, limit int) string {
 }
 
 func (a *Adapters) Spotify(ctx context.Context, c Config) ([]Source, error) {
-	state, err := a.SpotifyStatus(ctx, c)
+	state, _, audio, err := a.spotifyPlaybackStatus(ctx, c)
 	if err != nil {
 		return nil, err
 	}
-	return []Source{spotifySource(c, state)}, nil
+	return []Source{spotifySourceForTransport(c, state, audio)}, nil
 }
 
 func spotifySource(c Config, state NowPlaying) Source {
+	return spotifySourceForTransport(c, state, spotifyAudioTransport{available: true})
+}
+
+func spotifySourceForTransport(c Config, state NowPlaying, audio spotifyAudioTransport) Source {
 	item := domain.Item{ID: "spotify-connect", Provider: "spotify", Kind: "audio", Title: "Spotify Connect", Subtitle: "Select Zombie Box in Spotify, then listen here", Playable: true}
 	if state.Item != nil {
 		item = *state.Item
 	}
 	headers, _ := wrapperHeaders(c)
-	return Source{Item: item, ArtworkURL: state.ArtworkURL, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}
+	source := Source{Item: item, ArtworkURL: state.ArtworkURL, URL: strings.TrimRight(c.URL, "/") + "/audio", Headers: headers, MIME: "audio/mpeg", Live: true}
+	if audio.rawPCM {
+		source.RawPCM = true
+		source.PCMFormat = "s16le"
+		source.MIME = "audio/x-zombiebox-pcm;format=s16le;rate=44100;channels=2"
+		source.Item.Playable = source.Item.Playable && audio.available
+	}
+	return source
 }
 
 type PlayerCommand = domain.PlayerCommand

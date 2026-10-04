@@ -26,6 +26,18 @@ func (s *Server) playbackMode(ctx context.Context, source providers.Source, devi
 	if (source.AudioURL != "" || youtube) && (requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER") {
 		return playbackDecision{}, errors.New("adaptive stream requires mux")
 	}
+	if source.RawPCM {
+		if source.Item.Provider != "spotify" || source.PCMFormat != "s16le" || !source.Live || source.Path != "" {
+			return playbackDecision{}, errors.New("unsupported raw PCM source")
+		}
+		if requested != "" && requested != "AUTO" && requested != "TRANSCODE" {
+			return playbackDecision{}, errors.New("raw PCM requires capability-gated playback")
+		}
+		if !playback.ProbePass(device.Capabilities, "audio-track-pcm-stream") {
+			return playbackDecision{}, errors.New("raw PCM requires fresh audio-track-pcm-stream evidence")
+		}
+		return playbackDecision{mode: "RAW_PCM"}, nil
+	}
 	if requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER" {
 		return playbackDecision{mode: requested}, nil
 	}

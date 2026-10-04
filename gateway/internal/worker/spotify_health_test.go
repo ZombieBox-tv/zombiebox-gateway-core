@@ -44,7 +44,7 @@ func TestSpotifyHealthSeparatesPairingFromAccountReadiness(t *testing.T) {
 			}))
 			defer upstream.Close()
 			health, err := spotifyHealth(context.Background(), &http.Client{Timeout: time.Second}, upstream.URL, dir)
-			if (err != nil) != test.shouldFail || health.Ready != test.ready || health.AuthorizationRequired != test.pairing || health.AuthMode != test.mode {
+			if (err != nil) != test.shouldFail || health.Ready != test.ready || health.AudioReady || health.AuthorizationRequired != test.pairing || health.AuthMode != test.mode || health.Backend != "go-librespot" {
 				t.Fatalf("health = %+v, error = %v", health, err)
 			}
 		})

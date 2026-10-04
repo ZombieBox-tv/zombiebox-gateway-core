@@ -33,6 +33,8 @@ type Source struct {
 	Headers        http.Header
 	MIME           string
 	Live           bool
+	RawPCM         bool
+	PCMFormat      string
 	Variants       []string
 	ResolveURL     string
 	ResolveHeaders http.Header

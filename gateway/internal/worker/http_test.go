@@ -134,8 +134,38 @@ func TestPCMBridgeProducesMP3(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := Config{Mode: "spotify", Token: strings.Repeat("t", 32), StateDir: dir}
-	s := httptest.NewServer(Handler(context.Background(), c))
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/code" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = io.WriteString(w, `{"username":"synthetic-session","track":{}}`)
+	}))
+	defer daemon.Close()
+	t.Setenv("ZOMBIE_SPOTIFY_DAEMON_URL", daemon.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := httptest.NewServer(Handler(ctx, c))
 	defer s.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		probe, _ := http.NewRequest(http.MethodGet, s.URL+"/health", nil)
+		probe.Header.Set("Authorization", "Bearer "+c.Token)
+		result, err := http.DefaultClient.Do(probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var health spotifyWorkerHealth
+		_ = json.NewDecoder(result.Body).Decode(&health)
+		_ = result.Body.Close()
+		if health.AudioReady {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("synthetic bridge did not produce encoded audio")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	r, _ := http.NewRequest("GET", s.URL+"/audio", nil)
 	r.Header.Set("Authorization", "Bearer "+c.Token)
 	res, err := http.DefaultClient.Do(r)

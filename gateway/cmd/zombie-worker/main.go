@@ -22,12 +22,15 @@ import (
 
 func main() {
 	configFile := flag.String("config", "/config/worker.json", "private worker configuration")
+	healthcheck := flag.Bool("healthcheck", false, "emit bounded Spotify readiness without exposing credentials")
 	flag.Parse()
-	if err := run(*configFile); err != nil {
+	if err := runWorker(*configFile, *healthcheck); err != nil {
 		log.Fatal(err)
 	}
 }
-func run(path string) error {
+func run(path string) error { return runWorker(path, false) }
+
+func runWorker(path string, healthcheck bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -47,11 +50,22 @@ func run(path string) error {
 		}
 		c.Listen = bind
 	}
+	if healthcheck {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		result, err := worker.ProbeSpotifyWorker(ctx, c, client)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
 	if err = os.MkdirAll(c.StateDir, 0700); err != nil {
 		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	soloistEnabled := c.Mode == "spotify" && os.Getenv("ZOMBIE_SOLOIST_URL") == "http://127.0.0.1:8097"
 	var commands []*exec.Cmd
 	var spotifyDiagnostics *worker.SpotifyDaemonDiagnostics
 	var airplayProgress *worker.AirPlayProgress
@@ -149,13 +163,35 @@ func run(path string) error {
 		} else if filepath.Base(cmd.Path) == "go-librespot" {
 			cmd.Stderr = spotifyDiagnostics
 		}
+		if filepath.Base(cmd.Path) == "go-librespot" {
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		}
 		if err = cmd.Start(); err != nil {
+			if soloistEnabled && filepath.Base(cmd.Path) == "go-librespot" {
+				continue
+			}
 			return fmt.Errorf("start %s: %w", filepath.Base(cmd.Path), err)
+		}
+		primaryDone := make(chan struct{})
+		if soloistEnabled && filepath.Base(cmd.Path) == "go-librespot" {
+			c.StopSpotify = func() {
+				select {
+				case <-primaryDone:
+					return
+				default:
+				}
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				<-primaryDone
+			}
 		}
 		wg.Add(1)
 		go func(cmd *exec.Cmd) {
 			defer wg.Done()
 			err := cmd.Wait()
+			close(primaryDone)
+			if soloistEnabled && filepath.Base(cmd.Path) == "go-librespot" {
+				return
+			}
 			errors <- fmt.Errorf("%s exited: %v", filepath.Base(cmd.Path), err)
 		}(cmd)
 	}

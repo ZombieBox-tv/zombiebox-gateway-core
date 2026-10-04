@@ -21,11 +21,132 @@ import (
 )
 
 type Config struct {
-	Mode     string `json:"mode"`
-	Listen   string `json:"listen"`
-	Token    string `json:"token"`
-	StateDir string `json:"stateDir"`
-	Pin      string `json:"pin,omitempty"`
+	Mode        string `json:"mode"`
+	Listen      string `json:"listen"`
+	Token       string `json:"token"`
+	StateDir    string `json:"stateDir"`
+	Pin         string `json:"pin,omitempty"`
+	StopSpotify func() `json:"-"`
+}
+
+const soloistPCMStreamMIME = "audio/x-zombiebox-pcm;format=s16le;rate=44100;channels=2"
+
+type SoloistPCMStreamFactory func(context.Context, string) (*SoloistPCMStream, error)
+
+type SoloistPCMRoute struct {
+	mu      sync.Mutex
+	stream  *SoloistPCMStream
+	factory SoloistPCMStreamFactory
+	active  bool
+}
+
+func NewSoloistPCMRoute(stream *SoloistPCMStream, factories ...SoloistPCMStreamFactory) *SoloistPCMRoute {
+	route := &SoloistPCMRoute{}
+	if len(factories) > 0 {
+		route.SetStreamFactory(factories[0])
+	}
+	route.SetStream(stream)
+	return route
+}
+
+func (r *SoloistPCMRoute) SetStream(stream *SoloistPCMStream) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active {
+		return
+	}
+	if r.stream != nil && r.stream != stream {
+		_ = r.stream.Close()
+	}
+	r.stream = stream
+}
+
+func (r *SoloistPCMRoute) SetStreamFactory(factory SoloistPCMStreamFactory) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active {
+		return
+	}
+	r.factory = factory
+}
+
+func soloistPCMRequestSession(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	for _, key := range []string{"X-Zombie-Session", "X-Zombiebox-Session"} {
+		if session := strings.TrimSpace(req.Header.Get(key)); session != "" {
+			return session
+		}
+	}
+	return strings.TrimSpace(req.URL.Query().Get("session"))
+}
+
+func (r *SoloistPCMRoute) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if r == nil {
+		http.Error(w, "audio unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var stream *SoloistPCMStream
+	r.mu.Lock()
+	if r.stream == nil && !r.active {
+		session := soloistPCMRequestSession(req)
+		if session == "" {
+			r.mu.Unlock()
+			http.Error(w, "audio unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if r.factory != nil {
+			created, err := r.factory(req.Context(), session)
+			if err != nil {
+				r.mu.Unlock()
+				http.Error(w, "audio unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			r.stream = created
+			stream = created
+		}
+	}
+	if r.active || r.stream == nil {
+		r.mu.Unlock()
+		http.Error(w, "audio unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	stream = r.stream
+	r.active = true
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		if r.stream == stream {
+			r.stream = nil
+		}
+		r.active = false
+		r.mu.Unlock()
+		_ = stream.Close()
+	}()
+
+	stop := context.AfterFunc(req.Context(), func() { _ = stream.Close() })
+	defer stop()
+
+	w.Header().Set("Content-Type", soloistPCMStreamMIME)
+	w.Header().Set("Cache-Control", "no-store, no-cache")
+	if req.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_, _ = io.Copy(w, stream)
 }
 
 // AirPlayMirrorStatus contains only fixed protocol state and bounded runtime
@@ -244,6 +365,8 @@ func handlerWithAirPlayDACPAndDiagnostics(ctx context.Context, c Config, diagnos
 	return handlerWithAirPlayDACPAndFullDiagnostics(ctx, c, diagnostics, progress, resolver, dacpHTTP, mirror, dacpDiagnostics, nil)
 }
 
+var newSpotifyBridgeFactory = newSpotifyBridge
+
 func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, diagnostics *SpotifyDaemonDiagnostics, progress *AirPlayProgress, resolver DACPResolver, dacpHTTP *http.Client, mirror AirPlayMirrorDiagnostics, dacpDiagnostics AirPlayDACPDiagnostics, audioDiagnostics AirPlayAudioDiagnostics) http.Handler {
 	if progress == nil {
 		progress = NewAirPlayProgress()
@@ -415,10 +538,11 @@ func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, dia
 				}
 			})
 		}
-		bridge = newSpotifyBridge(ctx, filepath.Join(c.StateDir, "audio.pcm"))
+		bridge = newSpotifyBridgeFactory(ctx, filepath.Join(c.StateDir, "audio.pcm"))
 		if bridge != nil {
 			context.AfterFunc(ctx, bridge.Close)
 		}
+		selector := newSpotifyBackendSelectionState(&spotifyDaemonAudioQualifier{client: client, daemonURL: daemonURL, stateDir: c.StateDir, bridge: bridge}, nil)
 		mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 			health, err := spotifyHealth(r.Context(), client, daemonURL, c.StateDir)
 			if err != nil {
@@ -427,6 +551,13 @@ func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, dia
 			}
 			w.Header().Set("Content-Type", "application/json")
 			audio := bridge.diagnostic()
+			selectedBackend, selectionErr := selector.Resolve(r.Context())
+			if selectionErr == nil && selectedBackend != "" {
+				health.Backend = string(selectedBackend)
+			} else {
+				health.Backend = "go-librespot"
+			}
+			health.AudioReady = audio.Active
 			if diagnostics != nil {
 				diagnostics.observePlayback(health.Stopped, health.BufferingWithoutTrack, audio.Active)
 			}
@@ -434,6 +565,7 @@ func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, dia
 			if snap != nil && (snap.RefusalLimited || snap.ConsecutiveRefusals > 0 || snap.FailureCounts["audioKeyRefused"] > 0) && audio.EncodedBytes == 0 {
 				health.Stopped = true
 				health.BufferingWithoutTrack = false
+				health.AudioReady = false
 			}
 			_ = json.NewEncoder(w).Encode(spotifyWorkerHealth{spotifyHealthResult: health, Audio: audio, Daemon: snap})
 		})
@@ -443,8 +575,19 @@ func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, dia
 			mux.HandleFunc("POST /player/"+command, proxy)
 		}
 		mux.HandleFunc("GET /audio", func(w http.ResponseWriter, r *http.Request) {
-			if bridge == nil {
-				http.Error(w, "audio unavailable", 503)
+			selectedBackend, selectionErr := selector.Resolve(r.Context())
+			if selectionErr != nil {
+				if errors.Is(selectionErr, ErrSpotifyBackendQualificationPending) {
+					w.Header().Set("Cache-Control", "no-store, no-cache")
+					w.Header().Set("Retry-After", "1")
+					http.Error(w, "audio unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				http.Error(w, "audio unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if selectedBackend == "" || bridge == nil {
+				http.Error(w, "audio unavailable", http.StatusServiceUnavailable)
 				return
 			}
 			bridge.ServeHTTP(w, r)
@@ -583,6 +726,10 @@ func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, dia
 			audioDiagnostics.RecordAirPlayHLSRequest(kind, recorder.statusCode, time.Since(startedAt), time.Now())
 		})
 	}
+	var dispatch http.Handler = mux
+	if c.Mode == "spotify" {
+		dispatch = newSpotifyFallbackRouter(mux, client, c, daemonURL, bridge, diagnostics)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -590,7 +737,7 @@ func handlerWithAirPlayDACPAndFullDiagnostics(ctx context.Context, c Config, dia
 			http.Error(w, "unauthorized", 401)
 			return
 		}
-		mux.ServeHTTP(w, r)
+		dispatch.ServeHTTP(w, r)
 	})
 }
 

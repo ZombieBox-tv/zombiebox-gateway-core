@@ -77,10 +77,10 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 			mode = "REMUX"
 		}
 	}
-	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "HYBRID" && mode != "TRANSCODE" && mode != "PCM_STREAM" {
+	if mode != "DIRECT_PLAY" && mode != "REMUX" && mode != "HYBRID" && mode != "TRANSCODE" && mode != "PCM_STREAM" && mode != "RAW_PCM" {
 		return domain.Plan{}, errors.New("unsupported playback mode")
 	}
-	if (mode == "REMUX" || mode == "HYBRID" || mode == "TRANSCODE" || mode == "PCM_STREAM") && ((source.Path != "" && s.deps.Media == nil) || (source.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(source)))) {
+	if (mode == "REMUX" || mode == "HYBRID" || mode == "TRANSCODE" || mode == "PCM_STREAM" || mode == "RAW_PCM") && ((source.Path != "" && s.deps.Media == nil) || (source.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(source)))) {
 		return domain.Plan{}, errors.New("conversion unavailable")
 	}
 
@@ -94,7 +94,7 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 			mime = "audio/aac"
 		}
 	}
-	if mode == "PCM_STREAM" {
+	if mode == "PCM_STREAM" || mode == "RAW_PCM" {
 		mime = media.PCMStreamMIME
 	}
 	item := source.Item
@@ -128,7 +128,7 @@ func (a receiverAdapter) Start(ctx context.Context, device string, source domain
 		resources: map[string]string{},
 	}
 	clientMode := mode
-	if mode == "PCM_STREAM" {
+	if mode == "PCM_STREAM" || mode == "RAW_PCM" {
 		clientMode = "TRANSCODE"
 	}
 	return domain.Plan{

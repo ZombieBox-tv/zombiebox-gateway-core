@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,491 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSoloistLauncherHidesAPIKeyFromParentArgs(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "soloist")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatalf("write fake Soloist binary: %v", err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "soloist-api-key")
+	if err := os.WriteFile(keyFile, []byte("super-secret-key\n"), 0600); err != nil {
+		t.Fatalf("write Soloist API key file: %v", err)
+	}
+
+	orderDir := t.TempDir()
+	orderFile := filepath.Join(orderDir, "launch-order.txt")
+	binDir := filepath.Join(orderDir, "bin")
+	if err := os.Mkdir(binDir, 0700); err != nil {
+		t.Fatalf("mkdir fake bin dir: %v", err)
+	}
+	unsharePath := filepath.Join(binDir, "unshare")
+	setprivPath := filepath.Join(binDir, "setpriv")
+	realTrPath, err := exec.LookPath("tr")
+	if err != nil {
+		t.Fatalf("locate real tr binary: %v", err)
+	}
+	trPath := filepath.Join(binDir, "tr")
+	if err := os.WriteFile(unsharePath, []byte("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--\" ]; then\n    shift\n    break\n  fi\n  shift\ndone\nprintf 'namespace-entered\\n' >> \"$ORDER_FILE\"\nexec \"$@\"\n"), 0700); err != nil {
+		t.Fatalf("write fake unshare binary: %v", err)
+	}
+	if err := os.WriteFile(setprivPath, []byte("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--\" ]; then\n    shift\n    break\n  fi\n  shift\ndone\nexec \"$@\"\n"), 0700); err != nil {
+		t.Fatalf("write fake setpriv binary: %v", err)
+	}
+	if err := os.WriteFile(trPath, []byte("#!/bin/sh\nprintf 'child-key-read\\n' >> \"$ORDER_FILE\"\nexec \"$REAL_TR\" \"$@\"\n"), 0700); err != nil {
+		t.Fatalf("write fake tr binary: %v", err)
+	}
+	if err := os.Setenv("REAL_TR", realTrPath); err != nil {
+		t.Fatalf("set REAL_TR: %v", err)
+	}
+	defer func() { _ = os.Unsetenv("REAL_TR") }()
+
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", binDir+":"+oldPath); err != nil {
+		t.Fatalf("set PATH for fake isolation tools: %v", err)
+	}
+	defer func() { _ = os.Setenv("PATH", oldPath) }()
+	if err := os.Setenv("ORDER_FILE", orderFile); err != nil {
+		t.Fatalf("set ORDER_FILE: %v", err)
+	}
+	defer func() { _ = os.Unsetenv("ORDER_FILE") }()
+
+	prevExecCommandContext := execCommandContext
+	defer func() { execCommandContext = prevExecCommandContext }()
+
+	var capturedArgs []string
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		capturedArgs = append([]string(nil), args...)
+		return exec.CommandContext(ctx, unsharePath, args...)
+	}
+
+	launcher, err := NewSoloistLauncher(SoloistLaunchConfig{
+		BinaryPath:     binaryPath,
+		APIKeyFile:     keyFile,
+		PipewireDevice: "pipewire-demo",
+		IsolatedUID:    12345,
+		IsolatedGID:    12345,
+	})
+	if err != nil {
+		t.Fatalf("NewSoloistLauncher: %v", err)
+	}
+	launcher.isolationVerifier = func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error { return nil }
+	launcher.readinessProbe = func(ctx context.Context, cmd *exec.Cmd) error { return nil }
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer launcher.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var orderTrace []string
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(orderFile)
+		if err == nil {
+			orderTrace = strings.FieldsFunc(string(data), func(r rune) bool {
+				return r == '\n' || r == '\r'
+			})
+			if err := validateSoloistLaunchOrder(orderTrace); err == nil {
+				if containsMarker(orderTrace, "namespace-entered") && containsMarker(orderTrace, "child-key-read") {
+					break
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !containsMarker(orderTrace, "namespace-entered") {
+		t.Fatalf("child namespace boundary was never recorded: %v", orderTrace)
+	}
+	if !containsMarker(orderTrace, "child-key-read") {
+		t.Fatalf("child-side API key read never occurred after the namespace boundary: %v", orderTrace)
+	}
+	if err := validateSoloistLaunchOrder(orderTrace); err != nil {
+		t.Fatalf("invalid trace order: %v: %v", err, orderTrace)
+	}
+	if containsMarker(orderTrace, "parent-key-read") {
+		t.Fatalf("parent-side API key read was observed: %v", orderTrace)
+	}
+
+	for _, arg := range capturedArgs {
+		if arg == "--api-key" || arg == "super-secret-key" {
+			t.Fatalf("outer unshare argv exposed API key: %v", capturedArgs)
+		}
+	}
+	if len(capturedArgs) == 0 || capturedArgs[0] != "--pid" {
+		t.Fatalf("unexpected unshare argv: %v", capturedArgs)
+	}
+	joined := strings.Join(capturedArgs, " ")
+	if strings.Contains(joined, "super-secret-key") {
+		t.Fatalf("outer unshare argv embedded the secret: %v", capturedArgs)
+	}
+	if strings.Contains(joined, "--api-key") {
+		t.Fatalf("outer unshare argv contained inline API key flag: %v", capturedArgs)
+	}
+	if !strings.Contains(joined, keyFile) {
+		t.Fatalf("expected key file path to flow into child after namespace creation: %v", capturedArgs)
+	}
+}
+
+func TestSoloistLauncherRequiresIsolationAndReadiness(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "soloist")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatalf("write fake Soloist binary: %v", err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "soloist-api-key")
+	if err := os.WriteFile(keyFile, []byte("super-secret-key\n"), 0600); err != nil {
+		t.Fatalf("write Soloist API key file: %v", err)
+	}
+
+	launcher, err := NewSoloistLauncher(SoloistLaunchConfig{
+		BinaryPath:     binaryPath,
+		APIKeyFile:     keyFile,
+		PipewireDevice: "pipewire-demo",
+		IsolatedUID:    12345,
+		IsolatedGID:    12345,
+	})
+	if err != nil {
+		t.Fatalf("NewSoloistLauncher: %v", err)
+	}
+	launcher.processRunner = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 5")
+	}
+	launcher.isolationVerifier = func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error {
+		if cmd == nil || cmd.Process == nil {
+			return errors.New("child process missing")
+		}
+		return errors.New("namespace verification failed")
+	}
+	launcher.readinessProbe = func(ctx context.Context, cmd *exec.Cmd) error {
+		return nil
+	}
+
+	if err := launcher.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "namespace verification failed") {
+		t.Fatalf("expected isolation failure before readiness, got err=%v", err)
+	}
+	launcher.mu.Lock()
+	ready := launcher.ready
+	started := launcher.started
+	launcher.mu.Unlock()
+	if ready || started {
+		t.Fatalf("launcher remained ready/started after failed isolation verification: ready=%v started=%v", ready, started)
+	}
+}
+
+func TestSoloistLauncherVerificationRejectsMismatchedOrUnreadableUID(t *testing.T) {
+	validate := func(status string, cfg SoloistLaunchConfig) error {
+		uid, err := soloistChildUIDFromStatus(status)
+		if err != nil {
+			return err
+		}
+		if uid == 0 {
+			return errors.New("Soloist child is still running as root")
+		}
+		if cfg.IsolatedUID > 0 && uid != cfg.IsolatedUID {
+			return errors.New("Soloist child UID mismatch")
+		}
+		return nil
+	}
+
+	t.Run("matching configured UID passes", func(t *testing.T) {
+		cfg := SoloistLaunchConfig{IsolatedUID: 12345}
+		if err := validate("Name:\tsoloist\nUid:\t12345\t12345\t12345\t12345\n", cfg); err != nil {
+			t.Fatalf("expected matching UID to pass: %v", err)
+		}
+	})
+
+	t.Run("mismatch rejects", func(t *testing.T) {
+		cfg := SoloistLaunchConfig{IsolatedUID: 54321}
+		if err := validate("Name:\tsoloist\nUid:\t12345\t12345\t12345\t12345\n", cfg); err == nil {
+			t.Fatal("expected UID mismatch to fail")
+		}
+	})
+
+	t.Run("root is rejected", func(t *testing.T) {
+		cfg := SoloistLaunchConfig{IsolatedUID: 12345}
+		if err := validate("Name:\tsoloist\nUid:\t0\t0\t0\t0\n", cfg); err == nil {
+			t.Fatal("expected root UID to fail")
+		}
+	})
+
+	t.Run("missing UID is unreadable status", func(t *testing.T) {
+		cfg := SoloistLaunchConfig{IsolatedUID: 12345}
+		if err := validate("Name:\tsoloist\nGroups:\t0\t0\t0\t0\n", cfg); err == nil {
+			t.Fatal("expected missing UID to fail")
+		}
+	})
+
+	t.Run("malformed UID is rejected", func(t *testing.T) {
+		cfg := SoloistLaunchConfig{IsolatedUID: 12345}
+		if err := validate("Name:\tsoloist\nUid:\tnot-a-number\tnot-a-number\tnot-a-number\tnot-a-number\n", cfg); err == nil {
+			t.Fatal("expected malformed UID to fail")
+		}
+	})
+}
+
+func TestSoloistLauncherRequiresObservedReadinessSignal(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "soloist")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatalf("write fake Soloist binary: %v", err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "soloist-api-key")
+	if err := os.WriteFile(keyFile, []byte("super-secret-key\n"), 0600); err != nil {
+		t.Fatalf("write Soloist API key file: %v", err)
+	}
+
+	launcher, err := NewSoloistLauncher(SoloistLaunchConfig{
+		BinaryPath:     binaryPath,
+		APIKeyFile:     keyFile,
+		PipewireDevice: "pipewire-demo",
+		IsolatedUID:    12345,
+		IsolatedGID:    12345,
+	})
+	if err != nil {
+		t.Fatalf("NewSoloistLauncher: %v", err)
+	}
+	launcher.processRunner = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 5")
+	}
+	launcher.isolationVerifier = func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error { return nil }
+	launcher.readinessProbe = func(ctx context.Context, cmd *exec.Cmd) error {
+		return ErrSoloistReadinessUnverifiable
+	}
+
+	if err := launcher.Start(context.Background()); err == nil || !errors.Is(err, ErrSoloistReadinessUnverifiable) {
+		t.Fatalf("expected absent readiness signal error, got err=%v", err)
+	}
+	launcher.mu.Lock()
+	ready := launcher.ready
+	started := launcher.started
+	launcher.mu.Unlock()
+	if ready || started {
+		t.Fatalf("launcher stayed ready after missing readiness signal: ready=%v started=%v", ready, started)
+	}
+}
+
+func TestSoloistLauncherFailsClosedOnReadinessTimeout(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "soloist")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatalf("write fake Soloist binary: %v", err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "soloist-api-key")
+	if err := os.WriteFile(keyFile, []byte("super-secret-key\n"), 0600); err != nil {
+		t.Fatalf("write Soloist API key file: %v", err)
+	}
+
+	launcher, err := NewSoloistLauncher(SoloistLaunchConfig{
+		BinaryPath:     binaryPath,
+		APIKeyFile:     keyFile,
+		PipewireDevice: "pipewire-demo",
+		IsolatedUID:    12345,
+		IsolatedGID:    12345,
+	})
+	if err != nil {
+		t.Fatalf("NewSoloistLauncher: %v", err)
+	}
+	launcher.processRunner = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 5")
+	}
+	launcher.isolationVerifier = func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error { return nil }
+	launcher.readinessProbe = func(ctx context.Context, cmd *exec.Cmd) error {
+		return context.DeadlineExceeded
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := launcher.Start(ctx); err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected readiness timeout error, got err=%v", err)
+	}
+	launcher.mu.Lock()
+	ready := launcher.ready
+	started := launcher.started
+	launcher.mu.Unlock()
+	if ready || started {
+		t.Fatalf("launcher remained ready/started after failed readiness check: ready=%v started=%v", ready, started)
+	}
+}
+
+func TestSoloistLauncherSignalsReadyOnlyAfterIsolationAndSignal(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "soloist")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatalf("write fake Soloist binary: %v", err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "soloist-api-key")
+	if err := os.WriteFile(keyFile, []byte("super-secret-key\n"), 0600); err != nil {
+		t.Fatalf("write Soloist API key file: %v", err)
+	}
+
+	launcher, err := NewSoloistLauncher(SoloistLaunchConfig{
+		BinaryPath:     binaryPath,
+		APIKeyFile:     keyFile,
+		PipewireDevice: "pipewire-demo",
+		IsolatedUID:    12345,
+		IsolatedGID:    12345,
+	})
+	if err != nil {
+		t.Fatalf("NewSoloistLauncher: %v", err)
+	}
+	launcher.processRunner = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 5")
+	}
+	launcher.isolationVerifier = func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error { return nil }
+	launcher.readinessProbe = func(ctx context.Context, cmd *exec.Cmd) error { return nil }
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("expected successful isolation and readiness probe to succeed, got err=%v", err)
+	}
+	launcher.mu.Lock()
+	ready := launcher.ready
+	started := launcher.started
+	launcher.mu.Unlock()
+	if !ready || !started {
+		t.Fatalf("ready should only become true after both isolation and signal succeed: ready=%v started=%v", ready, started)
+	}
+	launcher.Stop()
+}
+
+func TestSoloistLauncherKeepsHelperUntilChildExit(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "soloist")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatalf("write fake Soloist binary: %v", err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "soloist-api-key")
+	if err := os.WriteFile(keyFile, []byte("super-secret-key\n"), 0600); err != nil {
+		t.Fatalf("write Soloist API key file: %v", err)
+	}
+
+	orderDir := t.TempDir()
+	orderFile := filepath.Join(orderDir, "launch-order.txt")
+	binDir := filepath.Join(orderDir, "bin")
+	if err := os.Mkdir(binDir, 0700); err != nil {
+		t.Fatalf("mkdir fake bin dir: %v", err)
+	}
+	unsharePath := filepath.Join(binDir, "unshare")
+	setprivPath := filepath.Join(binDir, "setpriv")
+	trPath := filepath.Join(binDir, "tr")
+	realTrPath, err := exec.LookPath("tr")
+	if err != nil {
+		t.Fatalf("locate real tr binary: %v", err)
+	}
+	if err := os.WriteFile(unsharePath, []byte("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--\" ]; then\n    shift\n    break\n  fi\n  shift\ndone\nprintf 'namespace-entered\\n' >> \"$ORDER_FILE\"\n# Stall until the helper is actually executed so Start can return while it still exists.\nexec \"$@\"\n"), 0700); err != nil {
+		t.Fatalf("write fake unshare binary: %v", err)
+	}
+	if err := os.WriteFile(setprivPath, []byte("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--\" ]; then\n    shift\n    break\n  fi\n  shift\ndone\nexec \"$@\"\n"), 0700); err != nil {
+		t.Fatalf("write fake setpriv binary: %v", err)
+	}
+	if err := os.WriteFile(trPath, []byte("#!/bin/sh\nprintf 'child-key-read\\n' >> \"$ORDER_FILE\"\nexec \"$REAL_TR\" \"$@\"\n"), 0700); err != nil {
+		t.Fatalf("write fake tr binary: %v", err)
+	}
+	if err := os.Setenv("REAL_TR", realTrPath); err != nil {
+		t.Fatalf("set REAL_TR: %v", err)
+	}
+	defer func() { _ = os.Unsetenv("REAL_TR") }()
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", binDir+":"+oldPath); err != nil {
+		t.Fatalf("set PATH for fake isolation tools: %v", err)
+	}
+	defer func() { _ = os.Setenv("PATH", oldPath) }()
+	if err := os.Setenv("ORDER_FILE", orderFile); err != nil {
+		t.Fatalf("set ORDER_FILE: %v", err)
+	}
+	defer func() { _ = os.Unsetenv("ORDER_FILE") }()
+
+	prevExecCommandContext := execCommandContext
+	defer func() { execCommandContext = prevExecCommandContext }()
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, unsharePath, args...)
+	}
+
+	launcher, err := NewSoloistLauncher(SoloistLaunchConfig{
+		BinaryPath:     binaryPath,
+		APIKeyFile:     keyFile,
+		PipewireDevice: "pipewire-demo",
+		IsolatedUID:    12345,
+		IsolatedGID:    12345,
+	})
+	if err != nil {
+		t.Fatalf("NewSoloistLauncher: %v", err)
+	}
+	launcher.isolationVerifier = func(cfg SoloistLaunchConfig, cmd *exec.Cmd) error { return nil }
+	launcher.readinessProbe = func(ctx context.Context, cmd *exec.Cmd) error { return nil }
+	if err := launcher.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	helperPath := ""
+	launcher.mu.Lock()
+	helperPath = launcher.helperPath
+	launcher.mu.Unlock()
+	if helperPath == "" {
+		t.Fatal("helper script path was not retained after Start returned")
+	}
+	if _, err := os.Stat(helperPath); err != nil {
+		t.Fatalf("helper script missing before child completion: %v", err)
+	}
+	launcher.Stop()
+	if _, err := os.Stat(helperPath); !os.IsNotExist(err) {
+		t.Fatalf("helper script was not removed after process completion; path=%q err=%v", helperPath, err)
+	}
+}
+
+func TestSoloistLaunchOrderValidationRejectsForbiddenPatterns(t *testing.T) {
+	tests := []struct {
+		name  string
+		trace []string
+		want  bool
+	}{
+		{name: "valid", trace: []string{"namespace-entered", "child-key-read"}, want: true},
+		{name: "parent-key-read-before-namespace", trace: []string{"parent-key-read", "namespace-entered", "child-key-read"}, want: false},
+		{name: "reversed-order", trace: []string{"child-key-read", "namespace-entered"}, want: false},
+		{name: "parent-key-read-after-namespace", trace: []string{"namespace-entered", "parent-key-read", "child-key-read"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateSoloistLaunchOrder(tt.trace); (err == nil) != tt.want {
+				t.Fatalf("trace %v => err=%v, want valid=%v", tt.trace, err, tt.want)
+			}
+		})
+	}
+}
+
+func validateSoloistLaunchOrder(trace []string) error {
+	if containsMarker(trace, "parent-key-read") {
+		return errors.New("parent-side secret read rejected")
+	}
+	if !containsMarker(trace, "namespace-entered") {
+		return errors.New("namespace boundary missing")
+	}
+	if !containsMarker(trace, "child-key-read") {
+		return errors.New("child key read missing")
+	}
+	if childKeyIndex(trace) <= namespaceIndex(trace) {
+		return errors.New("child key read not after namespace entry")
+	}
+	return nil
+}
+
+func containsMarker(trace []string, marker string) bool {
+	for _, item := range trace {
+		if item == marker {
+			return true
+		}
+	}
+	return false
+}
+
+func namespaceIndex(trace []string) int {
+	for i, item := range trace {
+		if item == "namespace-entered" {
+			return i
+		}
+	}
+	return -1
+}
+
+func childKeyIndex(trace []string) int {
+	for i, item := range trace {
+		if item == "child-key-read" {
+			return i
+		}
+	}
+	return -1
+}
 
 func writeSyntheticPCMWithDeadline(t *testing.T, fifoPath string, bytesCount int, timeout time.Duration) {
 	t.Helper()

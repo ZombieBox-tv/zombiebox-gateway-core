@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,11 @@ func TestSoloistWebSocketObservesStateSendsControlAndCloses(t *testing.T) {
 		var command string
 		if err := websocket.Message.Receive(conn, &command); err == nil {
 			commands <- command
+		}
+		for {
+			if err := websocket.Message.Receive(conn, &command); err != nil {
+				return
+			}
 		}
 	})
 	state := NewSoloistState(nil)
@@ -126,6 +132,108 @@ func TestSoloistWebSocketFencesCommandsAfterReconnect(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("current local connection did not receive control")
+	}
+}
+
+func TestSoloistControllerTransportFencesAuthRevisionAtWriteBoundary(t *testing.T) {
+	advanceAuth := make(chan struct{})
+	authRevisionSent := make(chan struct{})
+	commands := make(chan string, 2)
+	endpoint := newSoloistWSTestServer(t, func(conn *websocket.Conn) {
+		if err := websocket.Message.Send(conn, `{"type":"auth_state","logged_in":true,"is_active":true}`); err != nil {
+			return
+		}
+		<-advanceAuth
+		if err := websocket.Message.Send(conn, `{"type":"auth_state","logged_in":true,"is_active":true}`); err != nil {
+			return
+		}
+		close(authRevisionSent)
+		for {
+			var frame string
+			if err := websocket.Message.Receive(conn, &frame); err != nil {
+				return
+			}
+			commands <- frame
+			var request struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			}
+			if json.Unmarshal([]byte(frame), &request) != nil {
+				return
+			}
+			if request.Type != "command" {
+				return
+			}
+			if err := websocket.Message.Send(conn, `{"type":"command_result","command":"`+request.Command+`"}`); err != nil {
+				return
+			}
+			if request.Command == "play" {
+				return
+			}
+		}
+	})
+	state := NewSoloistState(nil)
+	observer, err := ConnectSoloistWebSocket(context.Background(), endpoint, state)
+	if err != nil {
+		t.Fatalf("connect local test server: %v", err)
+	}
+	defer observer.Close()
+	waitForSoloistWS(t, observer.Done(), func() bool { return state.Snapshot().Authenticated })
+
+	authRevisionA, _, _, err := state.queryRevisions(observer.Session())
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldController := NewSoloistController(state, observer.Session(), soloistRevisionBoundTransport{
+		websocket:    observer,
+		authRevision: authRevisionA,
+	})
+	close(advanceAuth)
+	select {
+	case <-authRevisionSent:
+	case <-time.After(time.Second):
+		t.Fatal("fake upstream did not send the new authenticated epoch")
+	}
+	waitForSoloistWS(t, observer.Done(), func() bool {
+		authRevision, _, _, revisionErr := state.queryRevisions(observer.Session())
+		return revisionErr == nil && authRevision != authRevisionA
+	})
+	authRevisionB, _, _, err := state.queryRevisions(observer.Session())
+	if err != nil || authRevisionB == authRevisionA {
+		t.Fatalf("same-socket authentication epoch did not advance: revision=%d err=%v", authRevisionB, err)
+	}
+
+	if err := oldController.Pause(context.Background()); !errors.Is(err, ErrSoloistTransport) {
+		t.Fatalf("old-revision controller did not reject its write: %v", err)
+	}
+
+	wait, err := state.beginCommandAckWait(observer.Session(), "play", authRevisionB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentController := NewSoloistController(state, observer.Session(), soloistRevisionBoundTransport{
+		websocket:    observer,
+		authRevision: authRevisionB,
+	})
+	if err := currentController.Play(context.Background()); err != nil {
+		state.cancelCommandAckWait(wait, err)
+		t.Fatalf("current-revision controller failed to write: %v", err)
+	}
+	select {
+	case frame := <-commands:
+		if frame != `{"type":"command","command":"play"}` {
+			t.Fatalf("stale controller emitted a frame before the current command: %s", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current-revision command did not reach the upstream")
+	}
+	select {
+	case result := <-wait.result:
+		if result != nil {
+			t.Fatalf("current-revision command was not acknowledged: %v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current-revision command result was not observed")
 	}
 }
 
@@ -317,6 +425,37 @@ func TestSoloistWebSocketContextDeadlineClosesIdleRead(t *testing.T) {
 	}
 	if snapshot := state.Snapshot(); snapshot.Connected || snapshot.AuthenticationKnown {
 		t.Fatalf("deadline left session state active: %+v", snapshot)
+	}
+}
+
+func TestSoloistWebSocketSendsOnlyFixedPlaybackQueryAfterAuthentication(t *testing.T) {
+	query := make(chan string, 1)
+	endpoint := newSoloistWSTestServer(t, func(conn *websocket.Conn) {
+		if err := websocket.Message.Send(conn, `{"type":"auth_state","logged_in":true,"is_active":false}`); err != nil {
+			return
+		}
+		var frame string
+		if websocket.Message.Receive(conn, &frame) == nil {
+			query <- frame
+		}
+	})
+	state := NewSoloistState(nil)
+	observer, err := ConnectSoloistWebSocket(context.Background(), endpoint, state)
+	if err != nil {
+		t.Fatalf("connect local test server: %v", err)
+	}
+	defer observer.Close()
+	waitForSoloistWS(t, observer.Done(), func() bool { return state.Snapshot().Authenticated })
+	if err := observer.RequestPlaybackState(context.Background(), observer.Session()); err != nil {
+		t.Fatalf("request current playback state: %v", err)
+	}
+	select {
+	case frame := <-query:
+		if frame != `{"type":"command","command":"get_state"}` {
+			t.Fatalf("unexpected query frame or control passthrough: %s", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fixed playback query did not reach the local connection")
 	}
 }
 

@@ -38,6 +38,12 @@ func TestSpotifySemanticBoundary(t *testing.T) {
 	if err != nil || len(sources) != 1 || !sources[0].Live || sources[0].MIME != "audio/mpeg" {
 		t.Fatalf("sources: %+v %v", sources, err)
 	}
+	if sources[0].RawPCM {
+		t.Fatalf("go-librespot /audio should stay encoded: %+v", sources[0])
+	}
+	if sources[0].PCMFormat != "" {
+		t.Fatalf("go-librespot /audio should not declare PCM format: %+v", sources[0])
+	}
 	if sources[0].ArtworkURL != "https://i.scdn.co/image/fixture" || len(sources[0].ArtworkHeaders) != 0 {
 		t.Fatal("artwork lost or token forwarded to CDN")
 	}

@@ -66,6 +66,18 @@ func LocalModeSource(metadata domain.Metadata, source domain.Source, capabilitie
 	allowNativeHLS := !source.Live || source.Item.Kind == "audio" ||
 		HasFreshLiveVideoHLSEvidence(capabilities)
 	mode := localMode(metadata, source.MIME, capabilities, requested, allowNativeHLS)
+	if source.RawPCM {
+		if source.Item.Provider != "spotify" || source.PCMFormat != "s16le" || !source.Live || source.Path != "" {
+			return "EXTERNAL_PLAYER"
+		}
+		if requested == "DIRECT_PLAY" || requested == "EXTERNAL_PLAYER" {
+			return "EXTERNAL_PLAYER"
+		}
+		if (requested == "" || requested == "AUTO" || requested == "TRANSCODE") && probeStatus(capabilities, "audio-track-pcm-stream", time.Now().Unix()) == "PASS" {
+			return "RAW_PCM"
+		}
+		return "EXTERNAL_PLAYER"
+	}
 	if isLiveMP3Audio(metadata, source) && (requested == "" || requested == "AUTO" || requested == "REMUX" || requested == "TRANSCODE") {
 		if requested == "REMUX" {
 			return mode

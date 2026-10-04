@@ -1,6 +1,8 @@
 package playback
 
 import (
+	"time"
+
 	"zombiebox.local/gateway/internal/domain"
 )
 
@@ -53,4 +55,8 @@ func probeStatus(caps domain.Capabilities, probeID string, now int64) string {
 		return "FAIL"
 	}
 	return "UNKNOWN"
+}
+
+func ProbePass(caps domain.Capabilities, probeID string) bool {
+	return probeStatus(caps, probeID, time.Now().Unix()) == "PASS"
 }

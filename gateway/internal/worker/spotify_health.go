@@ -17,14 +17,17 @@ type spotifyHealthResult struct {
 	Ready                 bool   `json:"ready"`
 	AuthorizationRequired bool   `json:"authorizationRequired"`
 	AuthMode              string `json:"authMode,omitempty"`
+	Backend               string `json:"backend,omitempty"`
+	AudioReady            bool   `json:"audioReady,omitempty"`
 	BufferingWithoutTrack bool   `json:"bufferingWithoutTrack,omitempty"`
 	Stopped               bool   `json:"stopped,omitempty"`
+	Paused                bool   `json:"paused,omitempty"`
 }
 
 // Spotify's pairing code endpoint contains a secret. Health only inspects its
 // status code and never copies its body or the code into a response or log.
 func spotifyHealth(ctx context.Context, client *http.Client, upstream, stateDir string) (spotifyHealthResult, error) {
-	health := spotifyHealthResult{AuthMode: spotifyAuthMode(stateDir)}
+	health := spotifyHealthResult{AuthMode: spotifyAuthMode(stateDir), Backend: "go-librespot"}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, upstream+"/auth/code", nil)
 	if err != nil {
 		return health, err
@@ -59,13 +62,19 @@ func spotifyHealth(ctx context.Context, client *http.Client, upstream, stateDir 
 			// account session exists. Never expose that identity in health.
 			var status struct {
 				Username  string    `json:"username"`
+				Paused    bool      `json:"paused"`
 				Stopped   bool      `json:"stopped"`
 				Buffering bool      `json:"buffering"`
 				Track     *struct{} `json:"track"`
 			}
 			if json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&status) == nil && strings.TrimSpace(status.Username) != "" {
+				// A real account session proves the daemon is authenticated; it does not
+				// prove actual audio output was produced or decoded. Audio readiness is
+				// assessed separately at the bridge/PCM boundary, never inferred from
+				// OAuth or account state alone.
 				health.Ready = true
 				health.Stopped = status.Stopped
+				health.Paused = status.Paused
 				health.BufferingWithoutTrack = !status.Stopped && status.Buffering && status.Track == nil
 				return health, nil
 			}

@@ -52,6 +52,8 @@ var (
 	ErrSoloistInvalidCommand     = errors.New("invalid Soloist command")
 	ErrSoloistControlUnavailable = errors.New("Soloist control transport unavailable")
 	ErrSoloistTransport          = errors.New("Soloist control transport failed")
+	ErrSoloistCommandPending     = errors.New("Soloist command acknowledgment already pending")
+	ErrSoloistCommandRejected    = errors.New("Soloist command was rejected")
 )
 
 // SoloistSession is an opaque WebSocket connection identity. A token returned
@@ -74,11 +76,12 @@ const (
 // is nil when no rating list is known, otherwise it records whether that list
 // contains the explicit label. Spotify URIs and artwork URLs are omitted.
 type SoloistMetadata struct {
-	Title      string `json:"title,omitempty"`
-	Artist     string `json:"artist,omitempty"`
-	Album      string `json:"album,omitempty"`
-	DurationMS int64  `json:"durationMs,omitempty"`
-	Explicit   *bool  `json:"explicit,omitempty"`
+	Title      string   `json:"title,omitempty"`
+	Artist     string   `json:"artist,omitempty"`
+	Artists    []string `json:"artists,omitempty"`
+	Album      string   `json:"album,omitempty"`
+	DurationMS int64    `json:"durationMs,omitempty"`
+	Explicit   *bool    `json:"explicit,omitempty"`
 }
 
 type soloistArtworkCandidate struct {
@@ -96,6 +99,8 @@ type SoloistSnapshot struct {
 	Authenticated               bool                  `json:"authenticated"`
 	ActivityKnown               bool                  `json:"activityKnown"`
 	Active                      bool                  `json:"active"`
+	VolumeKnown                 bool                  `json:"volumeKnown"`
+	Volume                      int                   `json:"volume"`
 	Status                      SoloistPlaybackStatus `json:"status"`
 	Track                       *SoloistMetadata      `json:"track,omitempty"`
 	TrackRevision               uint64                `json:"trackRevision"`
@@ -135,10 +140,16 @@ type SoloistState struct {
 	generation uint64
 	connected  bool
 
+	authRevision     uint64
+	playbackRevision uint64
+	errorRevision    uint64
+
 	authenticationKnown bool
 	authenticated       bool
 	activityKnown       bool
 	active              bool
+	volumeKnown         bool
+	volume              int
 	status              SoloistPlaybackStatus
 
 	track          *SoloistMetadata
@@ -159,6 +170,8 @@ type SoloistState struct {
 	localOutputAt     time.Time
 
 	commandResults uint64
+	commandWait    *soloistCommandAckWait
+	changed        chan struct{}
 }
 
 // NewSoloistState creates a reducer using the supplied clock. A nil clock uses
@@ -167,7 +180,7 @@ func NewSoloistState(now func() time.Time) *SoloistState {
 	if now == nil {
 		now = time.Now
 	}
-	return &SoloistState{now: now, status: SoloistIdle}
+	return &SoloistState{now: now, status: SoloistIdle, changed: make(chan struct{})}
 }
 
 // BeginSession starts a fresh WebSocket identity and clears all session state.
@@ -184,6 +197,7 @@ func (s *SoloistState) BeginSession() SoloistSession {
 	}
 	s.connected = true
 	s.resetSessionState()
+	s.signalChanged()
 	return SoloistSession{generation: s.generation}
 }
 
@@ -199,6 +213,7 @@ func (s *SoloistState) EndSession(session SoloistSession) error {
 	}
 	s.connected = false
 	s.resetSessionState()
+	s.signalChanged()
 	return nil
 }
 
@@ -242,13 +257,17 @@ func (s *SoloistState) Apply(session SoloistSession, frame []byte) error {
 
 	switch event.kind {
 	case "auth_state":
+		if s.authenticationKnown {
+			s.resetAuthenticatedPlaybackState(ErrSoloistUnauthenticated)
+		}
+		s.authRevision = nextSoloistRevision(s.authRevision)
 		s.authenticationKnown = true
 		s.authenticated = event.loggedIn
-		s.activityKnown = true
-		s.active = event.isActive
-		if !event.loggedIn {
-			s.clearTrack(true)
-			s.status = SoloistIdle
+		if event.loggedIn {
+			s.activityKnown = true
+			s.active = event.isActive
+		} else {
+			s.resetAuthenticatedPlaybackState(ErrSoloistUnauthenticated)
 		}
 	case "playback_state":
 		if !s.authenticated {
@@ -257,6 +276,14 @@ func (s *SoloistState) Apply(session SoloistSession, frame []byte) error {
 		if event.hasActivity {
 			s.activityKnown = true
 			s.active = event.isActive
+		}
+		if event.hasVolume {
+			s.volumeKnown = event.volume != nil
+			if event.volume != nil {
+				s.volume = *event.volume
+			} else {
+				s.volume = 0
+			}
 		}
 		if event.track != nil {
 			s.updateTrack(event.track)
@@ -269,6 +296,7 @@ func (s *SoloistState) Apply(session SoloistSession, frame []byte) error {
 		if event.position != nil {
 			s.setPosition(event.position, now)
 		}
+		s.playbackRevision = nextSoloistRevision(s.playbackRevision)
 	case "track_changed":
 		if !s.authenticated {
 			return ErrSoloistUnauthenticated
@@ -280,6 +308,18 @@ func (s *SoloistState) Apply(session SoloistSession, frame []byte) error {
 			return ErrSoloistUnauthenticated
 		}
 		s.setPlaybackStatus(event.status, now)
+	case "device_changed":
+		if !s.authenticated {
+			return ErrSoloistUnauthenticated
+		}
+		s.activityKnown = true
+		s.active = event.isActive
+	case "volume_changed":
+		if !s.authenticated {
+			return ErrSoloistUnauthenticated
+		}
+		s.volumeKnown = true
+		s.volume = *event.volume
 	case "position_sync":
 		if !s.authenticated {
 			return ErrSoloistUnauthenticated
@@ -292,9 +332,18 @@ func (s *SoloistState) Apply(session SoloistSession, frame []byte) error {
 		if s.commandResults < ^uint64(0) {
 			s.commandResults++
 		}
+		if s.commandWait != nil && s.commandWait.session == session && s.commandWait.command == event.command {
+			s.finishCommandWait(s.commandWait, nil)
+		}
+	case "error":
+		s.errorRevision = nextSoloistRevision(s.errorRevision)
+		if s.commandWait != nil && s.commandWait.session == session {
+			s.finishCommandWait(s.commandWait, ErrSoloistCommandRejected)
+		}
 	default:
 		return ErrSoloistUnsupported
 	}
+	s.signalChanged()
 	return nil
 }
 
@@ -323,13 +372,18 @@ func (s *SoloistState) Snapshot() SoloistSnapshot {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
+	return s.snapshotLocked(s.now())
+}
+
+func (s *SoloistState) snapshotLocked(now time.Time) SoloistSnapshot {
 	snapshot := SoloistSnapshot{
 		Connected:           s.connected,
 		AuthenticationKnown: s.authenticationKnown,
 		Authenticated:       s.authenticated,
 		ActivityKnown:       s.activityKnown,
 		Active:              s.active,
+		VolumeKnown:         s.volumeKnown,
+		Volume:              s.volume,
 		Status:              s.status,
 		TrackRevision:       s.trackRevision,
 		CommandResults:      s.commandResults,
@@ -338,8 +392,7 @@ func (s *SoloistState) Snapshot() SoloistSnapshot {
 		LocalOutputAgeMS:    -1,
 	}
 	if s.track != nil {
-		track := *s.track
-		track.Explicit = cloneSoloistBool(s.track.Explicit)
+		track := cloneSoloistMetadata(*s.track)
 		snapshot.Track = &track
 	}
 	if s.positionKnown {
@@ -358,6 +411,40 @@ func (s *SoloistState) Snapshot() SoloistSnapshot {
 		}
 	}
 	return snapshot
+}
+
+// playbackSnapshot returns one atomic semantic snapshot and matching private
+// artwork for the requested live session.
+func (s *SoloistState) playbackSnapshot(session SoloistSession) (SoloistSnapshot, *soloistArtworkCandidate) {
+	return s.playbackSnapshotForAuthRevision(session, 0)
+}
+
+func (s *SoloistState) playbackSnapshotForAuthRevision(session SoloistSession, authRevision uint64) (SoloistSnapshot, *soloistArtworkCandidate) {
+	if s == nil {
+		return SoloistSnapshot{Status: SoloistIdle, PositionMS: -1, LocalOutputAgeMS: -1}, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.snapshotLocked(s.now())
+	if !s.connected || !s.matchesSession(session) {
+		return SoloistSnapshot{Status: SoloistIdle, PositionMS: -1, LocalOutputAgeMS: -1}, nil
+	}
+	if authRevision != 0 && s.authRevision != authRevision {
+		snapshot.Status = SoloistIdle
+		snapshot.Track = nil
+		snapshot.PositionKnown = false
+		snapshot.PositionMS = -1
+		snapshot.PositionAgeMS = 0
+		snapshot.VolumeKnown = false
+		snapshot.Volume = 0
+		return snapshot, nil
+	}
+	candidate := s.coverCandidate
+	if candidate == nil || candidate.sessionGeneration != session.generation || candidate.trackRevision != s.trackRevision || !s.trackKnown {
+		return snapshot, nil
+	}
+	copy := *candidate
+	return snapshot, &copy
 }
 
 // artworkCandidate returns private upstream artwork only to an internal caller
@@ -406,10 +493,15 @@ func (s *SoloistState) matchesSession(session SoloistSession) bool {
 }
 
 func (s *SoloistState) resetSessionState() {
+	if s.commandWait != nil {
+		s.finishCommandWait(s.commandWait, ErrSoloistDisconnected)
+	}
 	s.authenticationKnown = false
 	s.authenticated = false
 	s.activityKnown = false
 	s.active = false
+	s.volumeKnown = false
+	s.volume = 0
 	s.status = SoloistIdle
 	s.track = nil
 	s.trackIdentity = [32]byte{}
@@ -419,6 +511,206 @@ func (s *SoloistState) resetSessionState() {
 	s.clearPosition()
 	s.positionTimestampMS = 0
 	s.commandResults = 0
+	s.authRevision = 0
+	s.playbackRevision = 0
+	s.errorRevision = 0
+}
+
+func (s *SoloistState) resetAuthenticatedPlaybackState(waiterReason error) {
+	s.activityKnown = false
+	s.active = false
+	s.volumeKnown = false
+	s.volume = 0
+	s.status = SoloistIdle
+	s.clearTrack(true)
+	s.positionTimestampMS = 0
+	if s.commandWait != nil {
+		s.finishCommandWait(s.commandWait, waiterReason)
+	}
+}
+
+func nextSoloistRevision(revision uint64) uint64 {
+	revision++
+	if revision == 0 {
+		return 1
+	}
+	return revision
+}
+
+func (s *SoloistState) signalChanged() {
+	if s.changed != nil {
+		close(s.changed)
+	}
+	s.changed = make(chan struct{})
+}
+
+func (s *SoloistState) waitUntilAuthenticated(ctx context.Context, session SoloistSession) error {
+	if s == nil || ctx == nil {
+		return ErrSoloistDisconnected
+	}
+	for {
+		s.mu.Lock()
+		if !s.matchesSession(session) {
+			s.mu.Unlock()
+			return ErrSoloistStaleSession
+		}
+		if !s.connected {
+			s.mu.Unlock()
+			return ErrSoloistDisconnected
+		}
+		if s.authenticationKnown && s.authenticated {
+			s.mu.Unlock()
+			return nil
+		}
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (s *SoloistState) queryRevisions(session SoloistSession) (auth, playback, eventError uint64, err error) {
+	if s == nil {
+		return 0, 0, 0, ErrSoloistStaleSession
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.matchesSession(session) {
+		return 0, 0, 0, ErrSoloistStaleSession
+	}
+	if !s.connected {
+		return 0, 0, 0, ErrSoloistDisconnected
+	}
+	if !s.authenticationKnown || !s.authenticated {
+		return 0, 0, 0, ErrSoloistUnauthenticated
+	}
+	return s.authRevision, s.playbackRevision, s.errorRevision, nil
+}
+
+func (s *SoloistState) waitForPlaybackStateAfter(ctx context.Context, session SoloistSession, authRevision, playbackRevision, errorRevision uint64) error {
+	if s == nil || ctx == nil {
+		return ErrSoloistDisconnected
+	}
+	for {
+		s.mu.Lock()
+		if !s.matchesSession(session) {
+			s.mu.Unlock()
+			return ErrSoloistStaleSession
+		}
+		if !s.connected {
+			s.mu.Unlock()
+			return ErrSoloistDisconnected
+		}
+		if s.authRevision != authRevision || !s.authenticationKnown || !s.authenticated {
+			s.mu.Unlock()
+			return ErrSoloistUnauthenticated
+		}
+		if s.errorRevision != errorRevision {
+			s.mu.Unlock()
+			return ErrSoloistCommandRejected
+		}
+		if s.playbackRevision != playbackRevision {
+			s.mu.Unlock()
+			return nil
+		}
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+func (s *SoloistState) waitForAuthRevisionChange(ctx context.Context, session SoloistSession, authRevision uint64) error {
+	if s == nil || ctx == nil {
+		return ErrSoloistDisconnected
+	}
+	for {
+		s.mu.Lock()
+		if !s.matchesSession(session) {
+			s.mu.Unlock()
+			return ErrSoloistStaleSession
+		}
+		if !s.connected {
+			s.mu.Unlock()
+			return ErrSoloistDisconnected
+		}
+		if s.authRevision != authRevision {
+			s.mu.Unlock()
+			return ErrSoloistUnauthenticated
+		}
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
+type soloistCommandAckWait struct {
+	session SoloistSession
+	command string
+	result  chan error
+}
+
+func (s *SoloistState) beginCommandAckWait(session SoloistSession, command string, expectedAuthRevision ...uint64) (*soloistCommandAckWait, error) {
+	if s == nil {
+		return nil, ErrSoloistStaleSession
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.matchesSession(session) {
+		return nil, ErrSoloistStaleSession
+	}
+	if !s.connected {
+		return nil, ErrSoloistDisconnected
+	}
+	if !s.authenticationKnown || !s.authenticated {
+		return nil, ErrSoloistUnauthenticated
+	}
+	if len(expectedAuthRevision) > 0 && expectedAuthRevision[0] != 0 && s.authRevision != expectedAuthRevision[0] {
+		return nil, ErrSoloistUnauthenticated
+	}
+	if !soloistControllerCommand(command) {
+		return nil, ErrSoloistInvalidCommand
+	}
+	if s.commandWait != nil {
+		return nil, ErrSoloistCommandPending
+	}
+	wait := &soloistCommandAckWait{session: session, command: command, result: make(chan error, 1)}
+	s.commandWait = wait
+	return wait, nil
+}
+
+func (s *SoloistState) cancelCommandAckWait(wait *soloistCommandAckWait, reason error) {
+	if s == nil || wait == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.commandWait == wait {
+		s.finishCommandWait(wait, reason)
+	}
+}
+
+// finishCommandWait is called with s.mu held and completes at most one pending
+// result channel. The bounded buffer prevents the reducer from blocking.
+func (s *SoloistState) finishCommandWait(wait *soloistCommandAckWait, reason error) {
+	if wait == nil {
+		return
+	}
+	if s.commandWait == wait {
+		s.commandWait = nil
+	}
+	wait.result <- reason
+	close(wait.result)
 }
 
 func (s *SoloistState) clearPosition() {
@@ -473,14 +765,14 @@ func (s *SoloistState) updateTrackForced(track *soloistParsedTrack) {
 func (s *SoloistState) mergeTrackMetadata(track *soloistParsedTrack, replace bool) {
 	metadata := SoloistMetadata{}
 	if !replace && s.track != nil {
-		metadata = *s.track
-		metadata.Explicit = cloneSoloistBool(s.track.Explicit)
+		metadata = cloneSoloistMetadata(*s.track)
 	}
 	if replace || track.hasTitle {
 		metadata.Title = track.metadata.Title
 	}
 	if replace || track.hasArtist {
 		metadata.Artist = track.metadata.Artist
+		metadata.Artists = append([]string(nil), track.metadata.Artists...)
 	}
 	if replace || track.hasAlbum {
 		metadata.Album = track.metadata.Album
@@ -576,6 +868,9 @@ type soloistParsedEvent struct {
 	loggedIn    bool
 	isActive    bool
 	hasActivity bool
+	hasVolume   bool
+	volume      *int
+	command     string
 	status      SoloistPlaybackStatus
 	track       *soloistParsedTrack
 	position    *soloistParsedPosition
@@ -640,6 +935,17 @@ type soloistPositionFrame struct {
 type soloistCommandResultFrame struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
+}
+
+type soloistDeviceChangedFrame struct {
+	Type       string  `json:"type"`
+	IsActive   *bool   `json:"is_active"`
+	DeviceName *string `json:"device_name"`
+}
+
+type soloistVolumeChangedFrame struct {
+	Type   string `json:"type"`
+	Volume *int   `json:"volume"`
 }
 
 type soloistPositionWire struct {
@@ -729,6 +1035,14 @@ func parseSoloistEvent(frame []byte) (soloistParsedEvent, error) {
 			event.hasActivity = true
 			event.isActive = active
 		}
+		if len(wire.Volume) > 0 {
+			volume, err := parseSoloistVolume(wire.Volume)
+			if err != nil {
+				return soloistParsedEvent{}, ErrSoloistMalformedEvent
+			}
+			event.hasVolume = true
+			event.volume = volume
+		}
 	case "track_changed":
 		var wire soloistTrackChangedFrame
 		if decodeSoloistStrict(frame, &wire) != nil || len(wire.Item) == 0 || isSoloistNull(wire.Item) {
@@ -745,6 +1059,19 @@ func parseSoloistEvent(frame []byte) (soloistParsedEvent, error) {
 			return soloistParsedEvent{}, ErrSoloistMalformedEvent
 		}
 		event.status = SoloistPlaybackStatus(wire.Status)
+	case "device_changed":
+		var wire soloistDeviceChangedFrame
+		if decodeSoloistStrict(frame, &wire) != nil || wire.IsActive == nil || (wire.DeviceName != nil && !validSoloistLabel(*wire.DeviceName, 128)) {
+			return soloistParsedEvent{}, ErrSoloistMalformedEvent
+		}
+		event.hasActivity = true
+		event.isActive = *wire.IsActive
+	case "volume_changed":
+		var wire soloistVolumeChangedFrame
+		if decodeSoloistStrict(frame, &wire) != nil || wire.Volume == nil || *wire.Volume < 0 || *wire.Volume > 100 {
+			return soloistParsedEvent{}, ErrSoloistMalformedEvent
+		}
+		event.volume = wire.Volume
 	case "position_sync":
 		var wire soloistPositionFrame
 		if decodeSoloistStrict(frame, &wire) != nil {
@@ -760,10 +1087,25 @@ func parseSoloistEvent(frame []byte) (soloistParsedEvent, error) {
 		if decodeSoloistStrict(frame, &wire) != nil || !knownSoloistCommand(wire.Command) {
 			return soloistParsedEvent{}, ErrSoloistMalformedEvent
 		}
+		event.command = wire.Command
+	case "error":
+		// Soloist's error event may contain a private message. Parsing already
+		// bounded and duplicate-key checked the frame; the reducer retains none.
 	default:
 		return soloistParsedEvent{}, ErrSoloistUnsupported
 	}
 	return event, nil
+}
+
+func parseSoloistVolume(raw json.RawMessage) (*int, error) {
+	if len(raw) == 0 || isSoloistNull(raw) {
+		return nil, nil
+	}
+	var volume int
+	if json.Unmarshal(raw, &volume) != nil || volume < 0 || volume > 100 {
+		return nil, ErrSoloistMalformedEvent
+	}
+	return &volume, nil
 }
 
 func parseSoloistPosition(raw json.RawMessage) (*soloistParsedPosition, error) {
@@ -846,6 +1188,7 @@ func parseSoloistTrack(raw json.RawMessage) (*soloistParsedTrack, error) {
 		if len(metadata.Artist) > maxSoloistArtistBytes {
 			return nil, ErrSoloistMalformedEvent
 		}
+		metadata.Artists = append([]string(nil), names...)
 		parsed.hasArtist = true
 	}
 	if len(decorations.Parent) > 0 {
@@ -1055,6 +1398,12 @@ func cloneSoloistBool(value *bool) *bool {
 	return &copy
 }
 
+func cloneSoloistMetadata(value SoloistMetadata) SoloistMetadata {
+	value.Artists = append([]string(nil), value.Artists...)
+	value.Explicit = cloneSoloistBool(value.Explicit)
+	return value
+}
+
 func soloistTrackIdentity(uri string, metadata SoloistMetadata) [32]byte {
 	if uri != "" {
 		return sha256.Sum256([]byte("uri\x00" + uri))
@@ -1102,6 +1451,33 @@ func validSoloistURI(value string) bool {
 	}
 	for _, character := range value {
 		if unicode.IsControl(character) || unicode.IsSpace(character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSoloistPlaybackURI(value string) bool {
+	if value == "" || len(value) > maxSoloistURIBytes || !validSoloistText(value) {
+		return false
+	}
+	if !strings.HasPrefix(value, "spotify:") {
+		return false
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 || parts[0] != "spotify" || parts[1] == "" || parts[2] == "" {
+		return false
+	}
+	switch parts[1] {
+	case "track", "album", "playlist", "episode":
+	default:
+		return false
+	}
+	for _, character := range parts[2] {
+		if unicode.IsControl(character) || unicode.IsSpace(character) || character == '/' || character == '?' || character == '#' || character == ':' {
+			return false
+		}
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
 			return false
 		}
 	}
@@ -1220,6 +1596,15 @@ func knownSoloistCommand(command string) bool {
 	}
 }
 
+func soloistControllerCommand(command string) bool {
+	switch command {
+	case "play", "pause", "skip_next", "skip_prev", "seek", "set_volume":
+		return true
+	default:
+		return false
+	}
+}
+
 func stringInt64(value int64) string {
 	return strconv.FormatInt(value, 10)
 }
@@ -1245,36 +1630,50 @@ func NewSoloistController(state *SoloistState, session SoloistSession, transport
 }
 
 func (c *SoloistController) Play(ctx context.Context) error {
-	return c.send(ctx, "play", nil, nil)
+	return c.PlayURI(ctx, "")
+}
+
+// PlayURI emits the official Soloist play command with an optional Spotify URI.
+// The URI is advisory and does not establish playback success; Soloist's ACK
+// only confirms the command was accepted, not that the track is actively playing.
+func (c *SoloistController) PlayURI(ctx context.Context, uri string) error {
+	if uri != "" && !validSoloistPlaybackURI(uri) {
+		return ErrSoloistInvalidCommand
+	}
+	var spotifyURI *string
+	if uri != "" {
+		spotifyURI = &uri
+	}
+	return c.send(ctx, "play", nil, nil, spotifyURI)
 }
 
 func (c *SoloistController) Pause(ctx context.Context) error {
-	return c.send(ctx, "pause", nil, nil)
+	return c.send(ctx, "pause", nil, nil, nil)
 }
 
 func (c *SoloistController) SkipNext(ctx context.Context) error {
-	return c.send(ctx, "skip_next", nil, nil)
+	return c.send(ctx, "skip_next", nil, nil, nil)
 }
 
 func (c *SoloistController) SkipPrevious(ctx context.Context) error {
-	return c.send(ctx, "skip_prev", nil, nil)
+	return c.send(ctx, "skip_prev", nil, nil, nil)
 }
 
 func (c *SoloistController) Seek(ctx context.Context, positionMS int64) error {
 	if positionMS < 0 || positionMS > maxSoloistPositionMS {
 		return ErrSoloistInvalidCommand
 	}
-	return c.send(ctx, "seek", &positionMS, nil)
+	return c.send(ctx, "seek", &positionMS, nil, nil)
 }
 
 func (c *SoloistController) SetVolume(ctx context.Context, volume int) error {
 	if volume < 0 || volume > 100 {
 		return ErrSoloistInvalidCommand
 	}
-	return c.send(ctx, "set_volume", nil, &volume)
+	return c.send(ctx, "set_volume", nil, &volume, nil)
 }
 
-func (c *SoloistController) send(ctx context.Context, command string, positionMS *int64, volume *int) error {
+func (c *SoloistController) send(ctx context.Context, command string, positionMS *int64, volume *int, uri *string) error {
 	if c == nil || c.state == nil || c.transport == nil || ctx == nil {
 		return ErrSoloistControlUnavailable
 	}
@@ -1285,11 +1684,12 @@ func (c *SoloistController) send(ctx context.Context, command string, positionMS
 		return err
 	}
 	frame, err := json.Marshal(struct {
-		Type       string `json:"type"`
-		Command    string `json:"command"`
-		PositionMS *int64 `json:"position_ms,omitempty"`
-		Volume     *int   `json:"volume,omitempty"`
-	}{Type: "command", Command: command, PositionMS: positionMS, Volume: volume})
+		Type       string  `json:"type"`
+		Command    string  `json:"command"`
+		PositionMS *int64  `json:"position_ms,omitempty"`
+		Volume     *int    `json:"volume,omitempty"`
+		URI        *string `json:"uri,omitempty"`
+	}{Type: "command", Command: command, PositionMS: positionMS, Volume: volume, URI: uri})
 	if err != nil {
 		return ErrSoloistInvalidCommand
 	}

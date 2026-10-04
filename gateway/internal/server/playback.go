@@ -130,7 +130,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 	if youtubeDiagnostic != nil {
 		youtubeDiagnostic.resolver("passed")
 	}
-	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE") && ((resolved.Path != "" && s.deps.Media == nil) || (resolved.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(resolved)))) {
+	if (req.Mode == "REMUX" || req.Mode == "TRANSCODE" || req.Mode == "RAW_PCM") && ((resolved.Path != "" && s.deps.Media == nil) || (resolved.Path == "" && (s.deps.RemoteMedia == nil || !media.RemoteCandidate(resolved)))) {
 		if youtubeDiagnostic != nil {
 			youtubeDiagnostic.terminal("planning", "conversion_unavailable")
 		}
@@ -413,7 +413,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 		rangeTrace:        &mediaTraceCounters{},
 	}
 	clientMode := mode
-	if mode == "PCM_STREAM" {
+	if mode == "PCM_STREAM" || mode == "RAW_PCM" {
 		clientMode = "TRANSCODE"
 	}
 	plan := domain.Plan{SubtitleID: decision.subtitleID, Version: 1, SessionID: id, Mode: clientMode, URL: "/v1/streams/" + id + "?ticket=" + ticket, MIME: resolved.MIME, Live: resolved.Live, Seekable: !resolved.Live, ResumeMS: resume, Item: resolved.Item}
@@ -438,7 +438,7 @@ func (s *Server) playback(w http.ResponseWriter, r *http.Request, d domain.Devic
 			sess.selection.PositionMS = resume
 		}
 	}
-	if mode == "PCM_STREAM" {
+	if mode == "PCM_STREAM" || mode == "RAW_PCM" {
 		plan.MIME = media.PCMStreamMIME
 		plan.Seekable = false
 		plan.ResumeMS = 0
@@ -824,7 +824,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(writer, r, "hybrid.mp4", spoolModTime, f)
 		return
 	}
-	if sess.mode == "REMUX" || sess.mode == "TRANSCODE" || sess.mode == "PCM_STREAM" {
+	if sess.mode == "REMUX" || sess.mode == "TRANSCODE" || sess.mode == "PCM_STREAM" || sess.mode == "RAW_PCM" {
 		if r.Header.Get("Range") != "" && r.Header.Get("Range") != "bytes=0-" {
 			fail(w, 416, "conversion_not_seekable")
 			return
@@ -840,7 +840,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		if media.LiveAACRemux(src, sess.metadata, sess.mode) {
 			mime = "audio/aac"
 		}
-		if sess.mode == "PCM_STREAM" {
+		if sess.mode == "PCM_STREAM" || sess.mode == "RAW_PCM" {
 			mime = media.PCMStreamMIME
 		}
 		w.Header().Set("Content-Type", mime)

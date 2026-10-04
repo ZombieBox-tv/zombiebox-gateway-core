@@ -70,8 +70,15 @@ func (t *RemoteTools) ConvertRemote(ctx context.Context, source domain.Source, m
 		return errors.New("live input is not seekable")
 	}
 	pcmStream := mode == "PCM_STREAM"
+	rawPCM := mode == "RAW_PCM"
+	if rawPCM && (!source.RawPCM || source.Item.Provider != "spotify" || source.PCMFormat != "s16le") {
+		return errors.New("raw PCM relay requires typed Spotify source")
+	}
 	if pcmStream && (!source.Live || (ManifestKind(source) != "hls" && !IsLiveMP3Source(source))) {
 		return errors.New("PCM stream requires supported live audio")
+	}
+	if rawPCM {
+		return t.rawPCMRelay(ctx, source, output)
 	}
 	bridge, err := t.bridge(ctx, source)
 	if err != nil {
@@ -223,6 +230,38 @@ func copyUpstreamBody(destination io.Writer, source io.Reader) error {
 	return body.readError
 }
 
+func (t *RemoteTools) rawPCMRelay(ctx context.Context, source domain.Source, output io.Writer) error {
+	if source.URL == "" {
+		return errors.New("raw PCM relay requires a source URL")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.URL, nil)
+	if err != nil {
+		return err
+	}
+	if source.Headers != nil {
+		request.Header = source.Headers.Clone()
+	}
+	request.Header.Set("Accept-Encoding", "identity")
+	session := make([]byte, 16)
+	if _, err := rand.Read(session); err != nil {
+		return err
+	}
+	request.Header.Set("X-Zombie-Session", hex.EncodeToString(session))
+	response, err := t.http.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != PCMStreamMIME {
+		return errors.New("raw PCM relay did not produce declared-format audio")
+	}
+	_, err = io.Copy(output, response.Body)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return err
+}
+
 func (t *RemoteTools) bridge(ctx context.Context, source domain.Source) (inputBridge, error) {
 	if !RemoteCandidate(source) {
 		return inputBridge{}, errors.New("remote input unsupported")
@@ -360,6 +399,18 @@ func RemoteCandidate(source domain.Source) bool {
 	kind := ManifestKind(source)
 	if kind != "" && source.AudioURL != "" {
 		return false
+	}
+	if source.RawPCM && source.Item.Provider == "spotify" && source.PCMFormat == "s16le" {
+		for _, raw := range []string{source.URL, source.AudioURL} {
+			if raw == "" {
+				continue
+			}
+			parsed, err := url.Parse(raw)
+			if err != nil || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return false
+			}
+		}
+		return source.URL != ""
 	}
 	if source.Live && kind == "" {
 		mime := strings.ToLower(strings.TrimSpace(strings.SplitN(source.MIME, ";", 2)[0]))

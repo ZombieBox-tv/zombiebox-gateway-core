@@ -18,6 +18,7 @@ const (
 	soloistWSDialTimeout   = 3 * time.Second
 	soloistWSWriteTimeout  = 2 * time.Second
 	maxSoloistCommandBytes = 1024
+	maxSoloistQueryBytes   = 128
 )
 
 var (
@@ -176,6 +177,19 @@ func (w *SoloistWebSocket) Close() error {
 // lock remains held through the bounded write, so BeginSession cannot overtake
 // validation and then allow an old command onto the new session.
 func (w *SoloistWebSocket) SendCommand(ctx context.Context, session SoloistSession, frame []byte) error {
+	return w.sendCommand(ctx, session, frame, 0)
+}
+
+// sendCommandForAuthRevision binds one control transport to an authenticated
+// epoch. The revision check happens under state.mu immediately before writing.
+func (w *SoloistWebSocket) sendCommandForAuthRevision(ctx context.Context, session SoloistSession, frame []byte, authRevision uint64) error {
+	if authRevision == 0 {
+		return ErrSoloistUnauthenticated
+	}
+	return w.sendCommand(ctx, session, frame, authRevision)
+}
+
+func (w *SoloistWebSocket) sendCommand(ctx context.Context, session SoloistSession, frame []byte, expectedAuthRevision uint64) error {
 	if w == nil || w.state == nil || w.conn == nil || ctx == nil {
 		return ErrSoloistWSUnavailable
 	}
@@ -208,7 +222,51 @@ func (w *SoloistWebSocket) SendCommand(ctx context.Context, session SoloistSessi
 	if err := validateSoloistCommandState(frame, w.state); err != nil {
 		return err
 	}
+	if expectedAuthRevision != 0 && w.state.authRevision != expectedAuthRevision {
+		return ErrSoloistUnauthenticated
+	}
+	return w.writeFrameLocked(ctx, frame)
+}
 
+// RequestPlaybackState sends the single fixed get_state query. Queries are a
+// separate protocol operation and never participate in command acknowledgments.
+func (w *SoloistWebSocket) RequestPlaybackState(ctx context.Context, session SoloistSession) error {
+	if w == nil || w.state == nil || w.conn == nil || ctx == nil {
+		return ErrSoloistWSUnavailable
+	}
+	if ctx.Err() != nil {
+		return soloistWSContextError(ctx)
+	}
+	frame := []byte(`{"type":"command","command":"get_state"}`)
+	if len(frame) > maxSoloistQueryBytes || !validSoloistQueryFrame(frame) {
+		return ErrSoloistWSInvalidCommand
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return ErrSoloistWSClosed
+	}
+	w.state.mu.Lock()
+	defer w.state.mu.Unlock()
+	if ctx.Err() != nil {
+		return soloistWSContextError(ctx)
+	}
+	if session != w.session || !w.state.matchesSession(session) {
+		return ErrSoloistStaleSession
+	}
+	if !w.state.connected {
+		return ErrSoloistDisconnected
+	}
+	if !w.state.authenticationKnown || !w.state.authenticated {
+		return ErrSoloistUnauthenticated
+	}
+	return w.writeFrameLocked(ctx, frame)
+}
+
+// writeFrameLocked requires w.mu and state.mu. Keeping the deadline watcher in
+// one path bounds both allowlisted queries and controls.
+func (w *SoloistWebSocket) writeFrameLocked(ctx context.Context, frame []byte) error {
 	deadline := time.Now().Add(soloistWSWriteTimeout)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
@@ -300,12 +358,14 @@ func (w *SoloistWebSocket) finish(reason error) {
 		w.mu.Lock()
 		w.closed = true
 		w.err = reason
-		_ = w.conn.SetWriteDeadline(time.Now().Add(soloistWSWriteTimeout))
-		_ = w.conn.Close()
 		w.mu.Unlock()
 
 		w.cancel()
 		_ = w.state.EndSession(w.session)
+		w.mu.Lock()
+		_ = w.conn.SetWriteDeadline(time.Now().Add(soloistWSWriteTimeout))
+		_ = w.conn.Close()
+		w.mu.Unlock()
 		close(w.done)
 	})
 }
@@ -351,29 +411,39 @@ func validSoloistCommandFrame(frame []byte) bool {
 	}
 	_, hasPosition := fields["position_ms"]
 	_, hasVolume := fields["volume"]
+	_, hasURI := fields["uri"]
 	for key := range fields {
 		switch key {
-		case "type", "command", "position_ms", "volume":
+		case "type", "command", "position_ms", "volume", "uri":
 		default:
 			return false
 		}
 	}
 	var command struct {
-		Type       string `json:"type"`
-		Command    string `json:"command"`
-		PositionMS *int64 `json:"position_ms"`
-		Volume     *int   `json:"volume"`
+		Type       string  `json:"type"`
+		Command    string  `json:"command"`
+		PositionMS *int64  `json:"position_ms"`
+		Volume     *int    `json:"volume"`
+		URI        *string `json:"uri"`
 	}
 	if json.Unmarshal(frame, &command) != nil || command.Type != "command" {
 		return false
 	}
 	switch command.Command {
-	case "play", "pause", "skip_next", "skip_prev":
-		return !hasPosition && !hasVolume
+	case "play":
+		if hasPosition || hasVolume {
+			return false
+		}
+		if hasURI {
+			return command.URI != nil && validSoloistPlaybackURI(*command.URI)
+		}
+		return true
+	case "pause", "skip_next", "skip_prev":
+		return !hasPosition && !hasVolume && !hasURI
 	case "seek":
-		return hasPosition && command.PositionMS != nil && !hasVolume && *command.PositionMS >= 0 && *command.PositionMS <= maxSoloistPositionMS
+		return hasPosition && command.PositionMS != nil && !hasVolume && !hasURI && *command.PositionMS >= 0 && *command.PositionMS <= maxSoloistPositionMS
 	case "set_volume":
-		return hasVolume && command.Volume != nil && !hasPosition && *command.Volume >= 0 && *command.Volume <= 100
+		return hasVolume && command.Volume != nil && !hasPosition && !hasURI && *command.Volume >= 0 && *command.Volume <= 100
 	default:
 		return false
 	}
@@ -391,6 +461,26 @@ func validateSoloistCommandState(frame []byte, state *SoloistState) error {
 		return ErrSoloistInvalidCommand
 	}
 	return nil
+}
+
+func validSoloistQueryFrame(frame []byte) bool {
+	if len(frame) == 0 || len(frame) > maxSoloistQueryBytes || !json.Valid(frame) || !soloistJSONHasUniqueKeys(frame) {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(frame, &fields) != nil || fields == nil || len(fields) != 2 {
+		return false
+	}
+	for key := range fields {
+		if key != "type" && key != "command" {
+			return false
+		}
+	}
+	var query struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+	}
+	return json.Unmarshal(frame, &query) == nil && query.Type == "command" && query.Command == "get_state"
 }
 
 var _ SoloistCommandTransport = (*SoloistWebSocket)(nil)

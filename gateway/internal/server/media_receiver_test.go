@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -573,6 +575,128 @@ func TestAirPlayReceiverUsesProbedPCMWhenCompressedLiveRoutesAreUnknown(t *testi
 	if stream.Code != 200 || stream.Header().Get("Content-Type") != media.PCMStreamMIME || stream.Body.Len() != 4 {
 		t.Fatalf("wrong PCM stream: %d, %q, %d", stream.Code, stream.Header().Get("Content-Type"), stream.Body.Len())
 	}
+}
+
+type staticReception struct {
+	source *domain.Source
+	state  domain.NowPlaying
+}
+
+func (r staticReception) Reception(_ context.Context, _ string, _ domain.Config) (*domain.Source, domain.NowPlaying, error) {
+	if r.source == nil {
+		return nil, r.state, nil
+	}
+	src := *r.source
+	state := r.state
+	if state.Item == nil {
+		item := src.Item
+		state.Item = &item
+	}
+	return &src, state, nil
+}
+
+func TestSpotifyReceiverRequiresFreshPCMCapabilityAndStreamsExactBytes(t *testing.T) {
+	makeTone := func(samples int) []byte {
+		buf := make([]byte, 2*samples)
+		for i := range samples {
+			value := int16(math.Sin(float64(i)/8.0) * 30000)
+			buf[2*i] = byte(value)
+			buf[2*i+1] = byte(value >> 8)
+		}
+		return buf
+	}
+	fixture := makeTone(16)
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/soloist/pcm" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", media.PCMStreamMIME)
+		_, _ = w.Write(fixture)
+	}))
+	defer capture.Close()
+
+	pcmSource := &domain.Source{
+		Item: domain.Item{
+			ID:       "spotify-raw-pcm",
+			Provider: "spotify",
+			Kind:     "audio",
+			Title:    "Spotify Raw PCM",
+			Subtitle: "Artist",
+			Playable: true,
+		},
+		URL:       capture.URL + "/soloist/pcm",
+		MIME:      media.PCMStreamMIME,
+		Live:      true,
+		RawPCM:    true,
+		PCMFormat: "s16le",
+	}
+
+	s := testServer(t, nil, t.TempDir())
+	if err := s.SeedProviders(t.Context(), map[string]providers.Config{"spotify": {Enabled: true, URL: "https://spotify.example.invalid", Token: strings.Repeat("s", 32)}}); err != nil {
+		t.Fatal(err)
+	}
+	broken := pair(t, s, "spotify-raw-pcm-reject")
+	ok := pair(t, s, "spotify-raw-pcm-accept")
+	tools := media.NewWithRunner("ffmpeg", "ffprobe", failIfCalledRunner{})
+
+	for _, tc := range []struct {
+		name      string
+		deviceID  string
+		token     string
+		probe     domain.Probe
+		wantCode  int
+		wantMode  string
+		wantType  string
+		wantBytes []byte
+	}{
+		{name: "rejects without fresh evidence", deviceID: "spotify-raw-pcm-reject", token: broken, probe: domain.Probe{ID: "audio-track-pcm-stream", Status: "UNKNOWN", TestedAt: time.Now().Unix()}, wantCode: http.StatusBadGateway},
+		{name: "accepts with fresh evidence", deviceID: "spotify-raw-pcm-accept", token: ok, probe: domain.Probe{ID: "audio-track-pcm-stream", Status: "PASS", PositionMS: 700, TestedAt: time.Now().Unix()}, wantCode: http.StatusOK, wantMode: "TRANSCODE", wantType: media.PCMStreamMIME, wantBytes: fixture},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dev domain.Device
+			if err := s.db.Get(t.Context(), "devices", tc.deviceID, &dev); err != nil {
+				t.Fatal(err)
+			}
+			dev.Capabilities = domain.Capabilities{SuiteVersion: 2, CacheKey: devices.ProbeCacheKey(dev), Probes: []domain.Probe{tc.probe}}
+			if err := s.db.Put(t.Context(), "devices", dev.ID, dev); err != nil {
+				t.Fatal(err)
+			}
+			s.deps.Reception = staticReception{source: pcmSource, state: domain.NowPlaying{Provider: "spotify", State: "PLAYING", Item: &pcmSource.Item}}
+			s.deps.RemoteMedia = media.NewRemote(tools, capture.Client())
+			if w := call(s, "PUT", "/v1/media-receiver", `{"provider":"spotify"}`, tc.deviceID, tc.token, ""); w.Code != http.StatusOK {
+				t.Fatalf("PUT failed for %s: %d %s", tc.name, w.Code, w.Body)
+			}
+			t.Cleanup(func() {
+				if w := call(s, "DELETE", "/v1/media-receiver", "", tc.deviceID, tc.token, ""); w.Code != http.StatusOK && w.Code != http.StatusNoContent {
+					t.Logf("cleanup DELETE for %s failed: %d %s", tc.name, w.Code, w.Body)
+				}
+			})
+			resp := call(s, "GET", "/v1/media-receiver", "", tc.deviceID, tc.token, "")
+			if resp.Code != tc.wantCode {
+				t.Fatalf("GET failed for %s: %d %s", tc.name, resp.Code, resp.Body)
+			}
+			if tc.wantCode == http.StatusOK {
+				var snap inbox.Snapshot
+				if err := json.Unmarshal(resp.Body.Bytes(), &snap); err != nil || snap.Plan == nil {
+					t.Fatalf("missing plan: %s %v", resp.Body, err)
+				}
+				if snap.Plan.Mode != tc.wantMode || snap.Plan.MIME != tc.wantType {
+					t.Fatalf("wrong plan mode/type: %+v", snap.Plan)
+				}
+				stream := call(s, "GET", snap.Plan.URL, "", "", "", "")
+				if stream.Code != http.StatusOK || stream.Header().Get("Content-Type") != tc.wantType || !bytes.Equal(stream.Body.Bytes(), tc.wantBytes) {
+					t.Fatalf("wrong stream bytes: %d %q %v", stream.Code, stream.Header().Get("Content-Type"), stream.Body.Bytes())
+				}
+			}
+		})
+	}
+}
+
+type failIfCalledRunner struct{}
+
+func (failIfCalledRunner) Run(context.Context, string, []string, io.Writer) error {
+	return errors.New("ffmpeg should not be called for raw PCM relay")
 }
 
 func TestAirPlayReceiverFreshHLSPASSDirect(t *testing.T) {

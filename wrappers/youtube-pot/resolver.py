@@ -16,12 +16,12 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from cooldown import CooldownTracker
 from formats import FormatSelector
-from quality_tiers import nominal_tier_for_dimensions, nominal_tier_for_height
 from media_ranges import (
     _NO_REDIRECT_OPENER,
     RANGE_SAMPLE_BYTES,
     SAMPLE_TIMEOUT_SECONDS,
 )
+from quality_tiers import nominal_tier_for_dimensions, nominal_tier_for_height
 
 YOUTUBE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 DEFAULT_EXTRACTION_TIMEOUT_SECONDS = 12
@@ -388,7 +388,9 @@ def resolve_video(
                 # Report resolution only from numeric metadata. A quality label alone
                 # is not proof of the actual selected rendition.
                 resolved["actualHeight"] = height
-                width = next(iter(matching_widths)) if len(matching_widths) == 1 else None
+                width = (
+                    next(iter(matching_widths)) if len(matching_widths) == 1 else None
+                )
                 if type(width) is int and width > 0:
                     actual_quality = nominal_tier_for_dimensions(width, height)
                 else:
