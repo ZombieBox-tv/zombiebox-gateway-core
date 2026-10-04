@@ -239,7 +239,16 @@ func (s *Server) moduleList(ctx context.Context) []domain.Module {
 	return out
 }
 func (s *Server) modules(w http.ResponseWriter, r *http.Request, d domain.Device) {
-	respond(w, 200, map[string]any{"apiVersion": 1, "modules": s.moduleList(r.Context())})
+	validation := unavailablePlaybackValidation("device_context_unavailable")
+	var current domain.Device
+	if err := s.db.Get(r.Context(), "devices", d.ID, &current); err == nil {
+		validation = playbackValidationFor(current, time.Now(), s.availablePlaybackProbeIDs(current))
+	}
+	respond(w, 200, map[string]any{
+		"apiVersion":         1,
+		"modules":            s.moduleList(r.Context()),
+		"playbackValidation": validation,
+	})
 }
 func (s *Server) home(w http.ResponseWriter, r *http.Request, d domain.Device) {
 	scope := r.URL.Query().Get("provider")
