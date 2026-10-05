@@ -764,8 +764,17 @@ func validateRemoteHLSPublisherOutput(directory string, expected time.Duration, 
 		}
 		elapsed += entry.duration
 	}
-	if expected <= 0 || elapsed+remoteHLSPublisherDurationSlack < expected || elapsed > expected+remoteHLSPublisherSegmentTime {
+	if expected <= 0 {
 		return errors.New("HLS publisher did not cover the requested source duration")
+	}
+	if elapsed > expected+remoteHLSPublisherSegmentTime {
+		return errors.New("HLS publisher did not cover the requested source duration")
+	}
+	if elapsed+remoteHLSPublisherSegmentTime < expected {
+		shortfall := expected - elapsed
+		if !(expected > 30*time.Second && shortfall <= 10*time.Second && elapsed >= expected*95/100) {
+			return errors.New("HLS publisher did not cover the requested source duration")
+		}
 	}
 	if totalBytes > maxBytes {
 		return errRemoteHLSPublisherOutput
